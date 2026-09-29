@@ -1,0 +1,9 @@
+MetaTrader5
+PySide6
+pandas
+numpy
+httpx
+python-dotenv
+PyYAML
+Flask
+

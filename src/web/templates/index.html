@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Focon Assistant — Web</title>
+<link rel="stylesheet" href="../static/style.css">
+</head>
+<body>
+<header>
+  <h1>Focon Assistant — Web</h1>
+  <span id="healthDot">●</span><span id="healthTxt">MT5 : …</span>
+  <span id="autoTxt">Autopilot : OFF</span>
+  <button id="btnScan">SCANNER LES MARCHES</button>
+  <button id="btnStop" class="danger">STOP</button>
+  <button id="btnAuto">AUTOPILOT : OFF</button>
+  <button id="btnPos">Positions</button>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Scan</h2>
+      <div id="scanStatus">En attente…</div>
+      <div id="signals"></div>
+    </section>
+    <section>
+      <h2>Positions ouvertes</h2>
+      <table><thead><tr>
+        <th>Ticket</th><th>Symbole</th><th>Type</th><th>Volume</th>
+        <th>Ouverture</th><th>SL</th><th>TP</th><th>Prix</th><th>Profit</th>
+      </tr></thead><tbody id="posBody"><tr><td colspan="9">—</td></tr></tbody></table>
+    </section>
+    <section>
+      <h2>Config</h2>
+      <div class="row">
+        <label>Risque % <input id="cfgRisk" type="number" step="0.1" min="0.1" max="100" style="width:70px"></label>
+        <label>Perte max % <input id="cfgLoss" type="number" step="0.5" min="0.1" max="100" style="width:70px"></label>
+        <label>Lot max <input id="cfgLot" type="number" step="0.01" min="0.01" style="width:70px"></label>
+        <label>Positions max <input id="cfgPos" type="number" step="1" min="1" max="20" style="width:60px"></label>
+      </div>
+      <div class="row">
+        <label>Mode <select id="cfgMode">
+          <option value="assist">assist</option>
+          <option value="semi-auto">semi-auto</option>
+          <option value="auto">auto</option>
+        </select></label>
+        <label>Timeframe <select id="cfgTf">
+          <option>M5</option><option>M15</option><option>H1</option><option>H4</option>
+        </select></label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Forex"> Forex</label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Crypto"> Crypto</label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Indices"> Indices</label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Metals"> Metals</label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Energies"> Energies</label>
+        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Stocks"> Stocks</label>
+        <button id="btnCfg" class="success">Sauvegarder</button>
+      </div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Assistant</h2>
+      <div id="chatBox"></div>
+      <div id="chatRow">
+        <input id="chatInput" placeholder="Ecris ton message…">
+        <button id="btnChat">Envoyer</button>
+      </div>
+      <div class="assistantTools">
+        <button id="btnVoice" title="Parler au conseiller">Parler</button>
+        <button id="btnAdvisor" title="Demander une proposition de reglages">Conseil reglages</button>
+        <label class="voiceToggle"><input id="voiceReplies" type="checkbox" checked> Reponse vocale</label>
+      </div>
+      <div id="voiceStatus" class="voiceStatus" aria-live="polite"></div>
+      <div id="proposalBox" class="proposalBox" hidden></div>
+    </section>
+    <section>
+      <h2>Compte</h2>
+      <div id="accountBox">—</div>
+    </section>
+  </div>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
+

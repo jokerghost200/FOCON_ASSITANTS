@@ -1,0 +1,82 @@
+# ─── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ─── Virtual Environments ─────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── IDE / Editor ─────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# ─── OS Files ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ─── Logs ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Config secrets (API keys, tokens) ────────────────
+config/secrets.yaml
+config/keys.yaml
+.env
+*.env
+
+# ─── MetaTrader 5 ─────────────────────────────────────
+*.ex5
+*.ex4
+
+# ─── Trade data / memory ──────────────────────────────
+data/trade_memory*.json
+data/weights*.json
+data/*.db
+
+# ─── Audio recordings ────────────────────────────────
+recordings/
+*.wav
+*.mp3
+
+# ─── Byte-compiled / optimized ────────────────────────
+*.pyo
+*.pyd
+
+# ─── Distribution / packaging ────────────────────────
+*.manifest
+*.spec
+
+# ─── Test / Coverage ─────────────────────────────────
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ─── Jupyter ──────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── mypy ─────────────────────────────────────────────
+.mypy_cache/

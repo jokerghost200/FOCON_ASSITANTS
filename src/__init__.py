@@ -1,0 +1,1 @@
+"""Focon Assistant — package applicatif."""
