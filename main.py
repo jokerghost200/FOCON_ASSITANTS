@@ -85,6 +85,7 @@ def main():
         auto_tier_enabled=config['risk_management'].get('auto_tier_enabled', True),
         max_micro_risk_cap_percent=config['risk_management'].get('max_micro_risk_cap_percent', 4.0),
         daily_profit_target_percent=config['risk_management'].get('daily_profit_target_percent', 3.0),
+        fixed_lot_size=config['risk_management'].get('fixed_lot_size', 0.0),
     )
     
     from src.learning import TradeMemoryEngine, ReflectiveCritic, AdaptiveWeightsEngine

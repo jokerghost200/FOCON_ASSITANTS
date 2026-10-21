@@ -2,6 +2,7 @@ import MetaTrader5 as mt5
 import logging
 import threading
 from typing import Optional
+from src.core.state_machine import StateManager, BotState
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -14,6 +15,33 @@ class MT5Connector:
 
     def __init__(self):
         self.connected = False
+        self.state_manager = StateManager()
+
+    def check_connection(self) -> bool:
+        """Ping MT5. If disconnected, try to reconnect automatically."""
+        with MT5Connector._lock:
+            if not self.connected:
+                return self.connect()
+            
+            terminal_info = mt5.terminal_info()
+            if terminal_info is None:
+                logger.warning("[MT5] Connexion au terminal perdue. Tentative de reconnexion...")
+                self.connected = False
+                self.state_manager.set_state(BotState.PAUSED)
+                if self.connect():
+                    self.state_manager.set_state(BotState.READY)
+                    return True
+                return False
+            
+            if not terminal_info.connected:
+                logger.warning("[MT5] Le terminal est deconnecte du broker. Attente de reconnexion...")
+                self.state_manager.set_state(BotState.CONNECTING)
+                # We can't fix broker connection from here usually, just wait.
+                return False
+
+            if self.state_manager.get_state() == BotState.CONNECTING:
+                self.state_manager.set_state(BotState.READY)
+            return True
 
     def connect(self, retries: int = 3, delay: float = 1.5) -> bool:
         """Connects to the MetaTrader 5 terminal with automatic retries on transient errors."""
@@ -462,23 +490,42 @@ class MT5Connector:
         if not self.connected:
             return False
             
-        order_type = mt5.ORDER_TYPE_SELL if pos_type == 'BUY' else mt5.ORDER_TYPE_BUY
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": ticket,
-            "symbol": symbol,
-            "volume": float(volume),
-            "type": order_type,
-            "price": float(price),
-            "deviation": 20,
-            "magic": 123456,
-            "comment": "AI Auto Close",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
+        order_type = mt5.ORDER_TYPE_SELL if str(pos_type).upper() == 'BUY' else mt5.ORDER_TYPE_BUY
+
         with MT5Connector._lock:
+            symbol_info = mt5.symbol_info(symbol)
+            filling_mode = getattr(symbol_info, 'filling_mode', 0) if symbol_info else 0
+            if filling_mode & 1:
+                type_filling = mt5.ORDER_FILLING_FOK
+            elif filling_mode & 2:
+                type_filling = mt5.ORDER_FILLING_IOC
+            else:
+                type_filling = mt5.ORDER_FILLING_RETURN
+
+            # Récupère le dernier prix réel (Bid pour fermer BUY, Ask pour fermer SELL)
+            close_price = float(price)
+            digits = getattr(symbol_info, 'digits', 5) if symbol_info else 5
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is not None:
+                live_p = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
+                if live_p and live_p > 0:
+                    close_price = live_p
+            close_price = round(close_price, digits)
+        
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": ticket,
+                "symbol": symbol,
+                "volume": float(volume),
+                "type": order_type,
+                "price": close_price,
+                "deviation": 20,
+                "magic": 123456,
+                "comment": "AI Auto Close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": type_filling,
+            }
+        
             result = mt5.order_send(request)
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err = mt5.last_error()
@@ -486,7 +533,7 @@ class MT5Connector:
                 logger.error(f"Failed to close position {ticket}. Error: {err}, Comment: {comment}")
                 return False
 
-        logger.info(f"Successfully closed position {ticket} on {symbol}")
+        logger.info(f"Successfully closed position {ticket} on {symbol} @ {close_price}")
         return True
 
     def get_daily_profit(self) -> float:
@@ -521,15 +568,19 @@ class MT5Connector:
         """
         if not self.connected:
             return None
-        import datetime
-        now = datetime.datetime.now()
-        start = now - datetime.timedelta(days=7)
+        ticket = int(ticket)
         try:
             with MT5Connector._lock:
-                deals = mt5.history_deals_get(start, now, position=ticket)
+                deals = mt5.history_deals_get(position=ticket)
+                if not deals:
+                    import datetime
+                    now = datetime.datetime.now()
+                    start = now - datetime.timedelta(days=7)
+                    deals = mt5.history_deals_get(start, now)
             if deals:
                 for d in reversed(deals):
-                    if getattr(d, 'entry', 0) in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
+                    pos_id = getattr(d, 'position_id', getattr(d, 'position', 0))
+                    if int(pos_id) == ticket and getattr(d, 'entry', 0) in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY):
                         return {
                             'deal_ticket': d.ticket,
                             'price': float(d.price),
@@ -540,4 +591,5 @@ class MT5Connector:
         except Exception as _e:
             logger.debug(f"get_deal_for_ticket failed for {ticket}: {_e}")
         return None
+
 

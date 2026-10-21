@@ -75,14 +75,29 @@ def build_state():
         auto_tier_enabled=config["risk_management"].get("auto_tier_enabled", True),
         max_micro_risk_cap_percent=config["risk_management"].get("max_micro_risk_cap_percent", 4.0),
         daily_profit_target_percent=config["risk_management"].get("daily_profit_target_percent", 3.0),
+        fixed_lot_size=config["risk_management"].get("fixed_lot_size", 0.0),
+    )
+
+    from src.learning import TradeMemoryEngine, ReflectiveCritic, AdaptiveWeightsEngine
+
+    weights_engine = AdaptiveWeightsEngine(file_path=str(BASE_DIR / "data" / "adaptive_weights.json"))
+    critic = ReflectiveCritic(ai_router=router)
+    trade_memory = TradeMemoryEngine(
+        file_path=str(BASE_DIR / "data" / "trade_memory.json"),
+        critic=critic,
+        weights_engine=weights_engine,
     )
 
     live_news_enabled = config.get("ai_models", {}).get("live_news_enabled", True)
     order_block_scan_enabled = config.get("trading", {}).get("order_block_scan_enabled", True)
+    allowed_direction = config.get("trading", {}).get("allowed_trade_direction", "BOTH")
     orchestrator = AIOrchestrator(
         mt5, market_data, tech, router, risk,
         live_news_enabled=live_news_enabled,
         order_block_scan_enabled=order_block_scan_enabled,
+        allowed_trade_direction=allowed_direction,
+        trade_memory=trade_memory,
+        weights_engine=weights_engine,
     )
     trade_exec = TradeExecutionEngine(
         mt5,
@@ -91,11 +106,13 @@ def build_state():
         min_reward_risk=config["risk_management"].get("min_reward_risk", 1.5),
         max_positions_per_symbol=config["risk_management"].get("max_positions_per_symbol", 1),
         daily_profit_target_usd=config["risk_management"].get("daily_profit_target_usd", 0.0),
+        allowed_trade_direction=allowed_direction,
+        trade_memory=trade_memory,
     )
     chat = ChatEngine(router)
-    trade_manager = TradeManager(mt5, orchestrator, config=config)
+    trade_manager = TradeManager(mt5, orchestrator, config=config, trade_memory=trade_memory)
 
-    return WebState(orchestrator, trade_exec, chat, config, trade_manager), mt5
+    return WebState(orchestrator, trade_exec, chat, config, trade_manager, trade_memory=trade_memory, weights_engine=weights_engine), mt5
 
 
 def main():

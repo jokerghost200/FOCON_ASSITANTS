@@ -100,7 +100,9 @@ class AdaptiveWeightsEngine:
             "ob": {"wins": 0, "losses": 0, "total": 0},
             "boomerang": {"wins": 0, "losses": 0, "total": 0},
             "trend": {"wins": 0, "losses": 0, "total": 0},
+            "trend_ema": {"wins": 0, "losses": 0, "total": 0},
             "rsi": {"wins": 0, "losses": 0, "total": 0},
+            "amd_expansion": {"wins": 0, "losses": 0, "total": 0},
         }
 
         for t in sample:
@@ -121,11 +123,17 @@ class AdaptiveWeightsEngine:
                 if is_win: stats["boomerang"]["wins"] += 1
                 elif is_loss: stats["boomerang"]["losses"] += 1
 
-            # Trend
+            # Trend HTF
             if snapshot.get("htf_trend") and "NEUTRAL" not in str(snapshot.get("htf_trend")):
                 stats["trend"]["total"] += 1
                 if is_win: stats["trend"]["wins"] += 1
                 elif is_loss: stats["trend"]["losses"] += 1
+
+            # Trend EMA
+            if abs(float(snapshot.get("ema_dist_atr", 0.0) or 0.0)) > 0.0:
+                stats["trend_ema"]["total"] += 1
+                if is_win: stats["trend_ema"]["wins"] += 1
+                elif is_loss: stats["trend_ema"]["losses"] += 1
 
             # RSI Pullback
             rsi = float(snapshot.get("rsi_14", 50.0) or 50.0)
@@ -133,6 +141,14 @@ class AdaptiveWeightsEngine:
                 stats["rsi"]["total"] += 1
                 if is_win: stats["rsi"]["wins"] += 1
                 elif is_loss: stats["rsi"]["losses"] += 1
+
+            # AMD SMC Expansion
+            amd_p = str(snapshot.get("amd_phase", "")).upper()
+            fvg_v = str(snapshot.get("fvg", "None"))
+            if ("EXPANSION" in amd_p or "DISTRIBUTION" in amd_p or "MANIPULATION" in amd_p) and fvg_v != "None":
+                stats["amd_expansion"]["total"] += 1
+                if is_win: stats["amd_expansion"]["wins"] += 1
+                elif is_loss: stats["amd_expansion"]["losses"] += 1
 
         adjustments = {}
         lr = self.learning_rate
@@ -155,7 +171,7 @@ class AdaptiveWeightsEngine:
             self.weights["boomerang_weight"] = round(old_w * (1 - lr) + target * lr, 1)
             adjustments["boomerang_weight"] = {"old": old_w, "new": self.weights["boomerang_weight"], "winrate": round(wr * 100, 1)}
 
-        # ── Ajustement Trend EMA / HTF ──
+        # ── Ajustement Trend HTF ──
         if stats["trend"]["total"] >= 2:
             wr = stats["trend"]["wins"] / stats["trend"]["total"]
             target = DEFAULT_WEIGHTS["htf_alignment_weight"] * (0.6 + 0.8 * wr)
@@ -163,6 +179,15 @@ class AdaptiveWeightsEngine:
             old_w = self.weights["htf_alignment_weight"]
             self.weights["htf_alignment_weight"] = round(old_w * (1 - lr) + target * lr, 1)
             adjustments["htf_alignment_weight"] = {"old": old_w, "new": self.weights["htf_alignment_weight"], "winrate": round(wr * 100, 1)}
+
+        # ── Ajustement Trend EMA ──
+        if stats["trend_ema"]["total"] >= 2:
+            wr = stats["trend_ema"]["wins"] / stats["trend_ema"]["total"]
+            target = DEFAULT_WEIGHTS["trend_ema_weight"] * (0.6 + 0.8 * wr)
+            target = max(WEIGHT_BOUNDS["trend_ema_weight"][0], min(WEIGHT_BOUNDS["trend_ema_weight"][1], target))
+            old_w = self.weights["trend_ema_weight"]
+            self.weights["trend_ema_weight"] = round(old_w * (1 - lr) + target * lr, 1)
+            adjustments["trend_ema_weight"] = {"old": old_w, "new": self.weights["trend_ema_weight"], "winrate": round(wr * 100, 1)}
 
         # ── Ajustement RSI Pullback ──
         if stats["rsi"]["total"] >= 2:
@@ -172,6 +197,15 @@ class AdaptiveWeightsEngine:
             old_w = self.weights["rsi_pullback_weight"]
             self.weights["rsi_pullback_weight"] = round(old_w * (1 - lr) + target * lr, 1)
             adjustments["rsi_pullback_weight"] = {"old": old_w, "new": self.weights["rsi_pullback_weight"], "winrate": round(wr * 100, 1)}
+
+        # ── Ajustement AMD Expansion ──
+        if stats["amd_expansion"]["total"] >= 2:
+            wr = stats["amd_expansion"]["wins"] / stats["amd_expansion"]["total"]
+            target = DEFAULT_WEIGHTS["amd_expansion_weight"] * (0.6 + 0.8 * wr)
+            target = max(WEIGHT_BOUNDS["amd_expansion_weight"][0], min(WEIGHT_BOUNDS["amd_expansion_weight"][1], target))
+            old_w = self.weights["amd_expansion_weight"]
+            self.weights["amd_expansion_weight"] = round(old_w * (1 - lr) + target * lr, 1)
+            adjustments["amd_expansion_weight"] = {"old": old_w, "new": self.weights["amd_expansion_weight"], "winrate": round(wr * 100, 1)}
 
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

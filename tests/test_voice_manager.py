@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from src.core.voice_manager import clean_text_for_speech, VoiceManager
+from src.core.voice_commands import VoiceCommandDispatcher
+from src.trading.pending_order_manager import PendingOrderManager, PendingOBOrder
 
 
 class TestVoiceManager(unittest.TestCase):
@@ -66,6 +68,39 @@ class TestVoiceManager(unittest.TestCase):
 
         self.assertEqual(text, "Bonjour robot, analyse le compte")
 
+
+    def test_voice_command_rename_pending(self):
+        fake_app = MagicMock()
+        fake_mgr = MagicMock()
+        fake_app._get_pending_manager.return_value = fake_mgr
+
+        # 1) Exact ticket match
+        fake_app.rename_pending_order.return_value = True
+        res = VoiceCommandDispatcher.dispatch("Renomme le pending 123456 en sniper block", fake_app)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["action"], "rename_pending")
+        self.assertEqual(res["value"], 123456)
+        self.assertEqual(res["label"], "sniper block")
+
+        # 2) Ticket match but rename fails (e.g. ticket not found)
+        fake_app.rename_pending_order.return_value = False
+        res_fail = VoiceCommandDispatcher.dispatch("Renomme le pending 9999 en loup de wall street", fake_app)
+        self.assertIsNotNone(res_fail)
+        self.assertEqual(res_fail["action"], "rename_pending_failed")
+
+        # 3) Symbol match
+        p1 = MagicMock()
+        p1.ticket = 777
+        p1.symbol = "EURUSD"
+        p1.label = ""
+        fake_mgr.get_active_pendings.return_value = [p1]
+        fake_app.rename_pending_order.return_value = True
+        
+        res_sym = VoiceCommandDispatcher.dispatch("Renomme le pending EURUSD en achat malin", fake_app)
+        self.assertIsNotNone(res_sym)
+        self.assertEqual(res_sym["action"], "rename_pending")
+        self.assertEqual(res_sym["value"], 777)
+        self.assertEqual(res_sym["label"], "achat malin")
 
 if __name__ == "__main__":
     unittest.main()

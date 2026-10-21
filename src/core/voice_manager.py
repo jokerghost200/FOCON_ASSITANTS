@@ -262,6 +262,14 @@ class VoiceManager(QObject):
         except Exception as e:
             logger.warning("Erreur lors de la lecture vocale : %s", e)
 
+    def speak_async(self, text: str):
+        """Alias non-bloquant de speak() (conservé pour compatibilité).
+
+        QTextToSpeech.say() est déjà asynchrone, donc on délègue à speak().
+        Utilisé par l'UI (ex: annonce Sniper) sans bloquer l'interface.
+        """
+        self.speak(text)
+
     def stop_speaking(self):
         """Arrête immédiatement la parole."""
         if self.tts and self.tts.state() == QTextToSpeech.State.Speaking:

@@ -196,14 +196,16 @@ class BoomerangDetector:
         result.htf_aligned     = self._check_htf(htf_trend, direction)
 
         # BOS/MSS from AMD context
-        bos_ok = bool(amd.get('BOS_MSS'))
+        bos_val = str(amd.get('BOS_MSS') or 'None')
+        bos_ok = bos_val not in ('None', '') and ('Bull' in bos_val if direction == 'BUY' else 'Bear' in bos_val)
         if bos_ok:
-            result.reasons.append('BOS/MSS confirmed ✅')
+            result.reasons.append(f'BOS/MSS confirmed ({bos_val}) ✅')
 
         # FVG
-        fvg_ok = bool(amd.get('FVG'))
+        fvg_val = str(amd.get('FVG') or 'None')
+        fvg_ok = fvg_val not in ('None', '') and ('Bull' in fvg_val if direction == 'BUY' else 'Bear' in fvg_val)
         if fvg_ok:
-            result.reasons.append('FVG present ✅')
+            result.reasons.append(f'FVG present ({fvg_val}) ✅')
 
         # ── Step 6 : Score ────────────────────────────────────────────────────
         score = 0.0
@@ -361,11 +363,13 @@ class BoomerangDetector:
 
         if direction == 'BUY':
             entry = close
-            sl    = breakout_level - sl_dist_mult * atr
+            raw_sl = breakout_level - sl_dist_mult * atr
+            sl    = raw_sl if raw_sl < entry else (entry - sl_dist_mult * atr)
             tp    = close + tp_dist_mult * atr
         elif direction == 'SELL':
             entry = close
-            sl    = breakout_level + sl_dist_mult * atr
+            raw_sl = breakout_level + sl_dist_mult * atr
+            sl    = raw_sl if raw_sl > entry else (entry + sl_dist_mult * atr)
             tp    = close - tp_dist_mult * atr
         else:
             return None, None, None, None

@@ -55,10 +55,15 @@ class TradeManager:
                 acc = self.mt5.get_account_info() or {}
                 balance = float(acc.get('balance', 0.0) or 0.0)
                 if balance > 0:
-                    return round(balance * (self.daily_profit_target_percent / 100.0), 2)
+                    pct_target = round(balance * (self.daily_profit_target_percent / 100.0), 2)
+                    # Sur micro-compte (< 100$), si daily_profit_target_usd est configuré (ex: 50$),
+                    # ne pas écraser avec un microscopique 0.81$ qui étouffe les trades dès 0.30$
+                    if balance < 100.0 and self.daily_profit_target_usd > pct_target:
+                        return float(self.daily_profit_target_usd)
+                    return pct_target
             except Exception:
                 pass
-        return self.daily_profit_target_usd
+        return float(self.daily_profit_target_usd)
 
     def _valid_modify_levels(self, pos: dict, new_sl, new_tp) -> tuple[bool, str]:
         symbol = pos.get('symbol')
@@ -127,6 +132,8 @@ class TradeManager:
             spread = float(info.get('spread') or 0) * point
             min_dist = max(float(info.get('trade_stops_level') or 0) * point, spread, point * 10)
 
+            digits = int(info.get('digits', 5) or 5)
+
             # ── 1. Break-Even Automatique ─────────────────────────────────────────
             if self.break_even_enabled and tp > 0:
                 if pos_type == 'BUY':
@@ -134,33 +141,37 @@ class TradeManager:
                     gain = current_price - price_open
                     if tp_dist > 0 and gain >= (tp_dist * self.break_even_ratio):
                         # Déplace le SL au-dessus du prix d'ouverture (+ spread/marge de sécurité)
-                        target_be_sl = round(price_open + min_dist, 5)
+                        target_be_sl = round(price_open + max(min_dist, spread * 1.5), digits)
                         if sl < target_be_sl and target_be_sl < (current_price - min_dist):
                             ok, _ = self._valid_modify_levels(pos, target_be_sl, tp)
                             if ok:
-                                logger.info(
-                                    f"🛡️ [{symbol}] BREAK-EVEN ATTEINT: SL déplacé de {sl:.5f} à {target_be_sl:.5f} (Risque = 0 € !)"
-                                )
-                                self.mt5.modify_position_sl(ticket, symbol, target_be_sl, tp)
-                                pos['sl'] = target_be_sl
-                                sl = target_be_sl
-                                modified = True
+                                if self.mt5.modify_position_sl(ticket, symbol, target_be_sl, tp):
+                                    logger.info(
+                                        f"🛡️ [{symbol}] BREAK-EVEN ATTEINT: SL déplacé de {sl:.{digits}f} à {target_be_sl:.{digits}f} (Risque = 0 € !)"
+                                    )
+                                    pos['sl'] = target_be_sl
+                                    sl = target_be_sl
+                                    modified = True
+                                else:
+                                    logger.warning(f"🛡️ [{symbol}] Échec modification MT5 Break-Even (#{ticket})")
 
                 elif pos_type == 'SELL':
                     tp_dist = price_open - tp
                     gain = price_open - current_price
                     if tp_dist > 0 and gain >= (tp_dist * self.break_even_ratio):
-                        target_be_sl = round(price_open - min_dist, 5)
+                        target_be_sl = round(price_open - max(min_dist, spread * 1.5), digits)
                         if (sl <= 0 or sl > target_be_sl) and target_be_sl > (current_price + min_dist):
                             ok, _ = self._valid_modify_levels(pos, target_be_sl, tp)
                             if ok:
-                                logger.info(
-                                    f"🛡️ [{symbol}] BREAK-EVEN ATTEINT: SL déplacé de {sl:.5f} à {target_be_sl:.5f} (Risque = 0 € !)"
-                                )
-                                self.mt5.modify_position_sl(ticket, symbol, target_be_sl, tp)
-                                pos['sl'] = target_be_sl
-                                sl = target_be_sl
-                                modified = True
+                                if self.mt5.modify_position_sl(ticket, symbol, target_be_sl, tp):
+                                    logger.info(
+                                        f"🛡️ [{symbol}] BREAK-EVEN ATTEINT: SL déplacé de {sl:.{digits}f} à {target_be_sl:.{digits}f} (Risque = 0 € !)"
+                                    )
+                                    pos['sl'] = target_be_sl
+                                    sl = target_be_sl
+                                    modified = True
+                                else:
+                                    logger.warning(f"🛡️ [{symbol}] Échec modification MT5 Break-Even (#{ticket})")
 
             # ── 2. Trailing Stop Mécanique (Stop Suiveur) ──────────────────────────
             if self.trailing_stop_enabled:
@@ -177,30 +188,34 @@ class TradeManager:
                 trail_buffer = max(atr * self.trailing_stop_atr_mult, min_dist * 3)
 
                 if pos_type == 'BUY' and current_price > price_open:
-                    trail_sl = round(current_price - trail_buffer, 5)
+                    trail_sl = round(current_price - trail_buffer, digits)
                     # Ne monte le SL que s'il est au-dessus du prix d'entrée et supérieur au SL actuel
                     if trail_sl > sl and trail_sl > price_open and trail_sl < (current_price - min_dist):
                         ok, _ = self._valid_modify_levels(pos, trail_sl, tp)
                         if ok:
-                            logger.info(
-                                f"📈 [{symbol}] TRAILING STOP: SL avancé à {trail_sl:.5f} (Bénéfices verrouillés)"
-                            )
-                            self.mt5.modify_position_sl(ticket, symbol, trail_sl, tp)
-                            pos['sl'] = trail_sl
-                            modified = True
+                            if self.mt5.modify_position_sl(ticket, symbol, trail_sl, tp):
+                                logger.info(
+                                    f"📈 [{symbol}] TRAILING STOP: SL avancé à {trail_sl:.{digits}f} (Bénéfices verrouillés)"
+                                )
+                                pos['sl'] = trail_sl
+                                modified = True
+                            else:
+                                logger.warning(f"📈 [{symbol}] Échec modification MT5 Trailing Stop (#{ticket})")
 
                 elif pos_type == 'SELL' and current_price < price_open:
-                    trail_sl = round(current_price + trail_buffer, 5)
+                    trail_sl = round(current_price + trail_buffer, digits)
                     # Ne descend le SL que s'il est en-dessous du prix d'entrée et inférieur au SL actuel
                     if (sl <= 0 or trail_sl < sl) and trail_sl < price_open and trail_sl > (current_price + min_dist):
                         ok, _ = self._valid_modify_levels(pos, trail_sl, tp)
                         if ok:
-                            logger.info(
-                                f"📉 [{symbol}] TRAILING STOP: SL descendu à {trail_sl:.5f} (Bénéfices verrouillés)"
-                            )
-                            self.mt5.modify_position_sl(ticket, symbol, trail_sl, tp)
-                            pos['sl'] = trail_sl
-                            modified = True
+                            if self.mt5.modify_position_sl(ticket, symbol, trail_sl, tp):
+                                logger.info(
+                                    f"📉 [{symbol}] TRAILING STOP: SL descendu à {trail_sl:.{digits}f} (Bénéfices verrouillés)"
+                                )
+                                pos['sl'] = trail_sl
+                                modified = True
+                            else:
+                                logger.warning(f"📉 [{symbol}] Échec modification MT5 Trailing Stop (#{ticket})")
 
             return modified
         except Exception as _e:
@@ -236,21 +251,22 @@ class TradeManager:
                     self.trade_memory.record_exit(ticket, current_price, profit, exit_reason="DOLLAR_TARGET")
             return True
 
-        # Seuil d'activation de la protection : adaptable selon Tier de capital
-        eff_min_protect = self.min_profit_to_protect_usd
-        eff_small_giveback = self.giveback_usd_small
+        # Seuil d'activation de la protection :
+        # Laisse respirer le trade vers son TP (au moins 2.00$ de gain et tolérance adéquate)
+        eff_min_protect = max(2.50, self.min_profit_to_protect_usd)
+        eff_small_giveback = max(1.00, self.giveback_usd_small)
         if self.auto_tier_enabled and hasattr(self.mt5, 'get_account_info'):
             try:
                 acc = self.mt5.get_account_info() or {}
                 bal = float(acc.get('balance', 0.0) or 0.0)
                 if 0 < bal < 250:
-                    # Tier Micro : sécurisation plus précoce dès 1.00$ de gain
-                    eff_min_protect = min(self.min_profit_to_protect_usd, 1.00)
-                    eff_small_giveback = min(self.giveback_usd_small, 0.40)
+                    # Tier Micro : activation à 2.00$ (au lieu de 1.00$ qui étouffait le trade à 3 pips)
+                    eff_min_protect = 2.00
+                    eff_small_giveback = 0.80
             except Exception:
                 pass
 
-        # Active le suivi dès que le profit atteint le seuil minimum (ex: 2.50 $, ou 1.00 $ sur micro)
+        # Active le suivi dès que le profit atteint le seuil minimum (ex: 2.50 $, ou 2.00 $ sur micro)
         # ou s'il a déjà été activé précédemment (ticket in self.peak_profits)
         if profit >= eff_min_protect or ticket in self.peak_profits:
             prev_peak = float(self.peak_profits.get(ticket, profit))
@@ -259,23 +275,18 @@ class TradeManager:
 
             giveback = round(current_peak - profit, 2)
 
-            # Tolérance dynamique et continue au centime près :
-            # - Calcul proportionnel continu (~20% du sommet atteint)
-            # - Borné par les paliers de sécurité configurables
-            prop_giveback = round(current_peak * 0.20, 2)
+            # Tolérance de retracement : laisser respirer les petites vagues tout en protégeant les gros gains
+            prop_giveback = round(current_peak * 0.35, 2)
             if current_peak >= 12.0:
-                tier_giveback = self.giveback_usd_large   # 3.00 $
+                max_giveback = self.giveback_usd_large   # 3.00 $
             elif current_peak >= 8.0:
-                tier_giveback = self.giveback_usd_medium  # 1.80 $
+                max_giveback = self.giveback_usd_medium  # 1.80 $
             elif current_peak >= 5.0:
-                tier_giveback = 1.50                      # 1.50 $
-            elif current_peak >= 2.0:
-                tier_giveback = eff_small_giveback        # 1.00 $
+                max_giveback = max(1.50, prop_giveback)
+            elif current_peak >= 3.0:
+                max_giveback = max(eff_small_giveback, 1.00)
             else:
-                tier_giveback = min(eff_small_giveback, 0.35)
-
-            # On prend la tolérance la plus réactive au centime près pour couper vite et garder l'argent
-            max_giveback = round(min(tier_giveback, max(eff_small_giveback, prop_giveback)), 2)
+                max_giveback = max(eff_small_giveback, 0.80)
 
             should_close = False
             close_reason = ""
@@ -328,6 +339,9 @@ class TradeManager:
             closed_externally = self._known_open_tickets - current_tickets
             for tkt in closed_externally:
                 deal = self.mt5.get_deal_for_ticket(tkt) if hasattr(self.mt5, 'get_deal_for_ticket') else None
+                stored_trade = self.trade_memory.trades.get(tkt, {}) if self.trade_memory else {}
+                sym = stored_trade.get('symbol') or (deal.get('symbol') if deal else None)
+                act = stored_trade.get('action')
                 if deal:
                     p_val = float(deal.get('profit', 0.0))
                     p_price = float(deal.get('price', 0.0))
@@ -335,9 +349,28 @@ class TradeManager:
                     rsn = "SL_HIT" if ("sl" in comm or p_val < 0) else "TP_HIT"
                     if self.trade_memory:
                         self.trade_memory.record_exit(tkt, p_price, p_val, exit_reason=rsn)
+                    if hasattr(self.orchestrator, 'set_symbol_cooldown') and sym:
+                        if p_val < 0 or rsn == "SL_HIT":
+                            self.orchestrator.set_symbol_cooldown(
+                                sym, duration_seconds=1800,
+                                reason=f"Perte SL #{tkt} ({p_val:+.2f}$)",
+                                direction=act
+                            )
+                        else:
+                            self.orchestrator.set_symbol_cooldown(
+                                sym, duration_seconds=300,
+                                reason=f"Gain #{tkt} ({p_val:+.2f}$)",
+                                direction=None
+                            )
                 else:
                     if self.trade_memory:
                         self.trade_memory.record_exit(tkt, 0.0, 0.0, exit_reason="BROKER_CLOSED")
+                    if hasattr(self.orchestrator, 'set_symbol_cooldown') and sym:
+                        self.orchestrator.set_symbol_cooldown(
+                            sym, duration_seconds=600,
+                            reason=f"Position #{tkt} clôturée",
+                            direction=act
+                        )
                 self.peak_profits.pop(tkt, None)
                 self._last_ai_eval.pop(tkt, None)
         self._known_open_tickets = current_tickets
@@ -442,11 +475,7 @@ class TradeManager:
             logger.info(f"[{symbol}] Décision IA/Local: {action} - Justification: {reason}")
 
             if action == "CLOSE":
-                # Si profit négatif et aucune anomalie grave, maintien en HOLD pour laisser jouer le SL
-                if profit < 0:
-                    logger.info(f"[{symbol}] IA demande CLOSE mais profit négatif ({profit:.2f}$). MAINTIEN EN HOLD.")
-                    continue
-
+                # Note: profit < 0 est déjà filtré plus haut (ligne 436) pour préserver le SL chez le broker.
                 # Si le profit est réel (>= 3.0$), on AUTORISE toujours la fermeture pour empocher le cash !
                 if profit >= self.min_profit_to_protect_usd:
                     logger.info(f"💰 [{symbol}] Clôture en profit approuvée (+{profit:.2f} $). Verrouillage des bénéfices !")
@@ -489,5 +518,9 @@ class TradeManager:
                         continue
 
                     logger.info(f"[{symbol}] Exécution MODIFY IA. SL: {final_sl}, TP: {final_tp}")
-                    self.mt5.modify_position_sl(ticket, symbol, final_sl, final_tp)
+                    if self.mt5.modify_position_sl(ticket, symbol, final_sl, final_tp):
+                        pos['sl'] = final_sl
+                        pos['tp'] = final_tp
+                    else:
+                        logger.warning(f"[{symbol}] Échec modification MT5 MODIFY IA (#{ticket})")
 

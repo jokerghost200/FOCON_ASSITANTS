@@ -108,6 +108,7 @@ class RiskManager:
         auto_tier_enabled: bool = True,
         max_micro_risk_cap_percent: float = 4.0,
         daily_profit_target_percent: float = None,
+        fixed_lot_size: float = 0.0,
     ):
         self.risk_profile = str(risk_profile or "BALANCED").upper()
         cfg = RISK_PROFILES.get(self.risk_profile, RISK_PROFILES["BALANCED"])
@@ -122,6 +123,7 @@ class RiskManager:
         self.auto_tier_enabled = bool(auto_tier_enabled)
         self.max_micro_risk_cap_percent = float(max_micro_risk_cap_percent)
         self.daily_profit_target_percent = float(daily_profit_target_percent if daily_profit_target_percent is not None else cfg["daily_target_percent"])
+        self.fixed_lot_size = float(fixed_lot_size)
 
     @staticmethod
     def get_account_tier(balance: float) -> dict:
@@ -224,11 +226,23 @@ class RiskManager:
             
             # Enforce MT5 broker limits AND global safety cap
             effective_max = min(max_lot, self.global_max_lot)
-            final_lot = max(min_lot, min(calculated_lot, effective_max))
+            
+            # Use fixed lot size if configured
+            if hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0:
+                final_lot = max(min_lot, min(self.fixed_lot_size, effective_max))
+                logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
+            else:
+                final_lot = max(min_lot, min(calculated_lot, effective_max))
+
+            # Micro-capital hard safety cap: If auto tiers enabled, capital < $100 and no explicit fixed lot,
+            # enforce strict min_lot (0.01) to protect small accounts from over-leveraging.
+            if self.auto_tier_enabled and capital < 100.0 and not (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0):
+                final_lot = min_lot
             
             # Round again to fix floating point issues
-            # For 0.01 step -> 2 decimals
-            decimals = abs(int(math.log10(lot_step)))
+            # Calculate decimal places accurately for any step (0.01, 0.05, 0.1, etc.)
+            lot_step_str = f"{lot_step:.8f}".rstrip('0')
+            decimals = len(lot_step_str.split('.')[1]) if '.' in lot_step_str else 0
             final_lot = round(final_lot, decimals)
             
             logger.info(f"Calculated Lot: {final_lot} | Raw Lot: {calculated_lot} | Risk Amount: ${risk_amount:.2f} | SL Ticks: {ticks:.1f}")
@@ -410,13 +424,15 @@ class RiskManager:
         actual_risk_amount = lot * loss_per_lot
 
         # --- PROTECTION PETITS COMPTES / LOT MINIMUM BROKER ---
-        if capital > 0 and self.auto_tier_enabled:
+        is_fixed_lot = (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0) or bool(proposal.get('manual_lot_override'))
+
+        if not is_fixed_lot and capital > 0 and self.auto_tier_enabled:
             actual_risk_pct = (actual_risk_amount / capital) * 100.0
             tier = self.get_account_tier(capital)
             micro_cap = getattr(self, 'max_micro_risk_cap_percent', tier.get('max_risk_cap_percent', 4.0))
 
             # Si le broker impose min_lot (ex: 0.01) et que la perte sur SL dépasse le plafond toléré
-            if lot == min_lot and actual_risk_pct > micro_cap:
+            if lot == min_lot and actual_risk_pct > micro_cap and actual_risk_amount > 2.0:
                 return {
                     "valid": False,
                     "reason": (
@@ -432,9 +448,11 @@ class RiskManager:
                     f"risque effectif de ${actual_risk_amount:.2f} ({actual_risk_pct:.1f}% du capital)."
                 )
 
-        if actual_risk_amount > allowed_risk_amount * 1.05 and lot > min_lot: # Allow tiny 5% rounding margin
+        if not is_fixed_lot and actual_risk_amount > allowed_risk_amount * 1.05 and lot > min_lot: # Allow tiny 5% rounding margin
             # Only fail if the lot is bigger than min_lot and risk is still too high
             return {"valid": False, "reason": f"Actual risk (${actual_risk_amount:.2f}) exceeds allowed risk (${allowed_risk_amount:.2f})"}
+        elif is_fixed_lot:
+            logger.info(f"🎯 [Fixed Lot Override] Volume fixé par l'utilisateur : {lot} lot(s). Risque calculé : ${actual_risk_amount:.2f}.")
         # ---------------------------------------
         
         # --- NEW MARGIN CHECK ---
@@ -448,24 +466,50 @@ class RiskManager:
             with MT5Connector._lock:
                 margin_required_1_lot = mt5.order_calc_margin(order_type, symbol, 1.0, entry)
             if margin_required_1_lot and margin_required_1_lot > 0:
-                max_lot_margin = (free_margin * 0.95) / margin_required_1_lot
+                # Sécurité Marge :
+                # Si paliers désactivés par l'utilisateur : autoriser jusqu'à 75% de la marge libre.
+                # Si paliers activés : allouer au maximum 25% (<250$) ou 40% (>=250$) pour préserver le compte.
+                if not self.auto_tier_enabled:
+                    safe_margin_ratio = 0.75
+                else:
+                    safe_margin_ratio = 0.25 if capital < 250.0 else 0.40
+
+                max_lot_margin = (free_margin * safe_margin_ratio) / margin_required_1_lot
                 if lot > max_lot_margin:
-                    logger.warning(f"Lot {lot} exceeds free margin capacity. Capping to {max_lot_margin}")
+                    if is_fixed_lot:
+                        logger.warning(
+                            f"⚠️ [Volume Fixe / Marge] Le volume demandé ({lot:.2f} lot) requiert ~{lot * margin_required_1_lot:.2f}$ "
+                            f"de marge alors que la marge libre est de {free_margin:.2f}$. "
+                            f"Plafonné à {max_lot_margin:.2f} lot ({safe_margin_ratio:.0%} max de marge libre) pour préserver le compte."
+                        )
+                    else:
+                        logger.warning(
+                            f"Lot {lot} dépasse la capacité de marge sécurisée ({safe_margin_ratio:.0%}). "
+                            f"Plafonné à {max_lot_margin:.4f} pour préserver la marge libre."
+                        )
                     lot = max_lot_margin
                     
                     # Re-round to lot step
                     steps = math.floor(lot / lot_step + 1e-9)
                     lot = steps * lot_step
                     
-                    # Ensure minimum lot
-                    lot = max(min_lot, lot)
+                    # Sur micro-compte (<100$), plafonner le lot absolu à 0.02 SEULEMENT
+                    # si les paliers de capital sont activés ET qu'aucun lot fixe n'est configuré.
+                    if self.auto_tier_enabled and not is_fixed_lot and capital < 100.0:
+                        lot = min(lot, 0.02)
                     
-                    decimals = abs(int(math.log10(lot_step))) if lot_step < 1 else 0
+                    if lot < min_lot:
+                        return {"valid": False, "reason": f"Marge libre insuffisante (${free_margin:.2f}) pour le lot minimum ({min_lot})."}
+                    
+                    lot_step_str = f"{lot_step:.8f}".rstrip('0')
+                    decimals = len(lot_step_str.split('.')[1]) if '.' in lot_step_str else 0
                     lot = round(lot, decimals)
         # ------------------------
         
-        proposal['sl'] = round(sl, 5)
-        proposal['tp'] = round(tp, 5)
+        digits = int(symbol_info.get('digits', 5) or 5)
+        proposal['entry'] = round(entry, digits)
+        proposal['sl'] = round(sl, digits)
+        proposal['tp'] = round(tp, digits)
         proposal['lot'] = lot
         proposal['capital_allocated'] = capital
         

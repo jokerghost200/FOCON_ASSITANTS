@@ -35,6 +35,38 @@
         div.textContent = `WAIT (${res.symbol}) — pas d'opportunite claire.`;
       } else if (res.status === "CLOSED") {
         div.textContent = "Marches fermes ignores : " + (res.symbols || []).join(", ");
+      } else if (res.status === "PENDING_OB") {
+        const d = res.decision || {};
+        const lbl = res.pending_label ? ` « ${res.pending_label} »` : "";
+        div.textContent = `📌 PENDING${lbl} ${d.action || ""} sur ${res.symbol}\nConfiance : ${d.confidence}% | Entree limite ${d.entry} | SL ${d.sl} | TP ${d.tp} | ${d.lot} lots\nNom modifiable (31 car. max) : `;
+        const nameInput = document.createElement("input");
+        nameInput.value = res.pending_label || `OB ${res.symbol} ${d.action || ""}`;
+        nameInput.maxLength = 31;
+        nameInput.placeholder = "Nom du Pending Block...";
+        nameInput.style.width = "220px";
+        nameInput.onchange = () => { res.pending_label = nameInput.value.slice(0, 31); };
+        div.append(nameInput);
+        const row = document.createElement("div");
+        row.className = "actions";
+        const take = document.createElement("button");
+        take.className = "success";
+        take.textContent = "📌 PLACER ORDRE LIMITE";
+        take.onclick = async () => {
+          take.disabled = true;
+          res.pending_label = nameInput.value.slice(0, 31);
+          const r = await api("/api/trade/take", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ signal: res }),
+          });
+          div.append(document.createTextNode("\n-> " + (r.ok ? `Ordre pending place` : `Echec : ${r.reason}`)));
+          refreshPositions();
+        };
+        const ignP = document.createElement("button");
+        ignP.className = "danger";
+        ignP.textContent = "IGNORER";
+        ignP.onclick = () => div.remove();
+        row.append(take, ignP);
+        div.append(row);
       } else {
         const d = res.decision || {};
         div.textContent = `${d.action} sur ${res.symbol}\nConfiance : ${d.confidence}% | Entree ${d.entry} | SL ${d.sl} | TP ${d.tp} | ${d.lot} lots\n${d.reason || ""}`;

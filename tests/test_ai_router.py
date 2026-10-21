@@ -85,6 +85,15 @@ class TestAIRouter(unittest.TestCase):
         self.assertTrue(st["gemini"]["last_used"])
         self.assertEqual(st["last_provider"], "gemini")
 
+    def test_has_available_provider(self):
+        router_ok = AIRouter(gemini_agent=FakeGeminiOK("G"), openrouter_agent=FakeOK("O"))
+        self.assertTrue(router_ok.has_available_provider())
+
+        router_ko = AIRouter(gemini_agent=FakeGeminiKO(), openrouter_agent=FakeKO(), cooldown_seconds=999)
+        # Call ask_text to trigger cooldowns
+        router_ko.ask_text("test")
+        self.assertFalse(router_ko.has_available_provider())
+
 
 if __name__ == "__main__":
     unittest.main()

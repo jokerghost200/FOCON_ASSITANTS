@@ -240,7 +240,7 @@ class OpenRouterAgent:
             "X-Title": "AI Trading Assistant",
         }
         payload = {"model": model, "messages": messages, "temperature": 0.2}
-        backoff = [10]  # 1 seul retry par modèle — on préfère passer au suivant
+        backoff = [2]  # 1 seul retry ultra-court par modèle — on préfère passer au suivant
         if max_attempts is not None:
             backoff = backoff[:max(0, max_attempts - 1)]
 
@@ -255,7 +255,7 @@ class OpenRouterAgent:
                 return None, hit_429
             try:
                 resp = httpx.post(self.openrouter_url, headers=headers,
-                                  json=payload, timeout=60.0)
+                                  json=payload, timeout=12.0)
                 status = resp.status_code
                 if status == 429:
                     hit_429 = True
@@ -297,7 +297,7 @@ class OpenRouterAgent:
             "Content-Type": "application/json",
         }
         payload = {"model": model, "messages": messages, "temperature": 0.2}
-        backoff = [10, 20]
+        backoff = [2]
 
         attempts = len(backoff) + 1
         for attempt in range(attempts):
@@ -309,7 +309,7 @@ class OpenRouterAgent:
                 return None
             try:
                 resp = httpx.post(self.groq_url, headers=headers,
-                                  json=payload, timeout=60.0)
+                                  json=payload, timeout=12.0)
                 status = resp.status_code
                 if status == 429:
                     if attempt >= len(backoff):
@@ -318,7 +318,7 @@ class OpenRouterAgent:
                         return None
                     wait = self._parse_retry_after(
                         resp.headers.get("Retry-After"), backoff[attempt])
-                    wait = min(wait, 30)
+                    wait = min(wait, 2)
                     logger.warning(f"Groq 429 [{model}] — waiting {wait}s "
                                    f"(attempt {attempt+1}/{attempts})")
                     self._interruptible_sleep(wait, stop_event, deadline=deadline)

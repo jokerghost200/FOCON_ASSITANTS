@@ -25,7 +25,7 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
-OB_SCORE_VALID = 55
+OB_SCORE_VALID = 65
 OB_IMPULSE_ATR = 1.6
 OB_RETEST_TOLERANCE = 0.8
 
@@ -202,18 +202,24 @@ class OrderBlockDetector:
 
         if not recent_window.empty:
             for _, r in recent_window.iterrows():
-                r_low, r_high, r_close = float(r['low']), float(r['high']), float(r['close'])
+                r_low, r_high = float(r['low']), float(r['high'])
+                r_open, r_close = float(r['open']), float(r['close'])
+                r_range = r_high - r_low
                 if direction == 'BUY':
                     # A touché la zone et n'a pas clôturé en dessous
                     if r_low <= (ob_high + tol) and r_close >= (ob_low - tol):
                         retested_recently = True
-                        if r_close > (ob_low + ob_high) / 2:
+                        # Rejet haussier réel : mèche basse >= 30% du range OU bougie verte clôturant au-dessus du milieu de l'OB
+                        lower_wick = (r_close - r_low) if r_close < r_open else (r_open - r_low)
+                        if (r_range > 0 and (lower_wick / r_range) >= 0.30) or (r_close > r_open and r_close > (ob_low + ob_high) / 2):
                             has_rejection = True
                 else:  # SELL
                     # A touché la zone et n'a pas clôturé au-dessus
                     if r_high >= (ob_low - tol) and r_close <= (ob_high + tol):
                         retested_recently = True
-                        if r_close < (ob_low + ob_high) / 2:
+                        # Rejet baissier réel : mèche haute >= 30% du range OU bougie rouge clôturant sous le milieu de l'OB
+                        upper_wick = (r_high - r_close) if r_close > r_open else (r_high - r_open)
+                        if (r_range > 0 and (upper_wick / r_range) >= 0.30) or (r_close < r_open and r_close < (ob_low + ob_high) / 2):
                             has_rejection = True
 
         is_retested = in_zone_now or retested_recently
@@ -239,10 +245,14 @@ class OrderBlockDetector:
         score = 0.0
         reasons = []
 
-        # 1. Fraîcheur (max 30 pts)
-        freshness = max(0.0, 30.0 - ob.bars_ago * 0.4)
+        # 1. Fraîcheur (max 30 pts) — au-delà de 60 bougies, pénalité sévère
+        if ob.bars_ago > 60:
+            freshness = 0.0
+            reasons.append(f"OB trop ancien ({ob.bars_ago} bougies): 0pts")
+        else:
+            freshness = max(0.0, 30.0 - ob.bars_ago * 0.5)
+            reasons.append(f"Fraîcheur: {freshness:.0f}pts ({ob.bars_ago} bougies)")
         score += freshness
-        reasons.append(f"Fraîcheur: {freshness:.0f}pts ({ob.bars_ago} bougies)")
 
         # 2. Force de l'impulsion (max 25 pts)
         impl_score = min(25.0, max(10.0, (ob.impulse_strength - self.impulse_atr_mult) * 10.0 + 15.0))
@@ -259,16 +269,16 @@ class OrderBlockDetector:
                 reasons.append("Retest actif: +20pts")
             score += retest_pts
 
-        # 4. Alignement de tendance HTF (max 15 pts)
+        # 4. Alignement de tendance HTF (max 20 pts)
         t = (htf_trend or '').upper()
-        htf_aligned = (
-            (ob.direction == 'BUY' and 'BULL' in t) or
-            (ob.direction == 'SELL' and 'BEAR' in t) or
-            ('BULL' not in t and 'BEAR' not in t)
-        )
-        if htf_aligned:
-            score += 15.0
-            reasons.append("HTF aligné: +15pts")
+        if (ob.direction == 'BUY' and 'BULL' in t) or (ob.direction == 'SELL' and 'BEAR' in t):
+            score += 20.0
+            reasons.append("HTF aligné: +20pts")
+        elif (ob.direction == 'BUY' and 'BEAR' in t) or (ob.direction == 'SELL' and 'BULL' in t):
+            score -= 25.0  # Rejet strict des OB à contre-courant
+            reasons.append("HTF opposé: -25pts (Danger)")
+        else:
+            reasons.append("HTF neutre: 0pts")
 
         # 5. Taille saine de la zone OB (max 10 pts)
         zone_size = ob.ob_high - ob.ob_low
@@ -276,12 +286,15 @@ class OrderBlockDetector:
             score += 10.0
             reasons.append("Zone OB calibrée: +10pts")
 
-        ob.score = min(100.0, score)
+        ob.score = min(100.0, max(0.0, score))
         ob.reasons = reasons
 
     def _calc_levels(self, ob: OrderBlock, atr: float, current_price: float):
         buf = self.sl_buffer_mult * atr
-        min_sl_dist = self.min_sl_atr_mult * atr
+        # Plancher minimal de Stop Loss (minimum 8 pips) pour ne pas être liquidé par le spread
+        point_est = 0.00001 if current_price < 20 else (0.001 if current_price < 500 else 0.01)
+        min_pips_floor = 80 * point_est  # 8 pips
+        min_sl_dist = max(self.min_sl_atr_mult * atr, 1.2 * atr, min_pips_floor)
         tol = self.retest_tolerance * atr
 
         if ob.direction == 'BUY':

@@ -284,3 +284,97 @@ class TradeMemoryEngine:
             "best_trade_usd": round(max(profits) if profits else 0.0, 2),
             "worst_trade_usd": round(min(profits) if profits else 0.0, 2),
         }
+
+    def check_expectancy(self, symbol: str, session_filter: str, strategy: str) -> dict:
+        """
+        Calcule l'Expectancy (R-multiple) pour une combinaison (Symbole, Session, Stratégie).
+        Expectancy = (WinRate * AvgWinR) + (LossRate * AvgLossR)
+        Si Expectancy < 0, la stratégie n'est pas rentable pour ce contexte.
+        """
+        closed = self.get_closed_trades(limit=500)
+        
+        # Filtrer par symbole, session, et stratégie (tags/reason)
+        filtered_trades = []
+        for t in closed:
+            if symbol and t.get("symbol") != symbol:
+                continue
+            
+            snap = t.get("snapshot", {})
+            t_session = snap.get("session", "UNKNOWN")
+            if session_filter and session_filter != "UNKNOWN" and t_session != session_filter:
+                continue
+                
+            has_ob = snap.get("has_ob", False)
+            fvg = snap.get("fvg", "None")
+            
+            # Logique de matching de stratégie (noms internes et standards)
+            matched_strategy = False
+            strat_upper = str(strategy or "").upper()
+            if strat_upper in ("OB+FVG", "OB_FVG_RETEST"):
+                if has_ob and fvg != "None":
+                    matched_strategy = True
+            elif strat_upper in ("OB", "ORDER_BLOCK"):
+                if has_ob:
+                    matched_strategy = True
+            elif strat_upper in ("BOOMERANG",):
+                if snap.get("has_boomerang", False):
+                    matched_strategy = True
+            elif strat_upper in ("LIQUIDITY_SWEEP_MSS", "SWEEP"):
+                if str(snap.get("sweep", "None")) != "None":
+                    matched_strategy = True
+            elif strat_upper in ("TREND_PULLBACK",):
+                if snap.get("ema_dist_atr", 0.0) != 0.0 or snap.get("htf_trend", "NEUTRAL") != "NEUTRAL":
+                    matched_strategy = True
+            else:
+                matched_strategy = True  # Fallback si chaîne générique ou inconnue
+                
+            if matched_strategy:
+                filtered_trades.append(t)
+                
+        if len(filtered_trades) < 3:
+            return {"expectancy_r": 0.0, "status": "NEUTRAL", "trades_count": len(filtered_trades)}
+            
+        wins = []
+        losses = []
+        for t in filtered_trades:
+            profit_usd = float(t.get("final_profit_usd", 0) or 0)
+            initial_rr = float(t.get("snapshot", {}).get("initial_rr", 1.0))
+            if initial_rr <= 0:
+                initial_rr = 1.0 # fallback
+                
+            # Compute roughly the R realized (if profit > 0, it won some R; if < 0 it lost 1R assuming full SL)
+            # Pour faire simple: profit / risk. Mais on n'a pas le risk USD direct, 
+            # donc on peut estimer que 1R = |sl - entry| * lot * (contract size etc).
+            # Si on a stocké `risk_usd` dans snapshot, c'est mieux.
+            risk_usd = float(t.get("snapshot", {}).get("risk_usd", 0.0))
+            if risk_usd <= 0:
+                # Approximation naive si le trade gagne, il gagne R, s'il perd, il perd 1R.
+                r_realized = (profit_usd / max(abs(profit_usd), 1.0)) if profit_usd != 0 else 0
+            else:
+                r_realized = profit_usd / risk_usd
+                
+            if r_realized > 0:
+                wins.append(r_realized)
+            else:
+                losses.append(r_realized)
+                
+        win_rate = len(wins) / len(filtered_trades)
+        loss_rate = len(losses) / len(filtered_trades)
+        
+        avg_win_r = sum(wins) / len(wins) if wins else 0.0
+        avg_loss_r = sum(losses) / len(losses) if losses else 0.0
+        
+        expectancy_r = (win_rate * avg_win_r) + (loss_rate * avg_loss_r)
+        
+        status = "NEUTRAL"
+        if expectancy_r < -0.1:
+            status = "DISABLED"
+        elif expectancy_r > 0.1:
+            status = "ACTIVE"
+            
+        return {
+            "expectancy_r": round(expectancy_r, 2),
+            "status": status,
+            "trades_count": len(filtered_trades),
+            "win_rate": round(win_rate * 100, 1)
+        }

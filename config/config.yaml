@@ -11,44 +11,47 @@ trading:
   - US30
   - NAS100
   timeframes:
-  - M5
   - M15
   - H1
+  - H4
   automation_mode: auto
   allowed_trade_direction: BOTH
   order_block_scan_enabled: true
+  post_trade_ob_rescan_enabled: false
   allowed_market_types:
   - Forex
 risk_management:
-  default_risk_percent: 2.5
-  max_daily_loss_percent: 6.0
-  max_open_positions: 3
+  default_risk_percent: 2.0
+  max_daily_loss_percent: 8.0
+  max_open_positions: 1
   exclude_closed_markets_from_quota: true
   max_positions_per_symbol: 1
   max_lot_size: 1.0
-  min_confidence: 60.0
-  min_reward_risk: 1.5
+  min_confidence: 75.0
+  min_reward_risk: 2.5
   break_even_enabled: true
-  break_even_ratio: 0.45
+  break_even_ratio: 0.5
   trailing_stop_enabled: true
-  trailing_stop_atr_mult: 1.5
+  trailing_stop_atr_mult: 2.0
   min_profit_to_close_ratio: 0.5
   max_ob_per_initial_trade: 1
-  dollar_trailing_enabled: true
-  min_profit_to_protect_usd: 2.5
-  giveback_usd_small: 0.9
-  giveback_usd_medium: 1.8
-  giveback_usd_large: 3.0
+  dollar_trailing_enabled: false
+  min_profit_to_protect_usd: 25.0
+  giveback_usd_small: 2.0
+  giveback_usd_medium: 10.0
+  giveback_usd_large: 15.0
   daily_profit_target_usd: 50.0
   stop_trading_on_daily_target: true
-  take_profit_target_per_trade_usd: 4.0
+  take_profit_target_per_trade_usd: 0.0
   spread_buffer_enabled: true
   max_spread_sl_ratio: 0.25
   spread_buffer_max_cap: 0.4
-  risk_profile: SNIPER
-  auto_tier_enabled: true
-  max_micro_risk_cap_percent: 4.0
-  daily_profit_target_percent: 6.0
+  risk_profile: AGGRESSIVE
+  auto_tier_enabled: false
+  max_micro_risk_cap_percent: 6.0
+  daily_profit_target_percent: 5.0
+  fixed_lot_size: 1.2
+  manual_max_positions_override: true
 ai_models:
   openrouter_model: google/gemma-4-26b-a4b-it:free
   gemini_model: gemini-3.8-flash

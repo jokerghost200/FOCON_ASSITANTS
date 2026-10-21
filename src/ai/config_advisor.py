@@ -24,6 +24,8 @@ class ConfigAdvisor:
         ("risk_management", "min_confidence"): ("number", 55.0, 95.0),
         ("risk_management", "min_reward_risk"): ("number", 1.2, 5.0),
         ("risk_management", "daily_profit_target_usd"): ("number", 0.0, 100000.0),
+        ("risk_management", "fixed_lot_size"): ("number", 0.0, 10.0),
+        ("risk_management", "risk_profile"): ("enum", {"CONSERVATIVE", "BALANCED", "AGGRESSIVE", "SNIPER"}),
         ("trading", "automation_mode"): ("enum", MODES),
         ("trading", "allowed_trade_direction"): ("enum", DIRECTIONS),
         ("trading", "allowed_market_types"): ("set", MARKET_TYPES),
@@ -38,6 +40,8 @@ class ConfigAdvisor:
         ("risk_management", "min_confidence"): "Confiance minimale",
         ("risk_management", "min_reward_risk"): "Ratio rendement/risque minimal",
         ("risk_management", "daily_profit_target_usd"): "Objectif journalier en dollars",
+        ("risk_management", "fixed_lot_size"): "Taille de lot fixe (0 = auto)",
+        ("risk_management", "risk_profile"): "Profil de risque",
         ("trading", "automation_mode"): "Mode d'automatisation",
         ("trading", "allowed_trade_direction"): "Sens de trading autorisé",
         ("trading", "allowed_market_types"): "Types de marchés autorisés",
@@ -162,6 +166,10 @@ class ConfigAdvisor:
             "Tu es le conseiller de configuration prudent de Focon Assistant. "
             "Tu réponds en français et tu ne déclenches jamais de trade. "
             "Tu proposes des réglages, sans les appliquer. "
+            "Prends toujours en compte le capital du compte pour ajuster les risques, "
+            "les lots (désactive fixed_lot_size en le mettant à 0.0 si le capital est faible "
+            "pour laisser l'auto-sizing), et gère la tolérance des pending orders (ordres "
+            "en attente) via min_confidence et risk_profile. "
             "Tu dois retourner UNIQUEMENT du JSON valide au format "
             '{"reply":"explication courte", "changes":[{"section":"risk_management|trading",'
             '"key":"cle autorisee", "value": "valeur", "reason":"raison courte"}]}. '
@@ -169,6 +177,7 @@ class ConfigAdvisor:
             "risk_management.max_daily_loss_percent, risk_management.max_lot_size, "
             "risk_management.max_open_positions, risk_management.min_confidence, "
             "risk_management.min_reward_risk, risk_management.daily_profit_target_usd, "
+            "risk_management.fixed_lot_size, risk_management.risk_profile, "
             "trading.automation_mode, trading.allowed_trade_direction, "
             "trading.allowed_market_types, trading.timeframes. "
             "Ne propose jamais de désactiver les protections. Si la demande est ambiguë, "

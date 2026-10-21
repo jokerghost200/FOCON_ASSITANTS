@@ -183,6 +183,73 @@ class VoiceCommandDispatcher:
         if not norm:
             return None
 
+        # ── 0. RENOMMER UN PENDING BLOCK (nom personnalisé) ──
+        # Ex : "renomme le pending 123456 en bloc London",
+        #      "appelle le pending EURUSD mon sniper".
+        m_rename = re.search(
+            r"(?:renomme|renommer|appelle|appeler|nomme|nommer)\s+(?:le\s+|la\s+|l\s+)?"
+            r"(?:pending|ordre(?:\s+limite|\s+en\s+attente)?|block|bloc)?\s*"
+            r"([a-z0-9#\- ]*?)\s+en\s+(.+)",
+            norm,
+        )
+        if m_rename and any(w in norm for w in ["pending", "ordre", "block", "bloc", "limite", "attente", "renomme", "renommer", "nomme", "nommer", "appelle", "appeler"]):
+            target_raw = (m_rename.group(1) or "").strip()
+            new_name = re.sub(r"\s+", " ", (m_rename.group(2) or "").strip())[:31]
+            mgr = None
+            if hasattr(app, "_get_pending_manager") and callable(app._get_pending_manager):
+                try:
+                    mgr = app._get_pending_manager()
+                except Exception:
+                    mgr = None
+            pendings = []
+            try:
+                if mgr is not None and hasattr(mgr, "get_active_pendings"):
+                    pendings = list(mgr.get_active_pendings() or [])
+            except Exception:
+                pendings = []
+            ticket = None
+            m_ticket = re.search(r"#?\b(\d{4,})\b", target_raw)
+            if m_ticket:
+                ticket = int(m_ticket.group(1))
+            elif target_raw:
+                for p in pendings:
+                    lbl = _normalize(str(getattr(p, "label", "") or ""))
+                    sym = _normalize(str(getattr(p, "symbol", "") or ""))
+                    if target_raw and (target_raw in lbl or target_raw in sym or lbl in target_raw or sym in target_raw):
+                        ticket = int(getattr(p, "ticket", 0) or 0)
+                        break
+            if ticket is None and len(pendings) == 1 and not target_raw:
+                ticket = int(getattr(pendings[0], "ticket", 0) or 0)
+            if ticket and new_name:
+                ok = False
+                if hasattr(app, "rename_pending_order") and callable(app.rename_pending_order):
+                    try:
+                        ok = bool(app.rename_pending_order(ticket, new_name))
+                    except Exception:
+                        ok = False
+                elif mgr is not None and hasattr(mgr, "rename_pending"):
+                    try:
+                        ok = bool(mgr.rename_pending(ticket, new_name))
+                    except Exception:
+                        ok = False
+                if ok:
+                    msg = f"✏️ Pending <b>#{ticket}</b> renommé en « <b>{new_name}</b> »."
+                    spoken = f"Pending {ticket} renommé en {new_name}."
+                    return {"action": "rename_pending", "reply": msg, "spoken": spoken,
+                            "value": ticket, "label": new_name}
+                msg = f"⚠️ Impossible de renommer le pending #{ticket} (ticket introuvable)."
+                return {"action": "rename_pending_failed", "reply": msg, "spoken": msg}
+            msg = ("✏️ Pour renommer un Pending Block, dites par exemple : "
+                   "« Renomme le pending 123456 en bloc London ».")
+            if pendings:
+                lst = ", ".join(
+                    f"#{getattr(p, 'ticket', '?')} {getattr(p, 'symbol', '?')}"
+                    + (f" « {getattr(p, 'label', '')} »" if getattr(p, 'label', '') else "")
+                    for p in pendings[:5]
+                )
+                msg += f"<br>Pendings actifs : {lst}."
+            return {"action": "rename_pending_help", "reply": msg, "spoken": msg}
+
         # ── 1. AUTOPILOT ON / OFF ──
         tokens = set(norm.split())
         has_autopilot_term = any(w in norm for w in ["autopilot", "auto pilot", "robot"])

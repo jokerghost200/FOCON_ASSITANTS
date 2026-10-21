@@ -1,10 +1,13 @@
 import logging
 import json
+import time
 from src.core.mt5_connector import MT5Connector
 from src.core.market_data import MarketDataEngine
 from src.core.technical_indicators import TechnicalIndicators
 from src.core.boomerang_detector import BoomerangDetector
 from src.core.order_block_detector import OrderBlockDetector
+from src.core.market_context import MarketContextEngine
+from src.trading.strategy_engine import StrategySelector
 from src.ai.local_quant_brain import LocalQuantBrain
 from src.ai.ai_router import AIRouter
 from src.trading.risk_manager import RiskManager
@@ -49,16 +52,53 @@ class AIOrchestrator:
             rejection_wick_min=0.3,
             min_rr=1.5,
         )
-        # Order Block detector
         self.ob_detector = OrderBlockDetector(
             impulse_atr_mult=1.8,
-            lookback=100,
+            lookback=300,
             retest_tolerance=0.6,
             sl_buffer_mult=0.2,
             tp_rr_mult=2.5,
         )
+        self.strategy_selector = StrategySelector()
+        self._symbol_cooldowns = {}
 
-    def scan_markets(self, symbols: list, timeframe: str, progress_cb=None, stop_event=None, direction_filter: str = None) -> list:
+    def set_symbol_cooldown(self, symbol: str, duration_seconds: float = 1800.0, reason: str = "", direction: str = None):
+        """
+        Active un cooldown sur un symbole après une sortie de trade (perte ou clôture)
+        pour éviter le revenge trading et l'ouverture répétée de positions en sens contraire du marché.
+        """
+        import time
+        sym = str(symbol).upper()
+        now = time.time()
+        self._symbol_cooldowns[sym] = {
+            "until": now + float(duration_seconds),
+            "reason": str(reason),
+            "direction": str(direction).upper() if direction else None,
+            "set_at": now,
+        }
+        logger.info(f"⏳ [Cooldown] Symbole {sym} placé en cooldown pour {duration_seconds/60:.1f} min ({reason}).")
+
+    def is_symbol_in_cooldown(self, symbol: str, direction: str = None) -> tuple:
+        """
+        Vérifie si le symbole est sous cooldown.
+        Retourne (is_in_cooldown, reason).
+        """
+        import time
+        sym = str(symbol).upper()
+        cd = self._symbol_cooldowns.get(sym)
+        if not cd:
+            return False, ""
+        now = time.time()
+        if now < cd.get("until", 0.0):
+            cd_dir = cd.get("direction")
+            if cd_dir is None or direction is None or cd_dir == str(direction).upper():
+                rem_m = (cd["until"] - now) / 60.0
+                return True, f"{cd.get('reason', 'Cooldown actif')} (encore {rem_m:.1f} min)"
+        else:
+            self._symbol_cooldowns.pop(sym, None)
+        return False, ""
+
+    def scan_markets(self, symbols: list, timeframe: str, progress_cb=None, stop_event=None, direction_filter: str = None, heartbeat_cb=None, ai_queue=None) -> list:
         """
         Scans a list of markets, filters closed ones, pre-analyzes technicals,
         asks AI to pick the top candidates, and generates full signals for them.
@@ -78,6 +118,8 @@ class AIOrchestrator:
         open_markets = []
         closed_markets = []
         for sym in symbols:
+            if heartbeat_cb:
+                heartbeat_cb()
             if self.mt5.is_market_open(sym):
                 open_markets.append(sym)
             else:
@@ -93,6 +135,8 @@ class AIOrchestrator:
         _emit(f"Calcul des indicateurs pour {len(open_markets)} marchés...")
         tech_summaries = {}
         for i, sym in enumerate(open_markets):
+            if heartbeat_cb:
+                heartbeat_cb()
             df = self.market_data.get_dataframe(sym, timeframe)
             if df is not None and not df.empty:
                 df = self.tech.add_all_indicators(df)
@@ -103,9 +147,9 @@ class AIOrchestrator:
                 features['bos_mss'] = amd.get('BOS_MSS', 'None')
                 features['liquidity_grab'] = amd.get('Liquidity_Grab', 'None')
                 tech_summaries[sym] = features
-            # Yield GIL every market so Qt main thread can process events
-            time.sleep(0)
-            if (i + 1) % 10 == 0:
+            # Yield GIL explicitly so Qt main thread can process events and avoid freezing
+            time.sleep(0.02)
+            if (i + 1) % 5 == 0:
                 _emit(f"Indicateurs: {i+1}/{len(open_markets)} marchés traités...")
                 
         if not tech_summaries:
@@ -209,13 +253,24 @@ class AIOrchestrator:
         Réponds UNIQUEMENT avec un objet JSON au format suivant, sans aucun autre texte ou markdown :
         {{"selected": ["SYMBOLE1", "SYMBOLE2"]}} (ou {{"selected": []}} si rien n'est bon).
         """
-        _emit(f"Sélection des meilleurs marchés parmi {len(tech_summaries)}...")
-        response = self.router.ask_text(selection_prompt, stop_event=stop_event)
+        has_ai = False
+        if hasattr(self.router, 'has_available_provider'):
+            has_ai = self.router.has_available_provider()
+        elif hasattr(self.router, 'status'):
+            st = self.router.status()
+            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+
+        if has_ai:
+            _emit(f"Sélection des meilleurs marchés parmi {len(tech_summaries)}...")
+            response = self.router.ask_text(selection_prompt, stop_event=stop_event)
+        else:
+            _emit(f"⚡ [Mode Rapide Cerveau Local] Sélection instantanée par scoring SMC...")
+            response = None
         
         def _score_setup(s):
             feat = tech_summaries[s]
             s_val = float(feat.get('_atr_rel') or 0) * 1000
-            if feat.get('amd_phase') in ('Manipulation', 'Expansion'): s_val += 25
+            if feat.get('amd_phase') in ('Manipulation', 'Expansion', 'Distribution'): s_val += 25
             if feat.get('fvg') and feat.get('fvg') != 'None': s_val += 20
             if feat.get('bos_mss') and feat.get('bos_mss') != 'None': s_val += 20
             if feat.get('liquidity_grab') and feat.get('liquidity_grab') != 'None': s_val += 30
@@ -263,21 +318,26 @@ class AIOrchestrator:
 
         # 4. Deep analysis for selected markets
         results = []
-        for i, sym in enumerate(selected_symbols):
-            # Abort if stop requested
-            if stop_event and stop_event.is_set():
-                _emit("Scan annulé.")
-                break
-            if i > 0:
-                _emit(f"Pause 4s (rate limit)... ({i}/{len(selected_symbols)})")
-                for _ in range(4):
-                    if stop_event and stop_event.is_set():
-                        break
-                    time.sleep(1)
-                
-            _emit(f"Analyse approfondie de {sym} ({i+1}/{len(selected_symbols)})...")
-            res = self.analyze_symbol(sym, timeframe, stop_event=stop_event, direction_filter=dir_filter_upper)
-            results.append(res)
+        if ai_queue is not None:
+            _emit("Mise en file d'attente de l'analyse IA (Asynchrone)...")
+            for sym in selected_symbols:
+                ai_queue.put((sym, timeframe, dir_filter_upper))
+        else:
+            for i, sym in enumerate(selected_symbols):
+                # Abort if stop requested
+                if stop_event and stop_event.is_set():
+                    _emit("Scan annulé.")
+                    break
+                if i > 0 and has_ai:
+                    _emit(f"Pause 1s (rate limit)... ({i}/{len(selected_symbols)})")
+                    for _ in range(1):
+                        if stop_event and stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    
+                _emit(f"Analyse approfondie de {sym} ({i+1}/{len(selected_symbols)})...")
+                res = self.analyze_symbol(sym, timeframe, stop_event=stop_event, direction_filter=dir_filter_upper)
+                results.append(res)
 
         if self.order_block_scan_enabled:
             _emit("Scan Order Blocks actifs...")
@@ -351,10 +411,10 @@ class AIOrchestrator:
 
         # 1b. Higher Timeframe (HTF) Data for Context
         htf = "H1"
-        if timeframe.upper() == "M15": htf = "H4"
+        if timeframe.upper() == "M15": htf = "H1"
         elif timeframe.upper() in ["H1", "H4"]: htf = "D1"
 
-        htf_df = self.market_data.get_dataframe(symbol, htf)
+        htf_df = self.market_data.get_dataframe(symbol, htf, num_bars=700)
         htf_trend = "Unknown"
         htf_ema50 = "Unknown"
         if htf_df is not None and not htf_df.empty:
@@ -457,6 +517,25 @@ class AIOrchestrator:
             spread_pts   = float(symbol_info.get('spread', 0))
             point        = float(symbol_info.get('point', 0.00001))
             spread_price = spread_pts * point
+            
+        # Determine Market Regime and query Strategy Engine
+        market_regime = MarketContextEngine.detect_market_regime(tech_features, htf_trend, amd_context)
+        proposals = self.strategy_selector.select_and_evaluate(
+            market_regime=market_regime,
+            tech_features=tech_features, 
+            amd_context=amd_context, 
+            htf_trend=htf_trend, 
+            price=close_p, 
+            spread=spread_price, 
+            min_distance=min_distance,
+            valid_obs=valid_obs if has_active_ob else None
+        )
+        
+        strategy_context = "Aucune stratégie spécifique activée."
+        if proposals:
+            strategy_context = "Stratégies activées par le Rule Engine :\n"
+            for p in proposals:
+                strategy_context += f"- {p['strategy']}: {p['direction']} ({p['reason']})\n"
 
         if dir_filter_upper == "BUY_ONLY":
             dir_clause_ai = "7. DIRECTIONAL CONSTRAINT (MANDATORY): The trader is strictly restricted to BUY_ONLY (Hausse seule). You must NEVER output SELL. If no valid BUY setup is available, output 'WAIT'."
@@ -512,7 +591,7 @@ class AIOrchestrator:
         """
         
         prompt = f"""
-        Analyze {symbol} on {timeframe} timeframe.
+        Analyze {symbol} on {timeframe} timeframe (Deep Scan: 700 candles history for robust structural understanding).
         Current Price: {tech_features.get('close')}
         Spread (bid/ask cost): {spread_price:.5f} — your TP must cover at least 5x this.
         Trend Bias: {tech_features.get('trend')}
@@ -538,6 +617,11 @@ class AIOrchestrator:
         ─── BOOMERANG SETUP ANALYSIS ───
         {boomerang_context}
         ────────────────────────────────
+        
+        ─── MARKET REGIME & STRATEGY ENGINE ───
+        Market Regime Detected: {market_regime}
+        {strategy_context}
+        ───────────────────────────────────────
 
         AMD / Smart Money Concepts Context:
         Phase: {amd_context.get('Phase', 'Unknown')}
@@ -563,8 +647,19 @@ class AIOrchestrator:
         Provide your trade recommendation.
         """
         
-        logger.info("Asking AI router for trade decision...")
-        response = self.router.ask_text(prompt, system_prompt=system_prompt, stop_event=stop_event)
+        has_ai = False
+        if hasattr(self.router, 'has_available_provider'):
+            has_ai = self.router.has_available_provider()
+        elif hasattr(self.router, 'status'):
+            st = self.router.status()
+            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+
+        response = None
+        if has_ai:
+            logger.info("Asking AI router for trade decision...")
+            response = self.router.ask_text(prompt, system_prompt=system_prompt, stop_event=stop_event)
+        else:
+            logger.info(f"⚡ [Cerveau Local Rapide] Bypassement IA externe pour {symbol} -> Analyse quantitative instantanée.")
         
         decision = None
         if response:
@@ -600,6 +695,41 @@ class AIOrchestrator:
                 min_distance=min_distance,
                 direction_filter=dir_filter_upper,
             )
+
+        # ─── PHASE 2: OVERRIDE RISK WITH STRATEGY ENGINE ───
+        if decision and decision.get("action") in ("BUY", "SELL") and proposals:
+            # Find the first proposal that matches the AI direction
+            matching_prop = next((p for p in proposals if p["direction"] == decision["action"]), None)
+            if matching_prop:
+                logger.info(f"Phase 2: Overwriting entry/sl/tp with Strategy Engine values for {matching_prop['strategy']}")
+                decision["entry"] = matching_prop["entry"]
+                decision["sl"] = matching_prop["sl"]
+                decision["tp"] = matching_prop["tp"]
+                decision["reason"] += f" [Strategy: {matching_prop['strategy']}]"
+                
+                # ─── PHASE 3: MEMORY & PERFORMANCE ENGINE (EXPECTANCY) ───
+                if self.trade_memory:
+                    import datetime
+                    current_hour = datetime.datetime.utcnow().hour
+                    if 0 <= current_hour < 8:
+                        session = "ASIA"
+                    elif 8 <= current_hour < 13:
+                        session = "LONDON"
+                    elif 13 <= current_hour < 17:
+                        session = "NEW_YORK_LONDON_OVERLAP"
+                    else:
+                        session = "NEW_YORK"
+                        
+                    strat_name = matching_prop["strategy"]
+                    perf = self.trade_memory.check_expectancy(symbol, session, strat_name)
+                    
+                    if perf["status"] == "DISABLED":
+                        logger.warning(
+                            f"[Phase 3 Expectancy] {symbol} {session}: Stratégie {strat_name} "
+                            f"désactivée (Expectancy = {perf['expectancy_r']}R < 0 sur {perf['trades_count']} trades)."
+                        )
+                        decision["action"] = "WAIT"
+                        decision["reason"] = f"Phase 3 Expectancy: Stratégie {strat_name} non rentable en session {session} ({perf['expectancy_r']}R)."
 
         # ─── GARDE-FOU ALGORITHMIQUE DÉTERMINISTE (ANTI-FOMO / QUALITÉ D'ENTRÉE) ───
         proposed_action = str(decision.get('action', 'WAIT')).upper()
@@ -651,7 +781,7 @@ class AIOrchestrator:
                     (has_active_ob and top_ob_dir == proposed_action)
                 )
                 has_weak_confluence = (
-                    (amd_context.get('Phase') in ('Expansion', 'Manipulation') and amd_context.get('FVG') != 'None')
+                    (amd_context.get('Phase') in ('Expansion', 'Distribution', 'Manipulation') and amd_context.get('FVG') != 'None')
                 )
                 conf = float(decision.get('confidence', 0))
                 is_sniper = getattr(self.risk, 'risk_profile', '') == "SNIPER"
@@ -759,8 +889,19 @@ class AIOrchestrator:
         If the trend is strong in our favor, reply with "MODIFY" to trail the Stop Loss or extend Take Profit.
         Otherwise, reply "HOLD".
         """
-        
-        response = self.router.ask_text(prompt, system_prompt=system_prompt)
+
+        has_ai = False
+        if hasattr(self.router, 'has_available_provider'):
+            has_ai = self.router.has_available_provider()
+        elif hasattr(self.router, 'status'):
+            st = self.router.status()
+            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+
+        response = None
+        if has_ai:
+            response = self.router.ask_text(prompt, system_prompt=system_prompt)
+        else:
+            logger.info(f"⚡ [Cerveau Local] Évaluation directe et instantanée de la position {symbol}.")
         
         decision = None
         if response:
@@ -792,6 +933,7 @@ class AIOrchestrator:
         """
         results = []
         for symbol in symbols:
+            time.sleep(0.02) # Yield GIL
             if stop_event and stop_event.is_set():
                 break
             try:
@@ -822,7 +964,79 @@ class AIOrchestrator:
                     continue
 
                 best_ob = obs[0]   # meilleur OB classe par score
-                logger.info(f"[OB Rescan] {symbol}: {best_ob.ob_type} detecte (score {best_ob.score:.0f})")
+                if best_ob.score < 65:
+                    continue
+
+                # 0. Filtre Cooldown anti-revenge trading / après perte
+                is_cd, cd_reason = self.is_symbol_in_cooldown(symbol, best_ob.direction)
+                if is_cd:
+                    logger.info(f"[OB Rescan] {symbol}: Rejet {best_ob.direction} — Symbole en cooldown: {cd_reason}")
+                    continue
+
+                # 1. Filtre anti-spam : Pas de trade si position déjà ouverte sur le symbole
+                open_pos = self.mt5.get_open_positions() or []
+                if any(p.get('symbol') == symbol for p in open_pos):
+                    continue
+
+                # 2. Filtre tendance HTF : Pas de trade contre la tendance HTF
+                htf_upper = htf_trend.upper()
+                if best_ob.direction == 'BUY' and 'BEAR' in htf_upper:
+                    logger.info(f"[OB Rescan] {symbol}: Rejet BUY contre tendance HTF ({htf_trend})")
+                    continue
+                elif best_ob.direction == 'SELL' and 'BULL' in htf_upper:
+                    logger.info(f"[OB Rescan] {symbol}: Rejet SELL contre tendance HTF ({htf_trend})")
+                    continue
+
+                # 2b. Filtre Anti-Chute Libre / Anti-Couteau qui tombe (Anti-Falling Knife)
+                # Si le marché s'effondre avec des bougies baissières successives sans réaction haussière,
+                # ne jamais exécuter d'ordre marché BUY aveugle !
+                if len(df) >= 3:
+                    last_c = df.iloc[-1]
+                    prev_c = df.iloc[-2]
+                    c_last, o_last = float(last_c['close']), float(last_c['open'])
+                    c_prev, o_prev = float(prev_c['close']), float(prev_c['open'])
+                    h_last, l_last = float(last_c['high']), float(last_c['low'])
+                    rng_last = h_last - l_last
+
+                    if best_ob.direction == 'BUY':
+                        is_bear_run = (c_last < o_last) and (c_prev < o_prev)
+                        lower_wick = (c_last - l_last) if c_last < o_last else (o_last - l_last)
+                        has_wick_rejection = rng_last > 0 and (lower_wick / rng_last) >= 0.30
+                        has_reaction = (c_last > o_last) or has_wick_rejection or getattr(best_ob, 'has_rejection', False)
+                        if is_bear_run and not has_reaction:
+                            logger.info(f"[OB Rescan] {symbol}: Rejet BUY — Marché en chute libre (bougies rouges consécutives sans rejet haussier). Attente de stabilisation.")
+                            continue
+                    elif best_ob.direction == 'SELL':
+                        is_bull_run = (c_last > o_last) and (c_prev > o_prev)
+                        upper_wick = (h_last - c_last) if c_last > o_last else (h_last - o_last)
+                        has_wick_rejection = rng_last > 0 and (upper_wick / rng_last) >= 0.30
+                        has_reaction = (c_last < o_last) or has_wick_rejection or getattr(best_ob, 'has_rejection', False)
+                        if is_bull_run and not has_reaction:
+                            logger.info(f"[OB Rescan] {symbol}: Rejet SELL — Marché en forte hausse sans rejet baissier. Attente de stabilisation.")
+                            continue
+
+                # 3. Filtre RSI anti-surachat / survente
+                if 'RSI_14' in df.columns:
+                    rsi = float(df['RSI_14'].iloc[-1] or 50.0)
+                    if best_ob.direction == 'BUY' and rsi >= 68.0:
+                        logger.info(f"[OB Rescan] {symbol}: Rejet BUY sur RSI suracheté ({rsi:.1f})")
+                        continue
+                    elif best_ob.direction == 'SELL' and rsi <= 32.0:
+                        logger.info(f"[OB Rescan] {symbol}: Rejet SELL sur RSI survendu ({rsi:.1f})")
+                        continue
+
+                # 4. Filtre de spread : Le SL doit être suffisamment éloigné du spread pour ne pas être fauché
+                symbol_info = self.mt5.get_symbol_info(symbol)
+                if symbol_info:
+                    s_pts = float(symbol_info.get('spread', 0) or 0)
+                    p_pt = float(symbol_info.get('point', 0.00001) or 0.00001)
+                    spread_val = s_pts * p_pt
+                    sl_dist = abs(best_ob.entry - best_ob.sl)
+                    if spread_val > 0 and sl_dist < (spread_val * 2.5):
+                        logger.info(f"[OB Rescan] {symbol}: Rejet car SL trop serré par rapport au spread ({sl_dist:.5f} < 2.5x {spread_val:.5f})")
+                        continue
+
+                logger.info(f"[OB Rescan] {symbol}: {best_ob.ob_type} validé (score {best_ob.score:.0f}, HTF {htf_trend})")
 
                 # Construire un 'decision' compatible avec le risk manager
                 decision = {
@@ -876,6 +1090,7 @@ class AIOrchestrator:
         """
         results = []
         for symbol in symbols:
+            time.sleep(0.02) # Yield GIL
             if stop_event and stop_event.is_set():
                 break
             try:
@@ -908,6 +1123,11 @@ class AIOrchestrator:
                     continue
 
                 best_ob = pending_obs[0]
+                is_cd, cd_reason = self.is_symbol_in_cooldown(symbol, best_ob.direction)
+                if is_cd:
+                    logger.info(f"[OB PENDING] {symbol}: Rejet {best_ob.direction} — Symbole en cooldown: {cd_reason}")
+                    continue
+
                 logger.info(
                     f"[OB PENDING] {symbol}: {best_ob.ob_type} zone détectée "
                     f"(score {best_ob.score:.0f}, entry={best_ob.entry:.5f})"

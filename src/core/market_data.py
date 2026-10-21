@@ -11,7 +11,7 @@ class MarketDataEngine:
         self.connector = connector
         self.amd_engine = AMDEngine(lookback_period=20)
 
-    def get_dataframe(self, symbol: str, timeframe: str, num_bars: int = 500) -> Optional[pd.DataFrame]:
+    def get_dataframe(self, symbol: str, timeframe: str, num_bars: int = 700) -> Optional[pd.DataFrame]:
         """
         Fetches historical data from MT5 and converts it to a pandas DataFrame.
         """

@@ -49,9 +49,8 @@ class GeminiAgent:
             payload["generationConfig"]["responseMimeType"] = "application/json"
             payload["generationConfig"]["responseSchema"] = response_schema
 
-        # Google Search is optional news context. On quota exhaustion, fail fast
-        # instead of sleeping 8s + 15s per key and blocking the whole scan.
-        backoff_per_key = [] if use_search else [8, 15]
+        # Fail fast instead of blocking the whole scan on quota exhaustion.
+        backoff_per_key = [] if use_search else [2]
 
         for key_idx, api_key in enumerate(self.key_pool):
             if not api_key or not api_key.strip():
@@ -63,14 +62,14 @@ class GeminiAgent:
                 if stop_event and stop_event.is_set():
                     return None
                 try:
-                    resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+                    resp = httpx.post(url, headers=headers, json=payload, timeout=12.0)
 
                     if resp.status_code == 429:
                         wait = int(resp.headers.get(
                             "Retry-After",
                             backoff_per_key[attempt] if attempt < len(backoff_per_key) else 0
                         ))
-                        wait = min(wait, 60)
+                        wait = min(wait, 2)
                         action = f"waiting {wait}s" if attempt < len(backoff_per_key) else "skipping key"
                         logger.warning(
                             f"Gemini 429 [key #{key_idx+1}] - "

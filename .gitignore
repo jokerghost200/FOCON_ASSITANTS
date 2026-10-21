@@ -18,6 +18,7 @@ ENV/
 # ─── IDE / Editor ─────────────────────────────────────
 .vscode/
 .idea/
+.kilo/
 *.swp
 *.swo
 *~
@@ -47,7 +48,10 @@ config/keys.yaml
 # ─── Trade data / memory ──────────────────────────────
 data/trade_memory*.json
 data/weights*.json
+data/adaptive_weights*.json
 data/*.db
+data/*.json
+tmp/
 
 # ─── Audio recordings ────────────────────────────────
 recordings/

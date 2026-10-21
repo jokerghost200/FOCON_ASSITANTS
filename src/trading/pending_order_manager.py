@@ -44,6 +44,7 @@ class PendingOBOrder:
     created_at: float = 0.0        # timestamp
     max_age_seconds: int = 14400   # auto-cancel after 4 hours
     status: str = "ACTIVE"         # ACTIVE, FILLED, CANCELLED, INVALIDATED, EXPIRED
+    label: str = ""                # Nom personnalisé donné par l'utilisateur dans l'UI
 
 
 class PendingOrderManager:
@@ -82,6 +83,7 @@ class PendingOrderManager:
         lot: float,
         htf_trend: str = "Unknown",
         expiration_seconds: int = 14400,
+        label: str = "",
     ) -> Optional[PendingOBOrder]:
         """
         Places a pending limit order on an Order Block zone.
@@ -94,17 +96,19 @@ class PendingOrderManager:
         -------
         PendingOBOrder if successfully placed, None otherwise.
         """
+        self.sync_with_mt5()
         with self._lock:
             # 1. Check limits
-            if len(self._pending_orders) >= self.max_pending_total:
-                logger.info(f"[PENDING] Max {self.max_pending_total} pending orders reached. Ignoring {symbol}.")
+            active_count = sum(1 for po in self._pending_orders.values() if po.status == "ACTIVE")
+            if active_count >= self.max_pending_total:
+                logger.info(f"[PENDING] Max {self.max_pending_total} active pending orders reached. Ignoring {symbol}.")
                 return None
             
             # Check per-symbol limit
             sym_count = sum(1 for po in self._pending_orders.values() 
                          if po.symbol == symbol and po.status == "ACTIVE")
             if sym_count >= self.max_pending_per_symbol:
-                logger.info(f"[PENDING] Already {sym_count} pending on {symbol}. Skipping.")
+                logger.info(f"[PENDING] Already {sym_count} active pending on {symbol}. Skipping.")
                 return None
 
             # 2. Validate OB quality
@@ -152,6 +156,10 @@ class PendingOrderManager:
                 return None
 
             # 5. Place the pending order via MT5
+            # Le nom personnalisé saisi dans l'UI devient le commentaire MT5
+            # (limite MT5 = 31 caractères) pour retrouver l'ordre facilement.
+            custom_label = str(label or "").strip()[:31]
+            mt5_comment = custom_label if custom_label else f"AI OB {ob.ob_type}"
             result = self.mt5.place_pending_order(
                 symbol=symbol,
                 action=ob.direction,
@@ -159,7 +167,7 @@ class PendingOrderManager:
                 price=ob.entry,
                 sl=ob.sl,
                 tp=ob.tp,
-                comment=f"AI OB {ob.ob_type}",
+                comment=mt5_comment,
                 expiration_seconds=expiration_seconds,
             )
 
@@ -183,6 +191,7 @@ class PendingOrderManager:
                 created_at=time.time(),
                 max_age_seconds=expiration_seconds,
                 status="ACTIVE",
+                label=custom_label,
             )
             self._pending_orders[ticket] = pending
             
@@ -312,13 +321,77 @@ class PendingOrderManager:
         else:
             logger.warning(f"[PENDING] #{ticket} — Échec d'annulation MT5 (peut-être déjà rempli): {reason}")
 
+    def sync_with_mt5(self):
+        """
+        Synchronise l'état des ordres limites locaux avec MetaTrader 5.
+        - Détecte les ordres exécutés (FILLED) ou fermés/annulés dans MT5 (CANCELLED/EXPIRED).
+        - Récupère également les ordres limites existants sur MT5 qui ne seraient pas encore suivis.
+        """
+        if not self.mt5 or not getattr(self.mt5, 'connected', False):
+            return
+
+        try:
+            mt5_orders = self.mt5.get_pending_orders() or []
+            live_tickets = {int(o['ticket']): o for o in mt5_orders}
+            open_pos = self.mt5.get_open_positions() or []
+
+            with self._lock:
+                # 1. Vérifier les ordres suivis localement
+                for ticket, pending in list(self._pending_orders.items()):
+                    if pending.status == "ACTIVE" and ticket not in live_tickets:
+                        was_filled = any(
+                            p.get('symbol') == pending.symbol
+                            and abs(float(p.get('price_open', 0)) - pending.entry_price) < 0.002 * max(pending.entry_price, 1.0)
+                            for p in open_pos
+                        )
+                        if was_filled:
+                            pending.status = "FILLED"
+                            logger.info(f"✅ [PENDING] #{ticket} {pending.symbol} — Ordre REMPLI (position ouverte détectée).")
+                        else:
+                            pending.status = "CANCELLED"
+                            logger.info(f"🗑️ [PENDING] #{ticket} {pending.symbol} — Ordre fermé ou annulé dans MT5.")
+
+                # 2. Intégrer les ordres MT5 non encore enregistrés
+                for tkt, o in live_tickets.items():
+                    if tkt not in self._pending_orders:
+                        direction = 'BUY' if str(o.get('type', '')).upper() in ('BUY', '0', '2') else 'SELL'
+                        self._pending_orders[tkt] = PendingOBOrder(
+                            ticket=tkt,
+                            symbol=o.get('symbol', 'UNKNOWN'),
+                            direction=direction,
+                            entry_price=float(o.get('price_open', 0.0) or 0.0),
+                            sl=float(o.get('sl', 0.0) or 0.0),
+                            tp=float(o.get('tp', 0.0) or 0.0),
+                            volume=float(o.get('volume', 0.01) or 0.01),
+                            ob_high=float(o.get('price_open', 0.0) or 0.0),
+                            ob_low=float(o.get('price_open', 0.0) or 0.0),
+                            ob_score=60.0,
+                            timeframe="M15",
+                            created_at=float(o.get('time_setup', time.time()) or time.time()),
+                            status="ACTIVE",
+                            label=str(o.get('comment', '') or ''),
+                        )
+        except Exception as e:
+            logger.warning(f"[PENDING] Erreur synchronisation MT5: {e}")
+
+    def clear_inactive(self) -> int:
+        """Supprime les ordres terminés (CANCELLED, EXPIRED, FILLED) de la mémoire."""
+        with self._lock:
+            to_del = [t for t, po in self._pending_orders.items() if po.status != "ACTIVE"]
+            for t in to_del:
+                del self._pending_orders[t]
+        logger.info(f"🧹 [PENDING] {len(to_del)} ordres inactifs nettoyés.")
+        return len(to_del)
+
     def get_active_pendings(self) -> List[PendingOBOrder]:
-        """Returns list of currently active pending orders."""
+        """Returns list of currently active pending orders after MT5 sync."""
+        self.sync_with_mt5()
         with self._lock:
             return [po for po in self._pending_orders.values() if po.status == "ACTIVE"]
 
     def get_all_pendings(self) -> List[PendingOBOrder]:
-        """Returns all pending orders (active + historical)."""
+        """Returns all pending orders (active + historical) after MT5 sync."""
+        self.sync_with_mt5()
         with self._lock:
             return list(self._pending_orders.values())
 
@@ -328,6 +401,23 @@ class PendingOrderManager:
             inactive = [t for t, po in self._pending_orders.items() if po.status != "ACTIVE"]
             for t in inactive[:-max_history]:
                 del self._pending_orders[t]
+
+    def rename_pending(self, ticket: int, new_label: str) -> bool:
+        """Renomme un ordre pending (label local affiché dans l'UI).
+
+        MT5 ne permet pas de modifier le commentaire d'un ordre déjà placé,
+        donc le renommage est local (mémoire + logs). Le label est aussi
+        réutilisé si un nouvel ordre est replacé.
+        Retourne True si le ticket existe.
+        """
+        clean = str(new_label or "").strip()[:31]
+        with self._lock:
+            pending = self._pending_orders.get(int(ticket))
+            if pending is None:
+                return False
+            pending.label = clean
+        logger.info(f"✏️ [PENDING] #{ticket} renommé en '{clean}'")
+        return True
 
     def get_stats(self) -> dict:
         """Returns statistics about pending orders."""

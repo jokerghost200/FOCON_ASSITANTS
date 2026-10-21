@@ -172,7 +172,7 @@ class LocalQuantBrain:
         # F) AMD SMC Phase
         phase = str(amd_context.get("Phase", "")).upper()
         fvg = str(amd_context.get("FVG", "None"))
-        if "EXPANSION" in phase and fvg != "None":
+        if ("EXPANSION" in phase or "DISTRIBUTION" in phase) and fvg != "None":
             if ema50 > ema200:
                 bull_score += w_amd
             elif ema50 < ema200:

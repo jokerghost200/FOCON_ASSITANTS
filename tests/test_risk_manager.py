@@ -242,6 +242,34 @@ class TestRiskManager(unittest.TestCase):
         res_safe = rm.validate_proposal(proposal_safe, account, symbol)
         self.assertTrue(res_safe["valid"])
 
+    def test_fixed_lot_when_auto_tier_disabled(self):
+        """Vérifie que le lot fixe n'est pas bridé arbitrairement à 0.02 quand auto_tier est désactivé."""
+        from unittest.mock import patch
+        rm = RiskManager(
+            auto_tier_enabled=False,
+            fixed_lot_size=0.10
+        )
+        account = {"balance": 60.0, "margin_free": 55.0}
+        symbol = {
+            "name": "USDJPY", "volume_max": 100.0, "volume_min": 0.01,
+            "volume_step": 0.01, "trade_contract_size": 100000.0,
+            "trade_tick_size": 0.001, "trade_tick_value": 0.65,
+            "trade_stops_level": 0, "point": 0.001, "spread": 2,
+        }
+        proposal = {
+            "action": "BUY",
+            "entry": 158.00,
+            "sl": 157.80,
+            "tp": 158.50,
+            "confidence": 85.0
+        }
+        # 1 lot requires ~200 USD margin; for 0.10 lot, requires ~20 USD margin.
+        # With 55 USD free margin and 75% ratio (41.25 USD limit), 0.10 lot fits easily!
+        with patch("MetaTrader5.order_calc_margin", return_value=200.0):
+            res = rm.validate_proposal(proposal, account, symbol)
+            self.assertTrue(res["valid"])
+            self.assertEqual(res["proposal"]["lot"], 0.10)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

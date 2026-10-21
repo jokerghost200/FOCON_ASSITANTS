@@ -56,6 +56,14 @@ class AIRouter:
             stop_event=stop_event, purpose="chat",
         )
 
+    def has_available_provider(self) -> bool:
+        """Vérifie si au moins un provider IA est configuré et hors cooldown."""
+        now = time.time()
+        for name in ("openrouter", "gemini"):
+            if self._agent(name) is not None and now >= self._cooldown_until.get(name, 0):
+                return True
+        return False
+
     def status(self):
         """Etat des providers pour l'UI."""
         now = time.time()
@@ -190,11 +198,12 @@ class AIRouter:
             self._mark_failure(name)
         if all(not self._available(name) for name, _ in chain):
             now = time.time()
-            if (now - getattr(self, '_last_forced_retry', 0.0)) < 60.0:
+            # Si les providers sont en cooldown, basculer immédiatement sur le Cerveau Local sans freeze réseau
+            if (now - getattr(self, '_last_forced_retry', 0.0)) < self.cooldown_seconds:
                 logger.debug(f"[AIRouter:{purpose}] tous en cooldown, bascule immédiate sur fallback local.")
                 return None
             self._last_forced_retry = now
-            logger.warning(f"[AIRouter:{purpose}] tous en cooldown, tentative forcee...")
+            logger.warning(f"[AIRouter:{purpose}] tous en cooldown, tentative rapide...")
             for name, fn in chain:
                 if self._agent(name) is None:
                     continue

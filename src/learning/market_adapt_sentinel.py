@@ -87,15 +87,36 @@ class MarketAdaptationSentinel:
 
         # ── 2. Analyse de la Série de Pertes Récentes ──
         trades_to_check = recent_trades or []
-        if not trades_to_check and hasattr(orchestrator, "memory"):
-            try:
-                trades_to_check = getattr(orchestrator.memory, "trades", [])
-            except Exception:
-                trades_to_check = []
+        if not trades_to_check:
+            tm = getattr(orchestrator, "trade_memory", None) or getattr(orchestrator, "memory", None)
+            if tm:
+                try:
+                    if hasattr(tm, "get_closed_trades"):
+                        trades_to_check = tm.get_closed_trades(limit=10)
+                    elif hasattr(tm, "trades"):
+                        tr_data = getattr(tm, "trades")
+                        raw_list = list(tr_data.values()) if isinstance(tr_data, dict) else list(tr_data)
+                        closed_list = [x for x in raw_list if isinstance(x, dict) and x.get("status") == "CLOSED"]
+                        closed_list.sort(key=lambda x: x.get("close_time", 0) or 0, reverse=True)
+                        trades_to_check = closed_list[:10]
+                except Exception as _e:
+                    logger.debug(f"Sentinel: failed to fetch closed trades from memory: {_e}")
+                    trades_to_check = []
 
         consecutive_losses = 0
-        for t in reversed(trades_to_check[-6:]):
-            profit = float(t.get("profit", 0.0) or 0.0)
+        sorted_trades = list(trades_to_check)
+        if any(t.get("close_time") for t in sorted_trades if isinstance(t, dict)):
+            sorted_trades.sort(key=lambda x: x.get("close_time", 0) or 0, reverse=True)
+        elif recent_trades:
+            sorted_trades = list(reversed(sorted_trades))
+
+        for t in sorted_trades[:6]:
+            if not isinstance(t, dict):
+                continue
+            profit_val = t.get("final_profit_usd")
+            if profit_val is None:
+                profit_val = t.get("profit", 0.0)
+            profit = float(profit_val or 0.0)
             if profit < 0:
                 consecutive_losses += 1
             elif profit > 0:

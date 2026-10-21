@@ -37,7 +37,7 @@ class ScannerThread(QThread):
     progress = Signal(str)  # emits status messages to keep UI alive
 
     def __init__(self, orchestrator, symbols, timeframe,
-                 allowed_types=None, fallback_symbols=None, direction_filter=None, parent=None):
+                 allowed_types=None, fallback_symbols=None, direction_filter=None, parent=None, watchdog=None, ai_queue=None):
         super().__init__(parent)
         self.orchestrator = orchestrator
         self.symbols = symbols          # peut être None -> fetch dans run()
@@ -46,12 +46,16 @@ class ScannerThread(QThread):
         self.fallback_symbols = fallback_symbols
         self.direction_filter = direction_filter or getattr(orchestrator, 'allowed_trade_direction', 'BOTH')
         self.stop_event = threading.Event()
+        self.watchdog = watchdog
+        self.ai_queue = ai_queue
 
     def run(self):
         try:
             # IMPORTANT : les appels MT5 (IPC native C) ne doivent jamais être
             # faits depuis le thread GUI — un crash C là ferme l'app sans
             # aucun traceback. Le fetch des symboles se fait donc ici.
+            if self.watchdog:
+                self.watchdog.heartbeat("ScannerThread")
             if not self.symbols:
                 self.progress.emit("Récupération des symboles MT5...")
                 self.symbols = self.orchestrator.mt5.get_visible_symbols(
@@ -59,12 +63,21 @@ class ScannerThread(QThread):
             if not self.symbols:
                 # Fallback to config if MT5 doesn't return anything
                 self.symbols = list(self.fallback_symbols or ["EURUSD"])
+            
+            def heartbeat_cb(*args, **kwargs):
+                if self.watchdog:
+                    self.watchdog.heartbeat("ScannerThread")
+
             results = self.orchestrator.scan_markets(
                 self.symbols, self.timeframe,
                 progress_cb=self.progress.emit,
                 stop_event=self.stop_event,
                 direction_filter=self.direction_filter,
+                heartbeat_cb=heartbeat_cb,
+                ai_queue=self.ai_queue
             )
+            if self.watchdog:
+                self.watchdog.heartbeat("ScannerThread")
         except Exception as e:
             _log_crash("ScannerThread.run")
             try:
@@ -118,6 +131,37 @@ class ChatThread(QThread):
         except Exception as e:
             self.chat_finished.emit({"reply": f"Erreur de communication : {e}", "changes": []})
 
+class AIAnalyzerThread(QThread):
+    analysis_finished = Signal(dict)
+    progress = Signal(str)
+
+    def __init__(self, orchestrator, ai_queue, parent=None):
+        super().__init__(parent)
+        self.orchestrator = orchestrator
+        self.ai_queue = ai_queue
+        self.running = True
+
+    def run(self):
+        import queue
+        while self.running:
+            try:
+                item = self.ai_queue.get(timeout=1.0)
+                if item is None:
+                    continue
+                sym, timeframe, direction_filter = item
+                self.progress.emit(f"🧠 [IA Async] Analyse approfondie en arrière-plan pour {sym}...")
+                res = self.orchestrator.analyze_symbol(sym, timeframe, stop_event=None, direction_filter=direction_filter)
+                if res:
+                    self.analysis_finished.emit(res)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                import logging as _lg
+                _lg.getLogger(__name__).exception("Erreur dans AIAnalyzerThread")
+                self.progress.emit(f"❌ Erreur IA Async: {e}")
+
+    def stop(self):
+        self.running = False
 
 class OBScanThread(QThread):
     """Thread de rescanning Order Block post-trade (2-3 passes apres 5 min)."""
@@ -211,6 +255,13 @@ class ConfigDialog(QDialog):
         self.auto_tier_cb.setChecked(self.config.get('risk_management', {}).get('auto_tier_enabled', True))
         self.auto_tier_cb.setToolTip("Ajuste les quotas de positions et la protection du lot 0.01 selon la taille réelle du compte MT5.")
 
+        self.manual_max_pos_cb = QCheckBox("Forcer Max Positions (ignorer le plafond strict du palier de capital)")
+        self.manual_max_pos_cb.setChecked(self.config.get('risk_management', {}).get('manual_max_positions_override', True))
+        self.manual_max_pos_cb.setToolTip(
+            "Si coché, le nombre configuré dans 'Max Positions' est toujours respecté,\n"
+            "même si le palier de capital (ex: Micro < 250$) recommande moins de positions."
+        )
+
         self.daily_profit_pct_spin = QDoubleSpinBox()
         self.daily_profit_pct_spin.setRange(0.0, 50.0)
         self.daily_profit_pct_spin.setSingleStep(0.5)
@@ -230,6 +281,14 @@ class ConfigDialog(QDialog):
         self.risk_pct_spin.setSingleStep(0.1)
         self.risk_pct_spin.setSuffix(" %")
         self.risk_pct_spin.setValue(self.config.get('risk_management', {}).get('default_risk_percent', 1.0))
+
+        self.fixed_lot_size_spin = QDoubleSpinBox()
+        self.fixed_lot_size_spin.setRange(0.0, 100.0)
+        self.fixed_lot_size_spin.setSingleStep(0.01)
+        self.fixed_lot_size_spin.setDecimals(2)
+        self.fixed_lot_size_spin.setValue(float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0)))
+        self.fixed_lot_size_spin.setToolTip("Volume fixe (ex: 0.1). Si 0.0, le robot calcule le volume en Auto-Pilot selon le % de risque.")
+        
         
         self.daily_loss_spin = QDoubleSpinBox()
         self.daily_loss_spin.setRange(0.1, 100.0)
@@ -277,7 +336,9 @@ class ConfigDialog(QDialog):
 
         risk_layout.addRow("🎯 Profil de Risque :", self.risk_profile_combo)
         risk_layout.addRow("💎 Paliers de Capital :", self.auto_tier_cb)
+        risk_layout.addRow("📊 Forcer Max Positions :", self.manual_max_pos_cb)
         risk_layout.addRow("Risque par trade :", self.risk_pct_spin)
+        risk_layout.addRow("Volume Fixe (0 = AutoPilot) :", self.fixed_lot_size_spin)
         risk_layout.addRow("Perte max journalière :", self.daily_loss_spin)
         risk_layout.addRow("🏁 Objectif gain jour (%) :", self.daily_profit_pct_spin)
         risk_layout.addRow("🏁 Objectif gain jour ($ fixe) :", self.daily_profit_spin)
@@ -357,9 +418,11 @@ class ConfigDialog(QDialog):
             self.config['risk_management'] = {}
         self.config['risk_management']['risk_profile'] = self.risk_profile_combo.currentData()
         self.config['risk_management']['auto_tier_enabled'] = self.auto_tier_cb.isChecked()
+        self.config['risk_management']['manual_max_positions_override'] = self.manual_max_pos_cb.isChecked()
         self.config['risk_management']['daily_profit_target_percent'] = self.daily_profit_pct_spin.value()
         self.config['risk_management']['max_micro_risk_cap_percent'] = self.max_micro_risk_spin.value()
         self.config['risk_management']['default_risk_percent'] = self.risk_pct_spin.value()
+        self.config['risk_management']['fixed_lot_size'] = self.fixed_lot_size_spin.value()
         self.config['risk_management']['max_daily_loss_percent'] = self.daily_loss_spin.value()
         self.config['risk_management']['take_profit_target_per_trade_usd'] = self.tp_target_spin.value()
         self.config['risk_management']['giveback_usd_small'] = self.giveback_spin.value()
@@ -653,6 +716,15 @@ class MemoryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self, orchestrator, trade_execution, chat_engine, config, trade_manager, trade_memory=None, weights_engine=None):
         super().__init__()
+        from src.core.state_machine import StateManager, BotState
+        from src.core.watchdog import Watchdog
+        
+        self.state_manager = StateManager()
+        self.watchdog = Watchdog()
+        self.watchdog.start()
+        
+        self.state_manager.set_state(BotState.STARTING)
+
         self.orchestrator = orchestrator
         self.trade_execution = trade_execution
         self.chat_engine = chat_engine
@@ -674,6 +746,18 @@ class MainWindow(QMainWindow):
         self._scanner_active = False
         self.scanner_timer = None
         self._scan_cycle_count = 0
+        
+        # State machine visual updater listener
+        self.state_manager.add_listener(self.on_state_changed)
+
+        # File d'attente pour l'IA asynchrone
+        import queue
+        self.ai_analysis_queue = queue.Queue()
+        self.ai_analyzer_thread = AIAnalyzerThread(self.orchestrator, self.ai_analysis_queue, self)
+        self.ai_analyzer_thread.analysis_finished.connect(self.handle_ai_scan_result)
+        self.ai_analyzer_thread.progress.connect(self.append_to_chat)
+        self.ai_analyzer_thread.start()
+
 
         # Voice Manager & Config Advisor
         try:
@@ -770,7 +854,9 @@ class MainWindow(QMainWindow):
                 if balance > 0 and hasattr(self.orchestrator, 'risk') and hasattr(self.orchestrator.risk, 'get_account_tier'):
                     tier = self.orchestrator.risk.get_account_tier(balance)
                     t_name = tier['name']
-                    max_pos = tier['max_open_positions']
+                    base_pos = int(self.config.get('risk_management', {}).get('max_open_positions', tier['max_open_positions']))
+                    is_manual = bool(self.config.get('risk_management', {}).get('manual_max_positions_override', False))
+                    max_pos = base_pos if is_manual else tier['max_open_positions']
                     prof = getattr(self.orchestrator.risk, 'risk_profile', 'BALANCED')
                     self.tier_badge.setText(f"💎 {t_name.upper()} (${balance:,.2f}) • Max {max_pos} pos • Profil {prof}")
                     if tier['tier_id'] == 'MICRO':
@@ -1272,7 +1358,31 @@ class MainWindow(QMainWindow):
         self.positions_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.positions_table.setStyleSheet("QTableWidget { background-color: #2D2D2D; color: white; } QHeaderView::section { background-color: #3D3D3D; font-weight: bold; }")
         positions_layout.addWidget(self.positions_table)
-        
+
+        # ── Tab 2b : Pendings (Order Blocks en attente) — nom modifiable ──
+        self.pendings_tab = QWidget()
+        pendings_layout = QVBoxLayout(self.pendings_tab)
+        pendings_top_bar = QHBoxLayout()
+        pendings_hint = QLabel("✏️ Double-cliquez sur la colonne « Nom » pour renommer un Pending Block (31 car. max, envoyé à MT5 comme commentaire).")
+        pendings_hint.setWordWrap(True)
+        pendings_hint.setStyleSheet("color: #a0c4ff; font-size: 11px; padding: 4px;")
+        pendings_top_bar.addWidget(pendings_hint, stretch=1)
+        self.clean_pendings_btn = QPushButton("🧹 Nettoyer terminés")
+        self.clean_pendings_btn.setStyleSheet("background-color: #2a2e39; color: #e0e0e0; border: 1px solid #363c4e; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+        self.clean_pendings_btn.setToolTip("Supprime de la liste les ordres limites fermés, annulés ou remplis.")
+        self.clean_pendings_btn.clicked.connect(self.clean_closed_pendings)
+        pendings_top_bar.addWidget(self.clean_pendings_btn)
+        pendings_layout.addLayout(pendings_top_bar)
+        self.pendings_table = QTableWidget(0, 6)
+        self.pendings_table.setHorizontalHeaderLabels(['Ticket', 'Symbole', 'Sens', 'Nom (modifiable)', 'Entrée', 'Statut'])
+        self.pendings_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.pendings_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.pendings_table.setStyleSheet("QTableWidget { background-color: #1a2a4a; color: white; } QHeaderView::section { background-color: #24365e; font-weight: bold; }")
+        self.pendings_table.setToolTip("Double-cliquez sur un nom pour le modifier.")
+        self.pendings_table.cellChanged.connect(self.on_pending_name_edited)
+        pendings_layout.addWidget(self.pendings_table)
+        self.tabs.addTab(self.pendings_tab, "📌 Pendings (nommables)")
+
         self.tabs.addTab(self.positions_tab, "📊 Positions Ouvertes")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         
@@ -1539,6 +1649,8 @@ class MainWindow(QMainWindow):
                 allowed_types=allowed_types,
                 fallback_symbols=fallback_symbols,
                 direction_filter=direction_filter,
+                watchdog=self.watchdog,
+                ai_queue=getattr(self, 'ai_analysis_queue', None),
                 parent=self)
             self.scanner_thread = thread
             self._scanner_threads.append(thread)
@@ -1582,8 +1694,18 @@ class MainWindow(QMainWindow):
             self.analyze_btn.setText(short)
 
     def on_tab_changed(self, index):
-        if index == 1: # Positions tab
+        if index == 1: # Pendings tab
+            self.refresh_pendings_tab()
+        elif index == 2: # Positions tab
             self.refresh_positions()
+
+    def clean_closed_pendings(self):
+        """Nettoie les ordres limites inactifs (annulés/remplis/expirés)."""
+        mgr = self._get_pending_manager()
+        if mgr:
+            count = mgr.clear_inactive()
+            self.append_to_chat(f"🧹 [PENDING] {count} ordre(s) inactif(s) nettoyé(s).")
+            self.refresh_pendings_tab()
             
     def refresh_positions(self):
         positions = self.orchestrator.mt5.get_open_positions()
@@ -1606,6 +1728,90 @@ class MainWindow(QMainWindow):
             profit_item = QTableWidgetItem(f"{float(pos['profit']):.2f}")
             profit_item.setForeground(QColor("#4CAF50") if pos['profit'] >= 0 else QColor("#F44336"))
             self.positions_table.setItem(row, 8, profit_item)
+        # ── Rafraîchit aussi l'onglet "Pendings" (noms modifiables) ──
+        try:
+            self.refresh_pendings_tab()
+        except Exception:
+            pass
+
+    def refresh_pendings_tab(self):
+        """Remplit l'onglet Pendings avec les ordres limites suivis (nom modifiable)."""
+        if not hasattr(self, 'pendings_table'):
+            return
+        mgr = self._get_pending_manager()
+        pendings = []
+        try:
+            if mgr is not None:
+                pendings = list(mgr.get_all_pendings() or [])
+        except Exception:
+            pendings = []
+        try:
+            pendings.sort(key=lambda p: (0 if getattr(p, 'status', '') == 'ACTIVE' else 1,
+                                         -(getattr(p, 'created_at', 0.0) or 0.0)))
+        except Exception:
+            pass
+        self.pendings_table.blockSignals(True)
+        try:
+            self.pendings_table.setRowCount(len(pendings))
+            for row, p in enumerate(pendings):
+                t_item = QTableWidgetItem(str(getattr(p, 'ticket', '')))
+                t_item.setFlags(t_item.flags() & ~Qt.ItemIsEditable)
+                self.pendings_table.setItem(row, 0, t_item)
+                s_item = QTableWidgetItem(str(getattr(p, 'symbol', '')))
+                s_item.setFlags(s_item.flags() & ~Qt.ItemIsEditable)
+                self.pendings_table.setItem(row, 1, s_item)
+                d_item = QTableWidgetItem(str(getattr(p, 'direction', '')))
+                d_item.setFlags(d_item.flags() & ~Qt.ItemIsEditable)
+                d_item.setForeground(QColor("#4CAF50") if str(getattr(p, 'direction', '')).upper() == 'BUY' else QColor("#F44336"))
+                self.pendings_table.setItem(row, 2, d_item)
+                name_item = QTableWidgetItem(str(getattr(p, 'label', '') or ''))
+                name_item.setToolTip("Double-cliquez pour modifier le nom du Pending Block (31 car. max).")
+                self.pendings_table.setItem(row, 3, name_item)
+                e_item = QTableWidgetItem(self._fmt_price(getattr(p, 'entry_price', None)))
+                e_item.setFlags(e_item.flags() & ~Qt.ItemIsEditable)
+                self.pendings_table.setItem(row, 4, e_item)
+                st_val = str(getattr(p, 'status', '')).upper()
+                st_item = QTableWidgetItem(st_val)
+                st_item.setFlags(st_item.flags() & ~Qt.ItemIsEditable)
+                if st_val == 'ACTIVE':
+                    st_item.setForeground(QColor("#4CAF50"))
+                elif st_val == 'FILLED':
+                    st_item.setForeground(QColor("#2196F3"))
+                elif st_val in ('CANCELLED', 'ANNULÉ'):
+                    st_item.setForeground(QColor("#9E9E9E"))
+                else:
+                    st_item.setForeground(QColor("#FF9800"))
+                self.pendings_table.setItem(row, 5, st_item)
+        finally:
+            self.pendings_table.blockSignals(False)
+
+    def on_pending_name_edited(self, row: int, col: int):
+        """Appelé quand l'utilisateur modifie le nom d'un pending dans le tableau."""
+        if col != 3 or not hasattr(self, 'pendings_table'):
+            return
+        try:
+            ticket_item = self.pendings_table.item(row, 0)
+            name_item = self.pendings_table.item(row, 3)
+            if ticket_item is None or name_item is None:
+                return
+            ticket = int(str(ticket_item.text()).strip())
+            new_name = str(name_item.text() or "").strip()[:31]
+            mgr = self._get_pending_manager()
+            if mgr is not None and mgr.rename_pending(ticket, new_name):
+                self.append_to_chat(f"✏️ Pending #{ticket} renommé en « {new_name} ».")
+                if hasattr(self, 'voice_manager') and self.voice_manager and not self.voice_manager.is_muted:
+                    try:
+                        self.voice_manager.speak(f"Pending {ticket} renommé en {new_name}.")
+                    except Exception:
+                        pass
+            else:
+                self.append_to_chat(f"⚠️ Impossible de renommer le pending #{ticket}.")
+                self.refresh_pendings_tab()
+        except Exception:
+            try:
+                self.refresh_pendings_tab()
+            except Exception:
+                pass
             
     def append_to_chat(self, msg, sender="IA"):
         self.chat_display.append(f"<b>{sender} :</b> {msg}<br>")
@@ -1702,7 +1908,30 @@ class MainWindow(QMainWindow):
             self.on_analyze_clicked()
         except Exception:
             _lg.getLogger(__name__).exception("on_autopilot_timer a echoue")
+
+    def on_state_changed(self, state):
+        import logging as _lg
+        try:
+            state_msg = f"🟢 Statut Bot: {state.name}"
+            if state.name == 'ERROR':
+                state_msg = "🔴 ERREUR CRITIQUE (Watchdog/Connexion) - Bot en sécurité"
+            elif state.name == 'PAUSED':
+                state_msg = "⏸️ Bot en Pause"
+            
+            # Appends the state update to the chat or sets it to the window title
+            self.setWindowTitle(f"🤖 FOCON ASSISTANT TRADE 1.1 - {state.name}")
+            self.append_to_chat(state_msg)
+        except Exception:
+            pass
         
+    def handle_ai_scan_result(self, result):
+        import logging as _lg
+        try:
+            self.append_to_chat(f"🧠 [IA Async] Résultat reçu pour {result.get('symbol', 'Inconnu')}.")
+            self.handle_scan_result([result])
+        except Exception:
+            _lg.getLogger(__name__).exception("handle_ai_scan_result a echoue")
+
     def handle_scan_result(self, results):
         import logging as _lg
         try:
@@ -1738,7 +1967,36 @@ class MainWindow(QMainWindow):
                 self.scroll_layout.addWidget(lbl)
                 return
 
-            for res in results:
+            # Tri des opportunités : prioritiser la meilleure opportunité (A+ / plus haute conviction et R:R)
+            def _rank_opportunity(r):
+                if not isinstance(r, dict):
+                    return -100.0
+                status = str(r.get("status", "")).upper()
+                if status in ("WAIT", "CLOSED") or "error" in r:
+                    return -50.0
+                
+                score = 0.0
+                if status == "OB_SIGNAL":
+                    score += 100.0  # OB institutionnel retesté
+                elif status == "PENDING_OB":
+                    score += 85.0
+                elif status == "SIGNAL":
+                    score += 90.0
+
+                dec = r.get("decision", {})
+                if isinstance(dec, dict):
+                    action = str(dec.get("action", "")).upper()
+                    if action in ("BUY", "SELL"):
+                        score += 50.0
+                    conf = float(dec.get("confidence", 0) or 0)
+                    score += conf
+                    rr = float(dec.get("risk_reward", 0) or dec.get("reward_risk_ratio", 0) or 0)
+                    score += min(rr * 10.0, 50.0)
+                return score
+
+            sorted_results = sorted(results, key=_rank_opportunity, reverse=True)
+
+            for res in sorted_results:
                 try:
                     if "error" in res:
                         err_lbl = QLabel(f"Erreur: {res['error']}")
@@ -1808,10 +2066,18 @@ class MainWindow(QMainWindow):
         mode = self.config.get('trading', {}).get('automation_mode', 'assist').lower()
         base_max_pos = int(self.config.get('risk_management', {}).get('max_open_positions', 3))
         max_pos = base_max_pos
-        if hasattr(self.orchestrator, 'risk') and hasattr(self.orchestrator.risk, 'get_effective_max_open_positions'):
+        is_manual_override = bool(self.config.get('risk_management', {}).get('manual_max_positions_override', False))
+        tier_clamped = False
+        t_name = ""
+        if not is_manual_override and hasattr(self.orchestrator, 'risk') and hasattr(self.orchestrator.risk, 'get_effective_max_open_positions'):
             acc = self.orchestrator.mt5.get_account_info() if hasattr(self.orchestrator.mt5, 'get_account_info') else {}
             bal = float((acc or {}).get('balance', 0.0) or 0.0)
-            max_pos = self.orchestrator.risk.get_effective_max_open_positions(bal, base_max_pos)
+            eff_pos = self.orchestrator.risk.get_effective_max_open_positions(bal, base_max_pos)
+            if eff_pos < base_max_pos:
+                tier_clamped = True
+                if hasattr(self.orchestrator.risk, 'get_account_tier'):
+                    t_name = self.orchestrator.risk.get_account_tier(bal).get('name', 'Micro-Capital')
+            max_pos = eff_pos
         exclude_closed = self.config.get('risk_management', {}).get('exclude_closed_markets_from_quota', True)
 
         allowed_types = self.config.get('trading', {}).get('allowed_market_types', None)
@@ -1835,12 +2101,14 @@ class MainWindow(QMainWindow):
             symbol = result.get('symbol', 'Unknown')
             msg = f"⚠️ [Autopilot] Limite de {max_pos} positions actives atteinte ({len(active_positions)}/{max_pos})."
             notes = []
+            if tier_clamped:
+                notes.append(f"palier {t_name} actif ({max_pos} pos conseillée vs {base_max_pos} configurée)")
             if closed_count > 0:
                 notes.append(f"{closed_count} sur marché fermé")
             if unallowed_count > 0:
                 notes.append(f"{unallowed_count} hors types autorisés")
             if notes:
-                msg += f" (Note: {', '.join(notes)} ignorée(s) du quota)."
+                msg += f" (Note: {', '.join(notes)})."
             msg += f" Exécution ignorée pour {symbol}."
             self.append_to_chat(msg)
             return
@@ -1886,37 +2154,50 @@ class MainWindow(QMainWindow):
                 self.voice_manager.speak(f"Ordre {action_fr} exécuté sur {symbol}.")
             # Initialiser le compteur OB pour ce ticket (0 OB additionnel pour l'instant)
             self._ob_trades_by_ticket[ticket] = 0
-            # --- Lancer le rescanning Order Block post-trade ---
+            # --- Rescanning Order Block post-trade (désactivé par défaut pour éviter le sur-trading) ---
             try:
-                scanned_symbols = self.orchestrator.mt5.get_visible_symbols(
-                    allowed_types=self.config.get('trading', {}).get('allowed_types')
-                ) or [symbol]
-                direction_filter = action if action in ("BUY", "SELL") else "BOTH"
-                max_ob = int(self.config.get('risk_management', {}).get('max_ob_per_initial_trade', 1))
-                ob_thread = OBScanThread(
-                    orchestrator=self.orchestrator,
-                    symbols=scanned_symbols,
-                    timeframe=self.config.get('trading', {}).get('timeframes', ['M15'])[0],
-                    direction_filter=direction_filter,
-                    passes=3,
-                    interval_s=300,
-                    initial_ticket=ticket,
-                )
-                ob_thread.ob_found.connect(
-                    lambda results, tk=ticket: self.handle_ob_signals(results, initial_ticket=tk)
-                )
-                ob_thread.progress.connect(self.append_to_chat)
-                ob_thread.finished.connect(
-                    lambda t=ob_thread: self._on_ob_thread_finished(t)
-                )
-                ob_thread.start()
-                if not hasattr(self, '_ob_threads'):
-                    self._ob_threads = []
-                self._ob_threads.append(ob_thread)
-                self.append_to_chat(
-                    f"[OB] Rescanning Order Block activé — 3 passes × {300//60} min "
-                    f"sur {len(scanned_symbols)} symboles (ticket #{ticket}, max {max_ob} OB/trade)."
-                )
+                rescan_enabled = self.config.get('trading', {}).get('post_trade_ob_rescan_enabled', False)
+                acc = self.orchestrator.mt5.get_account_info() if hasattr(self.orchestrator.mt5, 'get_account_info') else {}
+                bal = float((acc or {}).get('balance', 0.0) or 0.0)
+                if rescan_enabled and bal >= 100.0:
+                    allowed_types = (
+                        self.config.get('trading', {}).get('allowed_market_types')
+                        or self.config.get('trading', {}).get('allowed_types')
+                    )
+                    scanned_symbols = self.orchestrator.mt5.get_visible_symbols(
+                        allowed_types=allowed_types
+                    ) or [symbol]
+                    direction_filter = action if action in ("BUY", "SELL") else "BOTH"
+                    max_ob = int(self.config.get('risk_management', {}).get('max_ob_per_initial_trade', 1))
+                    ob_thread = OBScanThread(
+                        orchestrator=self.orchestrator,
+                        symbols=scanned_symbols,
+                        timeframe=self.config.get('trading', {}).get('timeframes', ['M15'])[0],
+                        direction_filter=direction_filter,
+                        passes=3,
+                        interval_s=300,
+                        initial_ticket=ticket,
+                    )
+                    ob_thread.ob_found.connect(
+                        lambda results, tk=ticket: self.handle_ob_signals(results, initial_ticket=tk)
+                    )
+                    ob_thread.progress.connect(self.append_to_chat)
+                    ob_thread.finished.connect(
+                        lambda t=ob_thread: self._on_ob_thread_finished(t)
+                    )
+                    ob_thread.start()
+                    if not hasattr(self, '_ob_threads'):
+                        self._ob_threads = []
+                    self._ob_threads.append(ob_thread)
+                    self.append_to_chat(
+                        f"[OB] Rescanning Order Block activé — 3 passes × {300//60} min "
+                        f"sur {len(scanned_symbols)} symboles (ticket #{ticket}, max {max_ob} OB/trade)."
+                    )
+                else:
+                    self.append_to_chat(
+                        f"🛡️ [Autopilot] {symbol} (Ticket #{ticket}) en cours. "
+                        f"Gestion automatique Stop/TP active (mode Sniper)."
+                    )
             except Exception:
                 _lg.getLogger(__name__).exception("Erreur demarrage OBScanThread")
         else:
@@ -1934,7 +2215,8 @@ class MainWindow(QMainWindow):
         mode = self.config.get('trading', {}).get('automation_mode', 'assist').lower()
         base_max_pos = int(self.config.get('risk_management', {}).get('max_open_positions', 3))
         max_pos = base_max_pos
-        if hasattr(self.orchestrator, 'risk') and hasattr(self.orchestrator.risk, 'get_effective_max_open_positions'):
+        is_manual_override = bool(self.config.get('risk_management', {}).get('manual_max_positions_override', False))
+        if not is_manual_override and hasattr(self.orchestrator, 'risk') and hasattr(self.orchestrator.risk, 'get_effective_max_open_positions'):
             acc = self.orchestrator.mt5.get_account_info() if hasattr(self.orchestrator.mt5, 'get_account_info') else {}
             bal = float((acc or {}).get('balance', 0.0) or 0.0)
             max_pos = self.orchestrator.risk.get_effective_max_open_positions(bal, base_max_pos)
@@ -2088,9 +2370,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(text_edit)
         
         btn_layout = QHBoxLayout()
+
+        # --- Lot manuel (override) ---
+        fixed_lot_cfg = self.config.get('risk_management', {}).get('fixed_lot_size', 0.0)
+        suggested_lot = float(lot or fixed_lot_cfg or 0.01)
+        lot_label = QLabel("Volume :")
+        lot_label.setStyleSheet("color: #ffd700; font-weight: bold;")
+        lot_spin = QDoubleSpinBox()
+        lot_spin.setRange(0.01, 100.0)
+        lot_spin.setSingleStep(0.01)
+        lot_spin.setDecimals(2)
+        lot_spin.setValue(suggested_lot)
+        lot_spin.setToolTip("Volume à trader. En Autopilot le robot calcule automatiquement selon le % de risque ou le volume fixe des Paramètres.")
+        lot_spin.setFixedWidth(90)
+        lot_spin.setStyleSheet("background: #1a1a2e; color: #ffd700; border: 1px solid #ffd700; border-radius: 4px; padding: 2px;")
+        btn_layout.addWidget(lot_label)
+        btn_layout.addWidget(lot_spin)
+        btn_layout.addSpacing(10)
+        # ---
+
         take_btn = QPushButton("PRENDRE POSITION")
         take_btn.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
-        take_btn.clicked.connect(lambda checked=False, res=result, f=frame, btn=take_btn: self.on_take_trade(res, f, btn))
+        take_btn.clicked.connect(lambda checked=False, res=result, f=frame, btn=take_btn, ls=lot_spin: self.on_take_trade(res, f, btn, manual_lot=ls.value()))
         
         ignore_btn = QPushButton("IGNORER")
         ignore_btn.setStyleSheet("background-color: #f44336; font-weight: bold; padding: 10px;")
@@ -2144,9 +2445,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(text_edit)
 
         btn_layout = QHBoxLayout()
+
+        # --- Lot manuel (override OB) ---
+        fixed_lot_cfg = self.config.get('risk_management', {}).get('fixed_lot_size', 0.0)
+        suggested_lot_ob = float(lot or fixed_lot_cfg or 0.01)
+        lot_label_ob = QLabel("Volume :")
+        lot_label_ob.setStyleSheet("color: #c9b8ff; font-weight: bold;")
+        lot_spin_ob = QDoubleSpinBox()
+        lot_spin_ob.setRange(0.01, 100.0)
+        lot_spin_ob.setSingleStep(0.01)
+        lot_spin_ob.setDecimals(2)
+        lot_spin_ob.setValue(suggested_lot_ob)
+        lot_spin_ob.setFixedWidth(90)
+        lot_spin_ob.setStyleSheet("background: #1e1030; color: #c9b8ff; border: 1px solid #8a2be2; border-radius: 4px; padding: 2px;")
+        btn_layout.addWidget(lot_label_ob)
+        btn_layout.addWidget(lot_spin_ob)
+        btn_layout.addSpacing(10)
+        # ---
+
         take_btn = QPushButton("PRENDRE OB")
         take_btn.setStyleSheet("background-color: #8a2be2; color: white; font-weight: bold; padding: 10px;")
-        take_btn.clicked.connect(lambda checked=False, res=result, f=frame, btn=take_btn: self.on_take_trade(res, f, btn))
+        take_btn.clicked.connect(lambda checked=False, res=result, f=frame, btn=take_btn, ls=lot_spin_ob: self.on_take_trade(res, f, btn, manual_lot=ls.value()))
         ignore_btn = QPushButton("IGNORER")
         ignore_btn.setStyleSheet("background-color: #555; font-weight: bold; padding: 10px;")
         ignore_btn.clicked.connect(lambda checked=False, f=frame: f.deleteLater())
@@ -2176,8 +2495,32 @@ class MainWindow(QMainWindow):
         lot = decision.get('lot')
         reason = decision.get('reason', '')
         ob_summary = result.get('ob_summary', '')
+        # Nom personnalisé : modifiable dans l'UI, envoyé à MT5 comme commentaire.
+        default_label = str(result.get('pending_label', '') or '').strip()
+        if not default_label:
+            default_label = f"OB {symbol} {action}"
 
         tag = "📌 [PENDING BUY]" if action == "BUY" else "📌 [PENDING SELL]"
+        # ── Champ nom modifiable ──
+        name_row = QHBoxLayout()
+        name_lbl = QLabel("📝 Nom du Pending Block :")
+        name_lbl.setStyleSheet("color: #a0c4ff; font-weight: bold;")
+        name_edit = QLineEdit()
+        name_edit.setText(default_label)
+        name_edit.setMaxLength(31)  # limite commentaire MT5
+        name_edit.setPlaceholderText("Ex : OB EURUSD 1, Mon bloc London...")
+        name_edit.setToolTip(
+            "Nom personnalisé du Pending Block.\n"
+            "Utilisé comme commentaire de l'ordre MT5 (31 car. max)\n"
+            "et réutilisé pour l'annonce vocale."
+        )
+        name_edit.setStyleSheet(
+            "background-color: #0d1830; color: #ffffff; "
+            "border: 1px solid #4a9eff; border-radius: 4px; padding: 6px;"
+        )
+        name_row.addWidget(name_lbl)
+        name_row.addWidget(name_edit, stretch=1)
+        layout.addLayout(name_row)
         display_text = (
             f"{tag} ORDRE LIMITE sur {symbol}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2202,12 +2545,29 @@ class MainWindow(QMainWindow):
         layout.addWidget(text_edit)
 
         btn_layout = QHBoxLayout()
+
+        # --- Lot manuel (override pour pending) ---
+        fixed_lot_cfg = self.config.get('risk_management', {}).get('fixed_lot_size', 0.0)
+        suggested_lot = float(lot or fixed_lot_cfg or 0.01)
+        lot_label = QLabel("Volume :")
+        lot_label.setStyleSheet("color: #a0c4ff; font-weight: bold;")
+        lot_spin = QDoubleSpinBox()
+        lot_spin.setRange(0.01, 100.0)
+        lot_spin.setSingleStep(0.01)
+        lot_spin.setDecimals(2)
+        lot_spin.setValue(suggested_lot)
+        lot_spin.setFixedWidth(90)
+        lot_spin.setStyleSheet("background: #0d1830; color: #a0c4ff; border: 1px solid #4a9eff; border-radius: 4px; padding: 2px;")
+        btn_layout.addWidget(lot_label)
+        btn_layout.addWidget(lot_spin)
+        btn_layout.addSpacing(10)
+
         place_btn = QPushButton("📌 PLACER ORDRE LIMITE")
         place_btn.setStyleSheet(
             "background-color: #2563eb; color: white; font-weight: bold; padding: 10px;"
         )
         place_btn.clicked.connect(
-            lambda checked=False, res=result, f=frame, btn=place_btn: self.on_place_pending_ob(res, f, btn)
+            lambda checked=False, res=result, f=frame, btn=place_btn, ne=name_edit, ls=lot_spin: self.on_place_pending_ob(res, f, btn, ne, manual_lot=ls.value())
         )
         ignore_btn = QPushButton("IGNORER")
         ignore_btn.setStyleSheet("background-color: #555; font-weight: bold; padding: 10px;")
@@ -2218,22 +2578,38 @@ class MainWindow(QMainWindow):
 
         self.scroll_layout.addWidget(frame)
 
-    def on_place_pending_ob(self, result, frame, btn):
+    def on_place_pending_ob(self, result, frame, btn, name_edit=None, manual_lot: float = None):
         """Place un ordre limite (pending) sur une zone Order Block."""
         btn.setEnabled(False)
-        
+
         decision = result.get('decision', {})
         symbol = result.get('symbol', 'Unknown')
         ob_data = result.get('ob_data')
         htf_trend = result.get('htf_trend', 'Unknown')
+
+        # Nom personnalisé saisi dans le champ modifiable de la carte UI.
+        custom_label = ""
+        try:
+            if name_edit is not None and hasattr(name_edit, "text"):
+                custom_label = str(name_edit.text() or "").strip()[:31]
+        except Exception:
+            custom_label = ""
+        if custom_label:
+            result['pending_label'] = custom_label
         
         if not ob_data:
             QMessageBox.warning(self, "Erreur", "Données de l'Order Block manquantes.")
             btn.setEnabled(True)
             return
 
-        # Calculate lot from decision
-        lot = float(decision.get('lot', 0.01) or 0.01)
+        # Calculate lot from manual input, fixed lot config, or decision
+        fixed_lot_cfg = float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0) or 0.0)
+        if manual_lot is not None and manual_lot > 0:
+            lot = round(float(manual_lot), 2)
+        elif fixed_lot_cfg > 0.0:
+            lot = fixed_lot_cfg
+        else:
+            lot = float(decision.get('lot', 0.01) or 0.01)
 
         # Place the pending order
         pending_mgr = self._get_pending_manager()
@@ -2248,17 +2624,21 @@ class MainWindow(QMainWindow):
             timeframe=result.get('timeframe', 'M15'),
             lot=lot,
             htf_trend=htf_trend,
+            label=custom_label,
         )
 
         if pending:
+            label_txt = f" « {pending.label} »" if getattr(pending, 'label', '') else ""
             self.append_to_chat(
-                f"📌 [PENDING] Ordre limite {pending.direction} placé sur {symbol} "
+                f"📌 [PENDING] Ordre limite {pending.direction} placé sur {symbol}"
+                f"{label_txt} "
                 f"@ {pending.entry_price:.5f} (ticket #{pending.ticket})"
             )
             if hasattr(self, 'voice_manager') and self.voice_manager and getattr(self.voice_manager, 'voice_announcements', True):
                 action_fr = "d'achat" if pending.direction == "BUY" else "de vente"
+                spoken_name = f" nommé {pending.label}." if getattr(pending, 'label', '') else "."
                 self.voice_manager.speak(
-                    f"Ordre limite {action_fr} placé sur {symbol} en attente du retest."
+                    f"Ordre limite {action_fr} placé sur {symbol}{spoken_name} en attente du retest."
                 )
             frame.deleteLater()
         else:
@@ -2283,12 +2663,23 @@ class MainWindow(QMainWindow):
             self.append_to_chat(f"❌ [PENDING] {symbol} — Données OB manquantes. Ignoré.")
             return
 
-        lot = float(decision.get('lot', 0.01) or 0.01)
-
         pending_mgr = self._get_pending_manager()
         if not pending_mgr:
             self.append_to_chat(f"❌ [PENDING] Gestionnaire non disponible pour {symbol}.")
             return
+
+        # Vérifier le quota d'ordres limites actifs
+        active_pendings = pending_mgr.get_active_pendings()
+        max_pendings = getattr(pending_mgr, 'max_pending_total', 5)
+        if len(active_pendings) >= max_pendings:
+            self.append_to_chat(f"ℹ️ [PENDING] Quota de {max_pendings} ordre(s) limite(s) actif(s) déjà atteint. Ordre ignoré pour {symbol}.")
+            return
+
+        # Calculate lot from decision (validated by risk manager) or fixed lot config
+        lot = float(decision.get('lot') or 0.0)
+        if lot <= 0:
+            fixed_lot_cfg = float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0) or 0.0)
+            lot = fixed_lot_cfg if fixed_lot_cfg > 0 else 0.01
 
         pending = pending_mgr.place_ob_pending(
             symbol=symbol,
@@ -2296,14 +2687,21 @@ class MainWindow(QMainWindow):
             timeframe=result.get('timeframe', 'M15'),
             lot=lot,
             htf_trend=htf_trend,
+            label=str(result.get('pending_label', '') or ''),
         )
 
         if pending:
+            label_txt = f" « {pending.label} »" if getattr(pending, 'label', '') else ""
             self.append_to_chat(
-                f"📌 [Autopilot PENDING] {action} LIMIT placé sur {symbol} "
+                f"📌 [Autopilot PENDING] {action} LIMIT placé sur {symbol}{label_txt} "
                 f"@ {pending.entry_price:.5f} (ticket #{pending.ticket}, "
                 f"SL={pending.sl:.5f}, TP={pending.tp:.5f})"
             )
+            if hasattr(self, 'voice_manager') and self.voice_manager and getattr(self.voice_manager, 'voice_announcements', True):
+                spoken_name = f" nommé {pending.label}." if getattr(pending, 'label', '') else "."
+                self.voice_manager.speak(
+                    f"Ordre limite {action.lower()} placé sur {symbol}{spoken_name}"
+                )
         else:
             self.append_to_chat(
                 f"⚠️ [PENDING] {symbol} — Ordre limite non placé (conditions non remplies)."
@@ -2327,9 +2725,33 @@ class MainWindow(QMainWindow):
                 return None
         return self._pending_order_manager
 
+    def rename_pending_order(self, ticket: int, new_label: str) -> bool:
+        """Renomme un Pending Block déjà placé (ticket MT5) depuis l'UI ou la voix."""
+        mgr = self._get_pending_manager()
+        if not mgr:
+            return False
+        ok = mgr.rename_pending(ticket, new_label)
+        if ok:
+            clean = str(new_label or "").strip()[:31]
+            self.append_to_chat(f"✏️ Pending #{ticket} renommé en « {clean} ».")
+            try:
+                self.refresh_positions()
+            except Exception:
+                pass
+        return ok
+
         
-    def on_take_trade(self, signal, frame, take_btn):
+    def on_take_trade(self, signal, frame, take_btn, manual_lot: float = None):
         take_btn.setEnabled(False)
+        # Override lot si l'utilisateur a saisi un volume manuellement
+        if manual_lot is not None and manual_lot > 0:
+            import copy
+            signal = copy.deepcopy(signal)
+            if 'decision' not in signal:
+                signal['decision'] = {}
+            signal['decision']['lot'] = round(manual_lot, 2)
+            # Désactiver le calcul auto en passant le lot comme volume fixe temporaire
+            signal['decision']['manual_lot_override'] = True
         request = self.trade_execution.prepare_order_request(signal)
         if not request:
             QMessageBox.critical(self, "Erreur", "Impossible de préparer la requête.")
@@ -2343,7 +2765,8 @@ class MainWindow(QMainWindow):
             return
             
         # Confirm and Execute
-        reply = QMessageBox.question(self, "Confirmation", f"Voulez-vous vraiment prendre cette position sur {signal.get('symbol')} ?", QMessageBox.Yes | QMessageBox.No)
+        lot_display = f"{signal['decision'].get('lot', '?')} lot" if manual_lot else "volume calculé auto"
+        reply = QMessageBox.question(self, "Confirmation", f"Voulez-vous vraiment prendre cette position sur {signal.get('symbol')} ?\nVolume : {lot_display}", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             exec_result = self.trade_execution.execute_order(request)
             if exec_result['success']:
@@ -2528,7 +2951,7 @@ class MainWindow(QMainWindow):
 
         self.append_to_chat(msg)
         if hasattr(self, 'voice_manager') and self.voice_manager:
-            self.voice_manager.speak_async(spoken)
+            self.voice_manager.speak(spoken)
 
     def on_quick_tp_changed(self, val: float):
         target = float(val)
@@ -2582,6 +3005,7 @@ class MainWindow(QMainWindow):
         if 'risk_management' not in self.config:
             self.config['risk_management'] = {}
         self.config['risk_management']['max_open_positions'] = max_pos
+        self.config['risk_management']['manual_max_positions_override'] = True
         # Propagation au risk manager si disponible
         if getattr(self, 'orchestrator', None) and hasattr(self.orchestrator, 'risk'):
             try:
@@ -2603,10 +3027,25 @@ class MainWindow(QMainWindow):
         except Exception:
             import logging as _lg
             _lg.getLogger(__name__).exception("Erreur lors de la sauvegarde de max_open_positions")
+
+        tier_notice = ""
+        if getattr(self, 'orchestrator', None) and hasattr(self.orchestrator, 'risk'):
+            try:
+                acc = self.orchestrator.mt5.get_account_info() if hasattr(self.orchestrator.mt5, 'get_account_info') else {}
+                bal = float((acc or {}).get('balance', 0.0) or 0.0)
+                if bal > 0 and hasattr(self.orchestrator.risk, 'get_account_tier'):
+                    tier = self.orchestrator.risk.get_account_tier(bal)
+                    rec = tier.get('max_open_positions', 1)
+                    if max_pos > rec:
+                        tier_notice = f" <i>(Plafond du palier {tier['name']} de {rec} position{'s' if rec > 1 else ''} outrepassé)</i>"
+            except Exception:
+                pass
+
         self.append_to_chat(
             f"📊 <b>Max positions :</b> Le bot peut maintenant ouvrir jusqu'à "
-            f"<b>{max_pos}</b> position{'s' if max_pos > 1 else ''} simultanée{'s' if max_pos > 1 else ''}."
+            f"<b>{max_pos}</b> position{'s' if max_pos > 1 else ''} simultanée{'s' if max_pos > 1 else ''}.{tier_notice}"
         )
+        self.update_tier_badge()
 
     def on_quick_mode_changed(self, index: int):
         """Bascule le mode d'exécution : Scanner Manuel (assist) ou Autopilot Complet (auto)."""
@@ -2692,6 +3131,7 @@ class MainWindow(QMainWindow):
                     self.orchestrator.risk.max_micro_risk_cap_percent = float(rm.get('max_micro_risk_cap_percent', 4.0))
                     self.orchestrator.risk.default_risk_percent = float(rm.get('default_risk_percent', 1.0))
                     self.orchestrator.risk.daily_profit_target_percent = float(rm.get('daily_profit_target_percent', 3.0))
+                    self.orchestrator.risk.fixed_lot_size = float(rm.get('fixed_lot_size', 0.0))
                     self.orchestrator.risk.risk_profile = rm.get('risk_profile', 'BALANCED')
                     self.orchestrator.risk.apply_risk_profile(self.orchestrator.risk.risk_profile)
             if getattr(self, 'trade_execution', None):
@@ -2847,7 +3287,7 @@ class MainWindow(QMainWindow):
 
     def on_request_optimization(self):
         """Déclenche une demande d'optimisation intelligente à l'assistant."""
-        self.chat_input.setText("Analyse la situation actuelle de mon compte et de mes marchés et propose-moi les réglages optimaux.")
+        self.chat_input.setText("Analyse mon capital et mes marchés, et propose les meilleurs réglages (incluant pending orders, lot, risk).")
         self.on_send_chat()
 
     def open_voice_settings(self):
@@ -2942,6 +3382,8 @@ class MainWindow(QMainWindow):
                 if "risk_profile" in rm:
                     risk.risk_profile = rm["risk_profile"]
                     risk.apply_risk_profile(risk.risk_profile)
+                if "fixed_lot_size" in rm:
+                    risk.fixed_lot_size = float(rm["fixed_lot_size"])
 
             # Trade Execution
             if getattr(self, "trade_execution", None):

@@ -658,6 +658,36 @@ class TestTradeProtection(unittest.TestCase):
         self.assertTrue(closed)
         self.mock_mt5.close_position.assert_called_once_with(701, "EURUSD", "BUY", 0.01, 1.1020)
 
+    def test_ob_entry_drift_preserves_reward_risk_without_rejection(self):
+        """Vérifie que lors d'un léger drift à l'entrée sur OB, le TP recalculé n'est pas rejeté pour R:R < 2.50."""
+        from src.trading.trade_execution import TradeExecutionEngine
+        te = TradeExecutionEngine(self.mock_mt5, min_reward_risk=2.50, min_confidence=70.0)
+        
+        # Simule le cas NZDCHF des logs utilisateur
+        self.mock_mt5.get_symbol_info.return_value = {
+            "name": "NZDCHF", "digits": 5, "ask": 0.46904, "bid": 0.46900,
+            "trade_tick_size": 0.00001, "trade_tick_value": 1.0,
+            "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01,
+            "filling_mode": 1
+        }
+        signal = {
+            "status": "SIGNAL",
+            "symbol": "NZDCHF",
+            "decision": {
+                "action": "BUY",
+                "entry": 0.46878,
+                "sl": 0.46798,
+                "tp": 0.47078,  # R:R original = (0.47078 - 0.46878) / (0.46878 - 0.46798) = 2.50
+                "confidence": 80.0,
+                "lot": 0.05
+            }
+        }
+        # Entrée réelle au marché à 0.46904 (drift de 0.46878 -> 0.46904)
+        req = te.prepare_order_request(signal)
+        self.assertIsNotNone(req, "La requête ne doit pas être rejetée pour un léger arrondi de R:R !")
+        self.assertEqual(req["symbol"], "NZDCHF")
+        self.assertEqual(req["volume"], 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

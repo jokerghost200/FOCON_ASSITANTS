@@ -104,6 +104,10 @@ class TradeExecutionEngine:
             logger.error(f"Signal rejected for {symbol}: invalid SL/TP.")
             return None
 
+        # Get symbol digits
+        digits = tick.get('digits', 5) if tick else 5
+        price = round(float(price), digits)
+
         # ---- OB entry-drift compensation ----
         # The OB detector calculates SL/TP relative to ob_mid, but we execute
         # at the live market price.  Re-anchor TP so the original R:R is kept.
@@ -114,28 +118,60 @@ class TradeExecutionEngine:
                 orig_sl_dist = abs(original_entry - sl)
                 orig_tp_dist = abs(tp - original_entry)
                 if orig_sl_dist > 0:
-                    orig_rr = orig_tp_dist / orig_sl_dist
-                    live_sl_dist = abs(float(price) - sl)
+                    orig_rr = max(self.min_reward_risk, orig_tp_dist / orig_sl_dist)
+                    live_sl_dist = abs(price - sl)
                     if live_sl_dist > 0:
+                        pip_unit = 10 ** (-digits)
                         if action.upper() == 'BUY':
-                            tp = round(float(price) + live_sl_dist * orig_rr, 5)
+                            tp = round(price + live_sl_dist * orig_rr, digits)
+                            if (tp - price) / live_sl_dist < (orig_rr - 1e-5):
+                                tp = round(tp + pip_unit, digits)
                         else:
-                            tp = round(float(price) - live_sl_dist * orig_rr, 5)
+                            tp = round(price - live_sl_dist * orig_rr, digits)
+                            if (price - tp) / live_sl_dist < (orig_rr - 1e-5):
+                                tp = round(tp - pip_unit, digits)
                         logger.info(
                             f"[OB] {symbol}: entry drift "
-                            f"{original_entry:.5f} -> {float(price):.5f}, "
-                            f"TP recalculated to {tp:.5f} (R:R {orig_rr:.2f} preserved)"
+                            f"{original_entry:.{digits}f} -> {price:.{digits}f}, "
+                            f"TP recalculated to {tp:.{digits}f} (R:R {orig_rr:.2f} preserved)"
                         )
             except (TypeError, ValueError):
                 pass  # fall through to normal validation
 
-        risk_distance = abs(float(price) - sl)
-        reward_distance = abs(tp - float(price))
+        sl = round(sl, digits)
+        tp = round(tp, digits)
+
+        # ── Vérification stricte du sens du Stop Loss et Take Profit vs cours réel ──
+        if action.upper() == 'BUY':
+            if sl >= price:
+                logger.error(
+                    f"Signal rejected for {symbol}: For a BUY, SL ({sl}) must be strictly less than entry price ({price})."
+                )
+                return None
+            if tp <= price:
+                logger.error(
+                    f"Signal rejected for {symbol}: For a BUY, TP ({tp}) must be strictly greater than entry price ({price})."
+                )
+                return None
+        elif action.upper() == 'SELL':
+            if sl <= price:
+                logger.error(
+                    f"Signal rejected for {symbol}: For a SELL, SL ({sl}) must be strictly greater than entry price ({price})."
+                )
+                return None
+            if tp >= price:
+                logger.error(
+                    f"Signal rejected for {symbol}: For a SELL, TP ({tp}) must be strictly less than entry price ({price})."
+                )
+                return None
+
+        risk_distance = abs(price - sl)
+        reward_distance = abs(tp - price)
         if risk_distance <= 0:
             logger.error(f"Signal rejected for {symbol}: invalid risk distance.")
             return None
         reward_risk = reward_distance / risk_distance
-        if reward_risk < self.min_reward_risk:
+        if reward_risk < (self.min_reward_risk - 0.05):
             logger.error(
                 f"Signal rejected for {symbol}: live reward/risk {reward_risk:.2f} "
                 f"< minimum {self.min_reward_risk:.2f}"
@@ -143,6 +179,29 @@ class TradeExecutionEngine:
             return None
         
         tech_f = signal.get('tech_features', {}) or {}
+        amd_ctx = signal.get('amd_context', {}) or {}
+        
+        # Determine basic session by hour (UTC approx)
+        import datetime
+        current_hour = datetime.datetime.utcnow().hour
+        if 0 <= current_hour < 8:
+            session = "ASIA"
+        elif 8 <= current_hour < 13:
+            session = "LONDON"
+        elif 13 <= current_hour < 17:
+            session = "NEW_YORK_LONDON_OVERLAP"
+        else:
+            session = "NEW_YORK"
+            
+        sym_info = self.mt5.get_symbol_info(symbol)
+        tick_value = sym_info.get('trade_tick_value', 1.0) if sym_info else 1.0
+        tick_size = sym_info.get('trade_tick_size', 0.00001) if sym_info else 0.00001
+        lot = float(decision.get('lot', 0.01))
+        # risk_usd = (risk_distance / tick_size) * tick_value * lot
+        risk_usd = 0.0
+        if tick_size > 0:
+            risk_usd = (risk_distance / tick_size) * tick_value * lot
+
         snapshot = {
             "rsi_14": float(tech_f.get('rsi_14') or 50.0),
             "ema_dist_atr": float(tech_f.get('ema_dist_atr') or 0.0),
@@ -152,6 +211,13 @@ class TradeExecutionEngine:
             "confidence": float(decision.get('confidence', 0)),
             "reason": str(decision.get('reason', '')),
             "spread": float(tick.get('spread', 0) * tick.get('point', 0.00001)) if tick else 0.0,
+            # Phase 3 Tags
+            "session": session,
+            "amd_phase": amd_ctx.get("Phase", "Unknown"),
+            "fvg": amd_ctx.get("FVG", "None"),
+            "sweep": amd_ctx.get("Liquidity_Grab", "None"),
+            "initial_rr": round(reward_risk, 2),
+            "risk_usd": round(risk_usd, 2)
         }
 
         filling_mode = tick.get('filling_mode', 0) if tick else 0

@@ -43,12 +43,14 @@ def _sanitize(obj):
 
 
 class WebState:
-    def __init__(self, orchestrator, trade_execution, chat_engine, config, trade_manager):
+    def __init__(self, orchestrator, trade_execution, chat_engine, config, trade_manager, trade_memory=None, weights_engine=None):
         self.orchestrator = orchestrator
         self.trade_execution = trade_execution
         self.chat_engine = chat_engine
         self.config = config
         self.trade_manager = trade_manager
+        self.trade_memory = trade_memory
+        self.weights_engine = weights_engine
         self.mt5_lock = threading.Lock()
         self.scan_lock = threading.Lock()
         self.scan_thread = None
