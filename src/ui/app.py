@@ -380,6 +380,64 @@ class ConfigDialog(QDialog):
             
         market_layout.addStretch()
         tabs.addTab(market_tab, "📈 Types de Marchés")
+
+        # --- Onglet CRT & Order Flow ---
+        crt_of_tab = QWidget()
+        crt_of_layout = QFormLayout(crt_of_tab)
+
+        # CRT
+        self.crt_enabled_cb = QCheckBox("Activer la Stratégie CRT (Candle Range Theory)")
+        self.crt_enabled_cb.setChecked(self.config.get('crt', {}).get('enabled', True))
+
+        self.crt_order_mode_combo = QComboBox()
+        self.crt_order_mode_combo.addItem("🔄 Tous les ordres (Marché + Pending Limits)", "both")
+        self.crt_order_mode_combo.addItem("⚡ Ordres simples au marché uniquement", "market")
+        self.crt_order_mode_combo.addItem("📌 Pending Limits (Ordres en attente uniquement)", "pending")
+        curr_crt_mode = str(self.config.get('crt', {}).get('order_mode', 'both')).lower()
+        idx_crt = self.crt_order_mode_combo.findData(curr_crt_mode)
+        if idx_crt >= 0:
+            self.crt_order_mode_combo.setCurrentIndex(idx_crt)
+
+        self.crt_min_rr_spin = QDoubleSpinBox()
+        self.crt_min_rr_spin.setRange(1.0, 10.0)
+        self.crt_min_rr_spin.setSingleStep(0.25)
+        self.crt_min_rr_spin.setDecimals(2)
+        self.crt_min_rr_spin.setValue(float(self.config.get('crt', {}).get('min_rr', 1.5)))
+
+        self.crt_expiration_spin = QSpinBox()
+        self.crt_expiration_spin.setRange(1, 48)
+        self.crt_expiration_spin.setSuffix(" bougies")
+        self.crt_expiration_spin.setValue(int(self.config.get('crt', {}).get('expiration_bars', 4)))
+
+        # Order Flow
+        self.of_enabled_cb = QCheckBox("Activer le Moteur Order Flow (DOM L2, Heatmap, CVD, VP)")
+        self.of_enabled_cb.setChecked(self.config.get('order_flow', {}).get('enabled', True))
+
+        self.of_require_conf_cb = QCheckBox("Exiger confirmation stricte Order Flow avant prise de position")
+        self.of_require_conf_cb.setChecked(self.config.get('order_flow', {}).get('require_confirmation', False))
+        self.of_require_conf_cb.setToolTip("Si coché, aucun trade CRT n'est pris si le score composite Order Flow est inférieur au seuil.")
+
+        self.of_min_score_spin = QDoubleSpinBox()
+        self.of_min_score_spin.setRange(20.0, 100.0)
+        self.of_min_score_spin.setSingleStep(5.0)
+        self.of_min_score_spin.setSuffix(" / 100")
+        self.of_min_score_spin.setValue(float(self.config.get('order_flow', {}).get('min_confluence_score', 60.0)))
+
+        self.of_imbalance_spin = QDoubleSpinBox()
+        self.of_imbalance_spin.setRange(1.5, 10.0)
+        self.of_imbalance_spin.setSingleStep(0.5)
+        self.of_imbalance_spin.setValue(float(self.config.get('order_flow', {}).get('imbalance_ratio', 3.0)))
+
+        crt_of_layout.addRow("🎯 CRT Activé :", self.crt_enabled_cb)
+        crt_of_layout.addRow("🔄 Mode d'Ordre CRT :", self.crt_order_mode_combo)
+        crt_of_layout.addRow("⚖️ Ratio R:R Minimum :", self.crt_min_rr_spin)
+        crt_of_layout.addRow("⏳ Expiration Ordres Limites :", self.crt_expiration_spin)
+        crt_of_layout.addRow("🌊 Moteur Order Flow :", self.of_enabled_cb)
+        crt_of_layout.addRow("🛡️ Confirmation Stricte :", self.of_require_conf_cb)
+        crt_of_layout.addRow("📊 Score Confluence Min :", self.of_min_score_spin)
+        crt_of_layout.addRow("⚡ Ratio Déséquilibre Footprint :", self.of_imbalance_spin)
+
+        tabs.addTab(crt_of_tab, "🎯 CRT & Order Flow")
         
         # Boutons
         btn_layout = QHBoxLayout()
@@ -436,6 +494,23 @@ class ConfigDialog(QDialog):
             self.config['trading'] = {}
         self.config['trading']['allowed_market_types'] = allowed
         self.config['trading']['allowed_trade_direction'] = self.direction_combo.currentData()
+
+        # Sauvegarde CRT
+        if 'crt' not in self.config:
+            self.config['crt'] = {}
+        self.config['crt']['enabled'] = self.crt_enabled_cb.isChecked()
+        self.config['crt']['order_mode'] = self.crt_order_mode_combo.currentData()
+        self.config['crt']['use_pending_orders'] = (self.crt_order_mode_combo.currentData() != 'market')
+        self.config['crt']['min_rr'] = self.crt_min_rr_spin.value()
+        self.config['crt']['expiration_bars'] = self.crt_expiration_spin.value()
+
+        # Sauvegarde Order Flow
+        if 'order_flow' not in self.config:
+            self.config['order_flow'] = {}
+        self.config['order_flow']['enabled'] = self.of_enabled_cb.isChecked()
+        self.config['order_flow']['require_confirmation'] = self.of_require_conf_cb.isChecked()
+        self.config['order_flow']['min_confluence_score'] = self.of_min_score_spin.value()
+        self.config['order_flow']['imbalance_ratio'] = self.of_imbalance_spin.value()
         
         try:
             from pathlib import Path
@@ -2152,8 +2227,10 @@ class MainWindow(QMainWindow):
         exec_result = self.trade_execution.execute_order(request)
         if exec_result['success']:
             deal_id = exec_result.get('deal_id', 0)
-            ticket  = exec_result.get('ticket', deal_id)   # ticket de la position ouverte
-            self.append_to_chat(f"[Autopilot] {symbol} - Ordre execute! Deal ID: {deal_id}")
+            ticket  = exec_result.get('ticket', deal_id)   # ticket de la position ouverte ou de l'ordre limite
+            is_p = bool(decision.get('is_pending') or request.get('action') == 5)
+            kind_txt = f"Ordre limite ({decision.get('order_type', 'LIMIT')}) placé" if is_p else f"Ordre marché exécuté (Deal #{deal_id})"
+            self.append_to_chat(f"🚀 [Autopilot] {symbol} - {kind_txt} ! Ticket MT5: #{ticket}")
             if hasattr(self, 'voice_manager') and self.voice_manager and getattr(self.voice_manager, 'voice_announcements', True):
                 action_fr = "d'achat" if action == "BUY" else "de vente"
                 self.voice_manager.speak(f"Ordre {action_fr} exécuté sur {symbol}.")
@@ -2344,8 +2421,6 @@ class MainWindow(QMainWindow):
     def add_signal_widget(self, result):
         frame = QFrame()
         frame.setFrameShape(QFrame.StyledPanel)
-        frame.setStyleSheet("QFrame { background-color: #333333; border-radius: 5px; margin-bottom: 10px; }")
-        layout = QVBoxLayout(frame)
         
         decision = result.get('decision', {})
         action = decision.get('action')
@@ -2355,23 +2430,57 @@ class MainWindow(QMainWindow):
         sl = decision.get('sl')
         tp = decision.get('tp')
         lot = decision.get('lot')
-        reason = decision.get('reason')
+        reason = decision.get('reason', '')
+        status = str(result.get('status', '')).upper()
         
-        color = "🟢" if action == "BUY" else "🔴"
+        is_pending = bool(decision.get('is_pending') or status == 'PENDING_CRT' or decision.get('order_type') in ('BUY_LIMIT', 'SELL_LIMIT'))
+        order_type = decision.get('order_type') or ('BUY_LIMIT' if action == 'BUY' else 'SELL_LIMIT' if is_pending else 'MARKET')
         
-        display_text = f"{color} SIGNAL : {action} sur {symbol}\n\n" \
+        # Order Flow confluence
+        of_score = decision.get('order_flow_score')
+        if of_score is None and result.get('order_flow'):
+            of_score = getattr(result['order_flow'], 'confluence_score', None)
+        of_confirmed = bool(decision.get('order_flow_confirmed') or (result.get('order_flow') and getattr(result['order_flow'], 'is_confirmed', False)))
+
+        # Distinct style depending on pending vs market
+        if is_pending:
+            frame.setStyleSheet("QFrame { background-color: #152238; border: 2px solid #00bcd4; border-radius: 6px; margin-bottom: 10px; }")
+            tag_header = f"📌 ORDRE LIMITE PENDING [{order_type}] : {action} sur {symbol}"
+        elif status == 'MARKET_CRT':
+            frame.setStyleSheet("QFrame { background-color: #1a2c20; border: 2px solid #4caf50; border-radius: 6px; margin-bottom: 10px; }")
+            tag_header = f"🎯 CRT MARCHÉ DIRECT : {action} sur {symbol}"
+        else:
+            color = "🟢" if action == "BUY" else "🔴"
+            frame.setStyleSheet("QFrame { background-color: #2b2b2b; border: 1px solid #444; border-radius: 6px; margin-bottom: 10px; }")
+            tag_header = f"{color} SIGNAL AU MARCHÉ : {action} sur {symbol}"
+
+        layout = QVBoxLayout(frame)
+        
+        of_line = ""
+        if of_score is not None:
+            badge_of = "🌊 ORDER FLOW : CONFIRMÉ" if of_confirmed else "📊 ORDER FLOW : ANALYSÉ"
+            of_line = f"\n{badge_of} (Score: {float(of_score):.1f}/100)"
+            
+        exp_line = ""
+        if is_pending:
+            bars = decision.get('expiration_bars', 4)
+            exp_line = f"\nExpiration : {bars} bougies (annulation auto si non touché)"
+
+        display_text = f"{tag_header}\n\n" \
                        f"Confiance  : {self._fmt_confidence(confidence)}\n" \
                        f"Entrée     : {self._fmt_price(entry)}\n" \
                        f"Stop Loss  : {self._fmt_price(sl)}\n" \
                        f"Take Profit: {self._fmt_price(tp)}\n" \
-                       f"Volume     : {self._fmt_lot(lot)}\n\n" \
+                       f"Volume     : {self._fmt_lot(lot)}" \
+                       f"{exp_line}" \
+                       f"{of_line}\n\n" \
                        f"Justification : {reason}"
                        
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setFont(QFont("Consolas", 10))
         text_edit.setPlainText(display_text)
-        text_edit.setMinimumHeight(150)
+        text_edit.setMinimumHeight(160)
         layout.addWidget(text_edit)
         
         btn_layout = QHBoxLayout()
@@ -2394,12 +2503,14 @@ class MainWindow(QMainWindow):
         btn_layout.addSpacing(10)
         # ---
 
-        take_btn = QPushButton("PRENDRE POSITION")
-        take_btn.setStyleSheet("background-color: #4CAF50; font-weight: bold; padding: 10px;")
+        take_label = f"📌 PLACER {order_type}" if is_pending else "⚡ PRENDRE POSITION"
+        take_btn = QPushButton(take_label)
+        btn_bg = "#00838f" if is_pending else "#2e7d32"
+        take_btn.setStyleSheet(f"background-color: {btn_bg}; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
         take_btn.clicked.connect(lambda checked=False, res=result, f=frame, btn=take_btn, ls=lot_spin: self.on_take_trade(res, f, btn, manual_lot=ls.value()))
         
         ignore_btn = QPushButton("IGNORER")
-        ignore_btn.setStyleSheet("background-color: #f44336; font-weight: bold; padding: 10px;")
+        ignore_btn.setStyleSheet("background-color: #c62828; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
         ignore_btn.clicked.connect(lambda checked=False, f=frame: f.deleteLater())
         
         btn_layout.addWidget(take_btn)
@@ -2770,12 +2881,34 @@ class MainWindow(QMainWindow):
             return
             
         # Confirm and Execute
-        lot_display = f"{signal['decision'].get('lot', '?')} lot" if manual_lot else "volume calculé auto"
-        reply = QMessageBox.question(self, "Confirmation", f"Voulez-vous vraiment prendre cette position sur {signal.get('symbol')} ?\nVolume : {lot_display}", QMessageBox.Yes | QMessageBox.No)
+        decision = signal.get('decision', {})
+        is_pending = bool(decision.get('is_pending') or request.get('action') == 5)
+        action_name = decision.get('action', '')
+        order_type_str = decision.get('order_type') or ('BUY_LIMIT' if action_name == 'BUY' else 'SELL_LIMIT' if is_pending else 'MARCHÉ')
+        lot_display = f"{decision.get('lot', '?')} lot" if manual_lot else "volume calculé auto"
+        
+        if is_pending:
+            prompt_msg = (
+                f"Voulez-vous vraiment placer cet ORDRE LIMITE PENDING ({order_type_str}) sur {signal.get('symbol')} ?\n\n"
+                f"• Prix Limite : {decision.get('entry')}\n"
+                f"• Stop Loss   : {decision.get('sl')}\n"
+                f"• Take Profit : {decision.get('tp')}\n"
+                f"• Volume      : {lot_display}"
+            )
+        else:
+            prompt_msg = f"Voulez-vous vraiment exécuter cette POSITION AU MARCHÉ sur {signal.get('symbol')} ?\n• Volume : {lot_display}"
+
+        reply = QMessageBox.question(self, "Confirmation", prompt_msg, QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             exec_result = self.trade_execution.execute_order(request)
             if exec_result['success']:
-                QMessageBox.information(self, "Succès", f"Ordre exécuté avec succès!\nDeal ID: {exec_result['deal_id']}")
+                ticket_id = exec_result.get('ticket') or exec_result.get('deal_id') or 0
+                deal_id = exec_result.get('deal_id', 0)
+                if is_pending:
+                    msg_txt = f"Ordre Limite {order_type_str} placé avec succès !\nTicket MT5: #{ticket_id}"
+                else:
+                    msg_txt = f"Ordre au marché exécuté avec succès !\nTicket MT5: #{ticket_id} (Deal #{deal_id})"
+                QMessageBox.information(self, "Succès", msg_txt)
                 frame.deleteLater() # Remove from list if taken successfully
             else:
                 QMessageBox.critical(self, "Erreur d'exécution", exec_result['reason'])
@@ -3506,5 +3639,20 @@ class MainWindow(QMainWindow):
         chat_thread = getattr(self, 'chat_thread', None)
         if chat_thread is not None and chat_thread.isRunning():
             chat_thread.wait(3000)
+
+        # Stop AI analyzer thread
+        if getattr(self, 'ai_analyzer_thread', None) is not None:
+            try:
+                self.ai_analyzer_thread.stop()
+                self.ai_analyzer_thread.wait(2000)
+            except Exception:
+                pass
+
+        # Stop watchdog
+        if getattr(self, 'watchdog', None) is not None and hasattr(self.watchdog, 'stop'):
+            try:
+                self.watchdog.stop()
+            except Exception:
+                pass
 
         event.accept()
