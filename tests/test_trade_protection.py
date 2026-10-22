@@ -688,6 +688,34 @@ class TestTradeProtection(unittest.TestCase):
         self.assertEqual(req["symbol"], "NZDCHF")
         self.assertEqual(req["volume"], 0.05)
 
+    def test_manage_open_positions_protects_in_assist_mode(self):
+        """Vérifie que la surveillance et la protection mécanique (Break-Even) s'appliquent même en mode 'assist'."""
+        pos = {
+            "ticket": 901,
+            "symbol": "EURUSD",
+            "type": "BUY",
+            "price_open": 1.1000,
+            "price_current": 1.1060,  # En gain net (60% du TP)
+            "sl": 1.0950,
+            "tp": 1.1100,
+            "profit": 60.0,
+            "volume": 0.1,
+        }
+        self.mock_mt5.get_open_positions.return_value = [pos]
+        self.mock_mt5.get_symbol_info.return_value = {
+            "spread": 2,
+            "point": 0.00001,
+        }
+        df = pd.DataFrame({"ATR_14": [0.0010] * 30})
+        self.mock_orch.market_data.get_dataframe.return_value = df
+        self.mock_orch.tech.add_all_indicators.return_value = df
+
+        self.trade_manager.manage_open_positions(auto_mode="assist")
+        # Break-Even doit avoir été déclenché
+        self.assertTrue(self.mock_mt5.modify_position_sl.called)
+        # Mais l'IA discrétionnaire ne doit pas avoir été appelée
+        self.mock_orch.analyze_open_position.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

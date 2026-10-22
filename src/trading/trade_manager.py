@@ -413,9 +413,6 @@ class TradeManager:
         5. Évalue la position avec l'IA / Cerveau Local.
         """
         auto_mode = str(auto_mode or "assist").lower()
-        if auto_mode != "auto":
-            logger.info("TradeManager: mode '%s' -> pas de modification/clôture automatique.", auto_mode)
-            return
 
         # ── Gestion des Pending Orders (Annulation si expirés, invalidés ou objectif atteint) ──
         self.manage_pending_orders()
@@ -537,10 +534,10 @@ class TradeManager:
             # ── 3. Protection mécanique sur le serveur MT5 (Break-Even & Trailing Stop) ──
             self.apply_mechanical_protection(pos)
 
-            if not self.orchestrator:
+            if not self.orchestrator or auto_mode != "auto":
                 continue
 
-            # ── 4. Évaluation IA intelligente / Cerveau Local ──
+            # ── 4. Évaluation IA intelligente / Cerveau Local (Mode Auto Uniquement) ──
             # A) Si profit < 0 : Le trade est en cours d'exécution normal (absorption du spread initial ou retracement).
             # Le Stop Loss (déjà placé chez le broker) protège le capital à 100%.
             # L'IA est ignorée de toute façon car le bot refuse de couper à perte (maintien en HOLD).
