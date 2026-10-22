@@ -174,6 +174,27 @@ class CRTStrategy(Strategy):
         if direction == "SELL" and "BULL" in htf_upper and "STRONG" in htf_upper:
             return None
 
+        # ── Cas 1 : Mode Universel Pending Limit CRT + ICT/SMC ──
+        if getattr(crt_setup, 'is_pending', False) and crt_setup.entry_price is not None:
+            return {
+                "strategy": self.name,
+                "direction": direction,
+                "entry": crt_setup.entry_price,
+                "sl": crt_setup.sl,
+                "tp": crt_setup.tp,
+                "tp1": crt_setup.tp1,
+                "tp2": crt_setup.tp2,
+                "rr": crt_setup.rr,
+                "rr_tp1": crt_setup.rr,
+                "order_type": crt_setup.order_type,
+                "is_pending": True,
+                "expiration_bars": crt_setup.expiration_bars,
+                "expiration_seconds": crt_setup.expiration_seconds,
+                "in_killzone": crt_setup.in_killzone,
+                "killzone_name": crt_setup.killzone_name,
+                "reason": crt_setup.reason
+            }
+
         entry_price = price
         if direction == "BUY":
             sl = crt_setup.sl_raw - buffer

@@ -241,6 +241,268 @@ class TestCRTDetector(unittest.TestCase):
         self.assertEqual(res["tp"], 1.1000)
         self.assertLessEqual(res["sl"], 1.0940)
 
+    def test_smc_pending_bullish_valid(self):
+        """
+        Guide Universel Section 3, 4 et 7 :
+        HTF Range : C1 High = 1.1000, Low = 1.0950, Mid = 1.0975
+        LTF :
+          - Swings confirmés avec swing_lookback=2
+          - Sweep sous 1.0950 (Low = 1.0940)
+          - Réintégration close > 1.0950
+          - MSS impulsif au-dessus du dernier Swing High
+          - FVG créé par le déplacement
+          - Ordre BUY_LIMIT généré au milieu du FVG
+        """
+        df_htf = pd.DataFrame([
+            {"open": 1.0960, "high": 1.0990, "low": 1.0950, "close": 1.0970},
+            {"open": 1.0970, "high": 1.1000, "low": 1.0950, "close": 1.0980},  # C1 clôturé (iloc[-2])
+            {"open": 1.0980, "high": 1.0985, "low": 1.0975, "close": 1.0980},  # Bougie active
+        ])
+
+        # Indices 0..4 créent un swing high à l'indice 2 (lookback=2)
+        # index 2: high=1.0970, confirm_idx = 4
+        # index 5: sweep low = 1.0940 (sous 1.0950)
+        # index 6: réintégration close = 1.0954 (> 1.0950)
+        # index 7: displacement bougie 1 -> high = 1.0958, low = 1.0952
+        # index 8: displacement bougie 2 -> high = 1.0968, low = 1.0958
+        # index 9: displacement bougie 3 -> low = 1.0965 (> 1.0958 donc FVG=[1.0958, 1.0965]), close = 1.0972 (> 1.0970 donc MSS!)
+        # index 10: bougie active (en cours)
+        df_ltf = pd.DataFrame([
+            {"open": 1.0955, "high": 1.0958, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0960, "low": 1.0953, "close": 1.0958},
+            {"open": 1.0958, "high": 1.0970, "low": 1.0955, "close": 1.0965},  # 2: SWING HIGH
+            {"open": 1.0965, "high": 1.0962, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0958, "low": 1.0948, "close": 1.0952},  # 4: CONFIRMATION SWING
+            {"open": 1.0952, "high": 1.0952, "low": 1.0940, "close": 1.0945},  # 5: SWEEP
+            {"open": 1.0945, "high": 1.0955, "low": 1.0944, "close": 1.0954},  # 6: REINTEGRATION
+            {"open": 1.0954, "high": 1.0958, "low": 1.0951, "close": 1.0956},  # 7: B1 du FVG
+            {"open": 1.0956, "high": 1.0968, "low": 1.0958, "close": 1.0966},  # 8: B2
+            {"open": 1.0966, "high": 1.0975, "low": 1.0965, "close": 1.0972},  # 9: B3 + MSS (close > 1.0970)
+            {"open": 1.0972, "high": 1.0974, "low": 1.0970, "close": 1.0973},  # 10: ACTIVE CANDLE
+        ])
+
+        setup = self.detector.detect_smc_pending(
+            df_htf=df_htf,
+            df_ltf=df_ltf,
+            atr_ltf=0.0010,
+            spread=0.0001,
+            swing_lookback=2,
+            mss_max_bars=3,
+            min_rr=1.5
+        )
+
+        self.assertIsNotNone(setup)
+        self.assertTrue(setup.is_pending)
+        self.assertEqual(setup.order_type, "BUY_LIMIT")
+        self.assertEqual(setup.direction, "BUY")
+        self.assertTrue(setup.has_mss)
+        self.assertTrue(setup.has_fvg)
+        self.assertEqual(setup.entry_price, 1.09615)
+        self.assertEqual(setup.sl, 1.09390)
+        self.assertEqual(setup.tp, 1.1000)
+        self.assertGreaterEqual(setup.rr, 1.5)
+
+    def test_smc_pending_bearish_valid(self):
+        """
+        Setup baissier :
+        HTF Range : C1 High = 1.1000, Low = 1.0900
+        LTF :
+          - Swing Low à 1.0975 (lookback 2)
+          - Sweep au-dessus de 1.1000 (High = 1.1008)
+          - Réintégration close < 1.1000
+          - MSS impulsif sous 1.0975
+          - FVG baissier créé
+          - Ordre SELL_LIMIT au milieu du FVG
+        """
+        df_htf = pd.DataFrame([
+            {"open": 1.0960, "high": 1.0990, "low": 1.0900, "close": 1.0970},
+            {"open": 1.0970, "high": 1.1000, "low": 1.0900, "close": 1.0980},  # C1
+            {"open": 1.0980, "high": 1.0985, "low": 1.0975, "close": 1.0980},  # Active
+        ])
+
+        df_ltf = pd.DataFrame([
+            {"open": 1.0985, "high": 1.0990, "low": 1.0980, "close": 1.0985},
+            {"open": 1.0985, "high": 1.0988, "low": 1.0980, "close": 1.0982},
+            {"open": 1.0982, "high": 1.0985, "low": 1.0975, "close": 1.0980},  # 2: SWING LOW
+            {"open": 1.0980, "high": 1.0995, "low": 1.0978, "close": 1.0990},
+            {"open": 1.0990, "high": 1.0998, "low": 1.0980, "close": 1.0995},  # 4: CONFIRMATION SWING LOW
+            {"open": 1.0995, "high": 1.1008, "low": 1.0990, "close": 1.1004},  # 5: SWEEP HIGH (1.1008 > 1.1000)
+            {"open": 1.1004, "high": 1.1004, "low": 1.0985, "close": 1.0990},  # 6: REINTEGRATION (close 1.0990 < 1.1000)
+            {"open": 1.0990, "high": 1.0992, "low": 1.0980, "close": 1.0982},  # 7: B1 du FVG (low = 1.0980)
+            {"open": 1.0982, "high": 1.0982, "low": 1.0976, "close": 1.0978},  # 8: B2 (close 1.0978 > 1.0975, pas de MSS encore)
+            {"open": 1.0978, "high": 1.0974, "low": 1.0965, "close": 1.0968},  # 9: B3 (high = 1.0974 < 1.0980) + MSS (close < 1.0975)
+            {"open": 1.0968, "high": 1.0970, "low": 1.0965, "close": 1.0967},  # 10: ACTIVE CANDLE
+        ])
+
+        setup = self.detector.detect_smc_pending(
+            df_htf=df_htf,
+            df_ltf=df_ltf,
+            atr_ltf=0.0010,
+            spread=0.0001,
+            swing_lookback=2,
+            mss_max_bars=3,
+            min_rr=1.5
+        )
+
+        self.assertIsNotNone(setup)
+        self.assertTrue(setup.is_pending)
+        self.assertEqual(setup.order_type, "SELL_LIMIT")
+        self.assertEqual(setup.direction, "SELL")
+        self.assertTrue(setup.has_mss)
+        self.assertTrue(setup.has_fvg)
+        self.assertEqual(setup.entry_price, 1.09770)
+        self.assertEqual(setup.sl, 1.10090)
+        self.assertEqual(setup.tp, 1.0900)
+        self.assertGreaterEqual(setup.rr, 1.5)
+
+    def test_smc_pending_rejected_no_mss(self):
+        """Si le prix réintègre mais ne casse jamais le swing précédent dans les 3 bougies, rejet."""
+        df_htf = pd.DataFrame([
+            {"open": 1.0960, "high": 1.0990, "low": 1.0950, "close": 1.0970},
+            {"open": 1.0970, "high": 1.1000, "low": 1.0950, "close": 1.0980},
+            {"open": 1.0980, "high": 1.0985, "low": 1.0975, "close": 1.0980},
+        ])
+        df_ltf = pd.DataFrame([
+            {"open": 1.0955, "high": 1.0958, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0960, "low": 1.0953, "close": 1.0958},
+            {"open": 1.0958, "high": 1.0980, "low": 1.0955, "close": 1.0975},  # High trop haut (1.0980)
+            {"open": 1.0975, "high": 1.0962, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0958, "low": 1.0948, "close": 1.0952},
+            {"open": 1.0952, "high": 1.0952, "low": 1.0940, "close": 1.0945},  # Sweep
+            {"open": 1.0945, "high": 1.0955, "low": 1.0944, "close": 1.0954},  # Reintegration
+            {"open": 1.0954, "high": 1.0958, "low": 1.0951, "close": 1.0956},
+            {"open": 1.0956, "high": 1.0960, "low": 1.0955, "close": 1.0958},  # Toujours sous 1.0980
+            {"open": 1.0958, "high": 1.0962, "low": 1.0956, "close": 1.0960},  # Pas de MSS
+            {"open": 1.0960, "high": 1.0962, "low": 1.0958, "close": 1.0961},
+        ])
+        setup = self.detector.detect_smc_pending(
+            df_htf=df_htf, df_ltf=df_ltf, atr_ltf=0.0010, spread=0.0001, swing_lookback=2, mss_max_bars=3
+        )
+        self.assertIsNone(setup)
+
+    def test_smc_pending_rejected_fvg_breached(self):
+        """Si une clôture ultérieure traverse la borne opposée du FVG, setup invalidé."""
+        df_htf = pd.DataFrame([
+            {"open": 1.0960, "high": 1.0990, "low": 1.0950, "close": 1.0970},
+            {"open": 1.0970, "high": 1.1000, "low": 1.0950, "close": 1.0980},
+            {"open": 1.0980, "high": 1.0985, "low": 1.0975, "close": 1.0980},
+        ])
+        df_ltf = pd.DataFrame([
+            {"open": 1.0955, "high": 1.0958, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0960, "low": 1.0953, "close": 1.0958},
+            {"open": 1.0958, "high": 1.0970, "low": 1.0955, "close": 1.0965},
+            {"open": 1.0965, "high": 1.0962, "low": 1.0952, "close": 1.0955},
+            {"open": 1.0955, "high": 1.0958, "low": 1.0948, "close": 1.0952},
+            {"open": 1.0952, "high": 1.0952, "low": 1.0940, "close": 1.0945},  # Sweep
+            {"open": 1.0945, "high": 1.0955, "low": 1.0944, "close": 1.0954},  # Reintegration
+            {"open": 1.0954, "high": 1.0958, "low": 1.0951, "close": 1.0956},  # FVG b1 high 1.0958
+            {"open": 1.0956, "high": 1.0968, "low": 1.0958, "close": 1.0966},
+            {"open": 1.0966, "high": 1.0975, "low": 1.0965, "close": 1.0972},  # MSS + FVG [1.0958, 1.0965]
+            {"open": 1.0972, "high": 1.0972, "low": 1.0950, "close": 1.0950},  # Cassure sous 1.0958 !
+            {"open": 1.0950, "high": 1.0952, "low": 1.0948, "close": 1.0950},
+        ])
+        setup = self.detector.detect_smc_pending(
+            df_htf=df_htf, df_ltf=df_ltf, atr_ltf=0.0010, spread=0.0001, swing_lookback=2, mss_max_bars=3
+        )
+        self.assertIsNone(setup)
+
+    def test_trade_execution_pending_order_request(self):
+        """Vérifie la création correcte d'un ordre en attente BUY_LIMIT / SELL_LIMIT."""
+        from src.trading.trade_execution import TradeExecutionEngine
+        import MetaTrader5 as mt5
+
+        mock_mt5 = MagicMock()
+        mock_mt5.get_symbol_info.return_value = {
+            "ask": 1.0970,
+            "bid": 1.0968,
+            "digits": 5,
+            "trade_tick_value": 1.0,
+            "trade_tick_size": 0.00001,
+            "trade_stops_level": 10,
+            "point": 0.00001,
+        }
+        mock_mt5.get_open_positions.return_value = []
+        mock_mt5.get_daily_profit.return_value = 0.0
+
+        engine = TradeExecutionEngine(
+            mt5_connector=mock_mt5,
+            mode="auto",
+            min_confidence=50,
+            min_reward_risk=1.5
+        )
+
+        signal = {
+            "symbol": "EURUSD",
+            "decision": {
+                "action": "BUY",
+                "is_pending": True,
+                "order_type": "BUY_LIMIT",
+                "entry": 1.0960,  # Strictement sous Ask (1.0970)
+                "sl": 1.0940,
+                "tp": 1.1000,
+                "lot": 0.05,
+                "confidence": 85,
+                "reason": "CRT Universal SMC Pending Limit",
+                "expiration_bars": 4,
+                "expiration_seconds": 3600,
+            },
+            "tech_features": {"atr_14": 0.0010},
+        }
+
+        req = engine.prepare_order_request(signal)
+        self.assertIsNotNone(req)
+        self.assertEqual(req["action"], mt5.TRADE_ACTION_PENDING)
+        self.assertEqual(req["type"], mt5.ORDER_TYPE_BUY_LIMIT)
+        self.assertEqual(req["price"], 1.0960)
+        self.assertEqual(req["sl"], 1.0940)
+        self.assertEqual(req["tp"], 1.1000)
+        self.assertEqual(req["volume"], 0.05)
+        self.assertEqual(req["type_time"], mt5.ORDER_TIME_SPECIFIED)
+        self.assertIn("expiration", req)
+        self.assertGreater(req["expiration"], 0)
+
+    def test_trade_manager_manage_pending_orders(self):
+        """Vérifie l'annulation des pending orders si TP touché avant entrée ou si cible journalière atteinte."""
+        from src.trading.trade_manager import TradeManager
+
+        mock_mt5 = MagicMock()
+        mock_mt5.cancel_pending_order.return_value = True
+
+        manager = TradeManager(
+            mt5_connector=mock_mt5,
+            orchestrator=None,
+            config={"risk_management": {"daily_profit_target_usd": 50.0}}
+        )
+
+        # Scénario 1 : Le TP d'un BUY_LIMIT a été touché avant l'entrée (Bid >= TP)
+        mock_mt5.get_pending_orders.return_value = [
+            {
+                "ticket": 1001,
+                "symbol": "EURUSD",
+                "type": "BUY",
+                "price_open": 1.0960,
+                "sl": 1.0940,
+                "tp": 1.1000,
+                "time_expiration": 0,
+            }
+        ]
+        mock_mt5.get_symbol_info.return_value = {"bid": 1.1005, "ask": 1.1006}
+        mock_mt5.get_daily_profit.return_value = 10.0
+
+        cancelled = manager.manage_pending_orders()
+        self.assertEqual(len(cancelled), 1)
+        self.assertEqual(cancelled[0]["ticket"], 1001)
+        self.assertIn("Cible TP", cancelled[0]["reason"])
+        mock_mt5.cancel_pending_order.assert_called_with(1001)
+
+        # Scénario 2 : Cible journalière atteinte
+        mock_mt5.get_daily_profit.return_value = 55.0
+        mock_mt5.get_symbol_info.return_value = {"bid": 1.0965, "ask": 1.0966}
+        cancelled2 = manager.manage_pending_orders()
+        self.assertEqual(len(cancelled2), 1)
+        self.assertIn("Objectif journalier", cancelled2[0]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

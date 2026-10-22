@@ -318,18 +318,107 @@ class TradeManager:
 
         return False
 
+    def manage_pending_orders(self) -> list:
+        """
+        Gère le cycle de vie des ordres en attente (Pending Orders MT5) selon le Guide Universel :
+        - Annulation si expiration atteinte ou dépassée (4 bougies LTF)
+        - Annulation si invalidation (le cours a franchi le SL avant exécution)
+        - Annulation si le Take Profit a été touché avant l'entrée (mouvement parti)
+        - Annulation si objectif journalier de gain ou perte maximale atteint
+        """
+        if not hasattr(self.mt5, 'get_pending_orders') or not hasattr(self.mt5, 'cancel_pending_order'):
+            return []
+
+        try:
+            orders = self.mt5.get_pending_orders() or []
+        except Exception as _e:
+            logger.warning(f"Failed to fetch pending orders: {_e}")
+            return []
+
+        if not orders:
+            return []
+
+        cancelled = []
+        daily_target_reached = False
+        eff_target = self.get_effective_daily_profit_target()
+        if eff_target > 0 and hasattr(self.mt5, 'get_daily_profit'):
+            try:
+                if self.mt5.get_daily_profit() >= eff_target:
+                    daily_target_reached = True
+            except Exception:
+                pass
+
+        import time
+        now = time.time()
+
+        for o in orders:
+            ticket = o.get('ticket')
+            sym = o.get('symbol')
+            o_type = o.get('type')  # BUY or SELL
+            sl = float(o.get('sl') or 0.0)
+            tp = float(o.get('tp') or 0.0)
+            price_open = float(o.get('price_open') or 0.0)
+            exp_time = float(o.get('time_expiration') or 0.0)
+
+            should_cancel = False
+            reason = ""
+
+            if daily_target_reached and self.stop_trading_on_daily_target:
+                should_cancel = True
+                reason = "Objectif journalier de gain atteint"
+            elif exp_time > 0 and now >= exp_time:
+                should_cancel = True
+                reason = "Ordre en attente expiré (délai dépassé)"
+            else:
+                tick = self.mt5.get_symbol_info(sym) if hasattr(self.mt5, 'get_symbol_info') else None
+                if tick:
+                    bid = float(tick.get('bid') or 0.0)
+                    ask = float(tick.get('ask') or 0.0)
+
+                    # Invalidation 1 : Le TP a été touché avant l'entrée
+                    if o_type == 'BUY' and tp > 0 and bid >= tp:
+                        should_cancel = True
+                        reason = f"Cible TP ({tp}) atteinte avant déclenchement de l'entrée ({price_open})"
+                    elif o_type == 'SELL' and tp > 0 and ask <= tp:
+                        should_cancel = True
+                        reason = f"Cible TP ({tp}) atteinte avant déclenchement de l'entrée ({price_open})"
+
+                    # Invalidation 2 : Le marché a cassé le SL avant l'entrée (invalidation du sweep)
+                    elif o_type == 'BUY' and sl > 0 and bid <= sl:
+                        should_cancel = True
+                        reason = f"Setup invalidé : cours passé sous le SL ({sl})"
+                    elif o_type == 'SELL' and sl > 0 and ask >= sl:
+                        should_cancel = True
+                        reason = f"Setup invalidé : cours passé au-dessus du SL ({sl})"
+
+            if should_cancel:
+                try:
+                    if self.mt5.cancel_pending_order(ticket):
+                        logger.info(f"🗑️ [CRT Pending] Ordre #{ticket} ({sym} {o_type}) annulé : {reason}")
+                        cancelled.append({"ticket": ticket, "symbol": sym, "reason": reason})
+                    else:
+                        logger.warning(f"Échec annulation ordre #{ticket}")
+                except Exception as _ce:
+                    logger.warning(f"Erreur annulation ordre #{ticket}: {_ce}")
+
+        return cancelled
+
     def manage_open_positions(self, auto_mode: str = "assist"):
         """
         Scanne toutes les positions ouvertes :
-        1. Vérifie l'objectif de profit journalier (Daily Profit Target).
-        2. Applique le verrou de profit en dollars (Trailing Profit $) : coupe dès recul de 1$ à 3$.
-        3. Applique Break-Even et Trailing Stop sur MT5.
-        4. Évalue la position avec l'IA / Cerveau Local.
+        1. Gère et annule les ordres en attente expirés / invalidés.
+        2. Vérifie l'objectif de profit journalier (Daily Profit Target).
+        3. Applique le verrou de profit en dollars (Trailing Profit $) : coupe dès recul de 1$ à 3$.
+        4. Applique Break-Even et Trailing Stop sur MT5.
+        5. Évalue la position avec l'IA / Cerveau Local.
         """
         auto_mode = str(auto_mode or "assist").lower()
         if auto_mode != "auto":
             logger.info("TradeManager: mode '%s' -> pas de modification/clôture automatique.", auto_mode)
             return
+
+        # ── Gestion des Pending Orders (Annulation si expirés, invalidés ou objectif atteint) ──
+        self.manage_pending_orders()
 
         positions = self.mt5.get_open_positions()
         current_tickets = {int(p['ticket']) for p in (positions or [])}

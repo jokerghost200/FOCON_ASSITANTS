@@ -89,14 +89,25 @@ class TradeExecutionEngine:
             )
             return None
             
-        order_type = mt5.ORDER_TYPE_BUY if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL
+        is_pending = bool(
+            decision.get('is_pending')
+            or decision.get('order_type') in ('BUY_LIMIT', 'SELL_LIMIT', 'LIMIT')
+        )
+        if is_pending:
+            order_type = mt5.ORDER_TYPE_BUY_LIMIT if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL_LIMIT
+        else:
+            order_type = mt5.ORDER_TYPE_BUY if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL
         
         # Get latest tick for current price
         tick = self.mt5.get_symbol_info(symbol)
         if not tick or not tick.get('ask') or not tick.get('bid'):
             logger.error(f"Cannot prepare order for {symbol}: no valid tick (market may be closed).")
             return None
-        price = tick.get('ask') if order_type == mt5.ORDER_TYPE_BUY else tick.get('bid')
+            
+        ask_price = float(tick.get('ask'))
+        bid_price = float(tick.get('bid'))
+        price = ask_price if action.upper() == 'BUY' else bid_price
+
         try:
             sl = float(decision.get('sl'))
             tp = float(decision.get('tp'))
@@ -108,65 +119,88 @@ class TradeExecutionEngine:
         digits = tick.get('digits', 5) if tick else 5
         price = round(float(price), digits)
 
-        # ---- OB entry-drift compensation ----
-        # The OB detector calculates SL/TP relative to ob_mid, but we execute
-        # at the live market price.  Re-anchor TP so the original R:R is kept.
-        original_entry = decision.get('entry')
-        if original_entry is not None:
+        if is_pending:
             try:
-                original_entry = float(original_entry)
-                orig_sl_dist = abs(original_entry - sl)
-                orig_tp_dist = abs(tp - original_entry)
-                if orig_sl_dist > 0:
-                    orig_rr = max(self.min_reward_risk, orig_tp_dist / orig_sl_dist)
-                    live_sl_dist = abs(price - sl)
-                    if live_sl_dist > 0:
-                        pip_unit = 10 ** (-digits)
-                        if action.upper() == 'BUY':
-                            tp = round(price + live_sl_dist * orig_rr, digits)
-                            if (tp - price) / live_sl_dist < (orig_rr - 1e-5):
-                                tp = round(tp + pip_unit, digits)
-                        else:
-                            tp = round(price - live_sl_dist * orig_rr, digits)
-                            if (price - tp) / live_sl_dist < (orig_rr - 1e-5):
-                                tp = round(tp - pip_unit, digits)
-                        logger.info(
-                            f"[OB] {symbol}: entry drift "
-                            f"{original_entry:.{digits}f} -> {price:.{digits}f}, "
-                            f"TP recalculated to {tp:.{digits}f} (R:R {orig_rr:.2f} preserved)"
-                        )
+                target_entry = round(float(decision.get('entry')), digits)
             except (TypeError, ValueError):
-                pass  # fall through to normal validation
+                logger.error(f"Signal rejected for {symbol}: invalid pending entry price.")
+                return None
+
+            # Vérification des règles de placement d'ordre LIMIT (Section 4.2 du Guide Universel)
+            if action.upper() == 'BUY' and target_entry >= ask_price:
+                logger.error(
+                    f"Pending BUY_LIMIT rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
+                    f"must be strictly below Ask ({ask_price:.{digits}f})."
+                )
+                return None
+            elif action.upper() == 'SELL' and target_entry <= bid_price:
+                logger.error(
+                    f"Pending SELL_LIMIT rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
+                    f"must be strictly above Bid ({bid_price:.{digits}f})."
+                )
+                return None
+
+            exec_price = target_entry
+        else:
+            exec_price = price
+
+            # ---- OB entry-drift compensation for DEAL orders ----
+            original_entry = decision.get('entry')
+            if original_entry is not None:
+                try:
+                    original_entry = float(original_entry)
+                    orig_sl_dist = abs(original_entry - sl)
+                    orig_tp_dist = abs(tp - original_entry)
+                    if orig_sl_dist > 0:
+                        orig_rr = max(self.min_reward_risk, orig_tp_dist / orig_sl_dist)
+                        live_sl_dist = abs(price - sl)
+                        if live_sl_dist > 0:
+                            pip_unit = 10 ** (-digits)
+                            if action.upper() == 'BUY':
+                                tp = round(price + live_sl_dist * orig_rr, digits)
+                                if (tp - price) / live_sl_dist < (orig_rr - 1e-5):
+                                    tp = round(tp + pip_unit, digits)
+                            else:
+                                tp = round(price - live_sl_dist * orig_rr, digits)
+                                if (price - tp) / live_sl_dist < (orig_rr - 1e-5):
+                                    tp = round(tp - pip_unit, digits)
+                            logger.info(
+                                f"[OB] {symbol}: entry drift "
+                                f"{original_entry:.{digits}f} -> {price:.{digits}f}, "
+                                f"TP recalculated to {tp:.{digits}f} (R:R {orig_rr:.2f} preserved)"
+                            )
+                except (TypeError, ValueError):
+                    pass
 
         sl = round(sl, digits)
         tp = round(tp, digits)
 
-        # ── Vérification stricte du sens du Stop Loss et Take Profit vs cours réel ──
+        # ── Vérification stricte du sens du Stop Loss et Take Profit vs prix d'entrée ──
         if action.upper() == 'BUY':
-            if sl >= price:
+            if sl >= exec_price:
                 logger.error(
-                    f"Signal rejected for {symbol}: For a BUY, SL ({sl}) must be strictly less than entry price ({price})."
+                    f"Signal rejected for {symbol}: For a BUY, SL ({sl}) must be strictly less than entry price ({exec_price})."
                 )
                 return None
-            if tp <= price:
+            if tp <= exec_price:
                 logger.error(
-                    f"Signal rejected for {symbol}: For a BUY, TP ({tp}) must be strictly greater than entry price ({price})."
+                    f"Signal rejected for {symbol}: For a BUY, TP ({tp}) must be strictly greater than entry price ({exec_price})."
                 )
                 return None
         elif action.upper() == 'SELL':
-            if sl <= price:
+            if sl <= exec_price:
                 logger.error(
-                    f"Signal rejected for {symbol}: For a SELL, SL ({sl}) must be strictly greater than entry price ({price})."
+                    f"Signal rejected for {symbol}: For a SELL, SL ({sl}) must be strictly greater than entry price ({exec_price})."
                 )
                 return None
-            if tp >= price:
+            if tp >= exec_price:
                 logger.error(
-                    f"Signal rejected for {symbol}: For a SELL, TP ({tp}) must be strictly less than entry price ({price})."
+                    f"Signal rejected for {symbol}: For a SELL, TP ({tp}) must be strictly less than entry price ({exec_price})."
                 )
                 return None
 
-        risk_distance = abs(price - sl)
-        reward_distance = abs(tp - price)
+        risk_distance = abs(exec_price - sl)
+        reward_distance = abs(tp - exec_price)
         if risk_distance <= 0:
             logger.error(f"Signal rejected for {symbol}: invalid risk distance.")
             return None
@@ -183,7 +217,7 @@ class TradeExecutionEngine:
         
         # Determine basic session by hour (UTC approx)
         import datetime
-        current_hour = datetime.datetime.utcnow().hour
+        current_hour = datetime.datetime.now(datetime.timezone.utc).hour
         if 0 <= current_hour < 8:
             session = "ASIA"
         elif 8 <= current_hour < 13:
@@ -229,20 +263,24 @@ class TradeExecutionEngine:
             type_filling = mt5.ORDER_FILLING_RETURN
 
         request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": mt5.TRADE_ACTION_PENDING if is_pending else mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": float(decision.get('lot', 0.01)),
             "type": order_type,
-            "price": float(price),
+            "price": float(exec_price),
             "sl": sl,
             "tp": tp,
             "deviation": 20,
             "magic": 123456,
-            "comment": "AI Assistant Trade",
-            "type_time": mt5.ORDER_TIME_GTC,
+            "comment": decision.get('order_comment') or ("CRT Pending Limit" if is_pending else "AI Assistant Trade"),
+            "type_time": mt5.ORDER_TIME_SPECIFIED if is_pending else mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
             "_snapshot": snapshot,
         }
+        if is_pending:
+            import datetime
+            exp_seconds = int(decision.get('expiration_seconds') or (decision.get('expiration_bars', 4) * 900))
+            request["expiration"] = int((datetime.datetime.now() + datetime.timedelta(seconds=exp_seconds)).timestamp())
         
         return request
 

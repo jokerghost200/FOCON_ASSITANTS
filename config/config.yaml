@@ -20,6 +20,20 @@ trading:
   post_trade_ob_rescan_enabled: false
   allowed_market_types:
   - Forex
+crt:
+  enabled: true
+  htf: H1
+  ltf: M15
+  swing_lookback: 2
+  mss_max_bars: 3
+  entry_mode: fvg_midpoint
+  atr_period: 14
+  sl_atr_mult: 0.1
+  min_rr: 1.5
+  fallback_tp_r: 2.0
+  expiration_bars: 4
+  risk_per_trade_pct: 0.25
+  use_pending_orders: true
 risk_management:
   default_risk_percent: 2.0
   max_daily_loss_percent: 8.0

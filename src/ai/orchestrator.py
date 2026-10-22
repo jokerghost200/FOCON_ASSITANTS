@@ -373,6 +373,21 @@ class AIOrchestrator:
                 _emit(f"📌 Zones OB pour ordres limites: {len(pending_ob_results)}")
             except Exception:
                 logger.exception("Pending Order Block scan failed")
+
+            # Scan for PENDING CRT (Candle Range Theory + SMC Limit Orders)
+            _emit("Scan zones CRT universel en attente (Pending Limits)...")
+            try:
+                crt_symbols = open_markets if open_markets else list(tech_summaries.keys())
+                pending_crt_results = self.scan_for_crt_pending_orders(
+                    crt_symbols,
+                    timeframe,
+                    direction_filter=dir_filter_upper,
+                    stop_event=stop_event,
+                )
+                results.extend(pending_crt_results)
+                _emit(f"🎯 Setups CRT Pending Limits validés: {len(pending_crt_results)}")
+            except Exception:
+                logger.exception("Pending CRT scan failed")
             
         if closed_markets:
             results.append({
@@ -449,15 +464,38 @@ class AIOrchestrator:
         crt_context = "Aucun setup CRT actif sur l'unité supérieure."
         if htf_df is not None and len(htf_df) >= 3:
             try:
-                crt_setup = self.crt_detector.detect(htf_df, atr=htf_atr, spread=spread_price)
+                # 1. Essai du modèle universel complet (Sweep + MSS + FVG sur LTF)
+                crt_setup = self.crt_detector.detect_smc_pending(
+                    df_htf=htf_df,
+                    df_ltf=df,
+                    atr_ltf=float(tech_features.get('atr_14') or 0.0006),
+                    spread=spread_price,
+                    min_rr=1.5,
+                    expiration_bars=4,
+                )
+                # 2. Fallback sur le modèle conservateur direct si pas de FVG LTF
+                if not crt_setup:
+                    crt_setup = self.crt_detector.detect(htf_df, atr=htf_atr, spread=spread_price)
+
                 if crt_setup:
                     kz_tag = f" [Killzone {crt_setup.killzone_name}]" if crt_setup.in_killzone else ""
-                    crt_context = (
-                        f"SETUP CRT ({crt_setup.direction}) VALIDÉ SUR {htf}{kz_tag} :\n"
-                        f"- Range C1 : Bas={crt_setup.c1_low:.5f}, Haut={crt_setup.c1_high:.5f}, Équilibre 50%={crt_setup.c1_mid:.5f}\n"
-                        f"- Manipulation C2 : Sweep={crt_setup.sweep_price:.5f} (prof. {crt_setup.sweep_depth:.5f}), Clôture dans range={crt_setup.c2_close:.5f}\n"
-                        f"- Niveaux : SL={crt_setup.sl_raw:.5f}, TP1 (50% EQ)={crt_setup.tp1:.5f}, TP2 (Borne opposée)={crt_setup.tp2:.5f}"
-                    )
+                    if getattr(crt_setup, 'is_pending', False):
+                        crt_context = (
+                            f"SETUP CRT + ICT/SMC UNIVERSEL ({crt_setup.direction}) VALIDÉ {timeframe}/{htf}{kz_tag} :\n"
+                            f"- Modèle : {crt_setup.order_type} en attente (Pending Limit)\n"
+                            f"- Range C1 ({htf}) : Bas={crt_setup.c1_low:.5f}, Haut={crt_setup.c1_high:.5f}, Équilibre 50%={crt_setup.c1_mid:.5f}\n"
+                            f"- Sweep {timeframe} : Extrême={crt_setup.sweep_price:.5f} (prof. {crt_setup.sweep_depth:.5f})\n"
+                            f"- Confirmation MSS : Cassure structurelle à {crt_setup.mss_price:.5f}\n"
+                            f"- FVG : Zone [{crt_setup.fvg_low:.5f} - {crt_setup.fvg_high:.5f}] -> Entrée LIMIT au milieu = {crt_setup.entry_price:.5f}\n"
+                            f"- Niveaux : SL={crt_setup.sl:.5f}, TP={crt_setup.tp:.5f} (R:R {crt_setup.rr:.2f}), Expiration={crt_setup.expiration_bars} bougies"
+                        )
+                    else:
+                        crt_context = (
+                            f"SETUP CRT ({crt_setup.direction}) VALIDÉ SUR {htf}{kz_tag} :\n"
+                            f"- Range C1 : Bas={crt_setup.c1_low:.5f}, Haut={crt_setup.c1_high:.5f}, Équilibre 50%={crt_setup.c1_mid:.5f}\n"
+                            f"- Manipulation C2 : Sweep={crt_setup.sweep_price:.5f} (prof. {crt_setup.sweep_depth:.5f}), Clôture dans range={crt_setup.c2_close:.5f}\n"
+                            f"- Niveaux : SL={crt_setup.sl_raw:.5f}, TP1 (50% EQ)={crt_setup.tp1:.5f}, TP2 (Borne opposée)={crt_setup.tp2:.5f}"
+                        )
                     logger.info(f"[CRT] {symbol}: {crt_context}")
             except Exception as _ce:
                 logger.warning(f"CRT detector error for {symbol}: {_ce}")
@@ -1202,6 +1240,110 @@ class AIOrchestrator:
 
             except Exception as _e:
                 logger.warning(f"[OB PENDING] {symbol}: erreur — {_e}")
+
+        return results
+
+    def scan_for_crt_pending_orders(
+        self,
+        symbols: list,
+        timeframe: str,
+        direction_filter: str = "BOTH",
+        stop_event=None,
+    ) -> list:
+        """
+        Scanne les marchés à la recherche de configurations CRT + ICT/SMC complètes
+        (Sweep + Réintégration + MSS + FVG) pour placement d'ordres limites PENDING.
+        Conforme au Guide Universel.
+        """
+        results = []
+        htf_map = {"M5": "M15", "M15": "H1", "H1": "H4", "H4": "D1", "D1": "D1"}
+        htf = htf_map.get(timeframe.upper(), "H1")
+
+        for symbol in symbols:
+            time.sleep(0.02)  # Yield GIL
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                if not self.mt5.is_market_open(symbol):
+                    continue
+
+                df_ltf = self.market_data.get_dataframe(symbol, timeframe)
+                if df_ltf is None or df_ltf.empty or len(df_ltf) < 10:
+                    continue
+                df_ltf = self.tech.add_all_indicators(df_ltf)
+                feat = self.tech.extract_latest_features(df_ltf)
+                atr_ltf = float(feat.get('atr_14') or 0.0006)
+
+                htf_df = self.market_data.get_dataframe(symbol, htf)
+                if htf_df is None or len(htf_df) < 3:
+                    continue
+
+                sym_info = self.mt5.get_symbol_info(symbol) or {}
+                point = float(sym_info.get('point', 0.00001))
+                spread_val = float(sym_info.get('spread', 0)) * point
+
+                crt_setup = self.crt_detector.detect_smc_pending(
+                    df_htf=htf_df,
+                    df_ltf=df_ltf,
+                    atr_ltf=atr_ltf,
+                    spread=spread_val,
+                    min_rr=1.5,
+                    expiration_bars=4,
+                )
+                if not crt_setup:
+                    continue
+
+                dir_filter_upper = str(direction_filter or 'BOTH').upper()
+                if dir_filter_upper == 'BUY_ONLY' and crt_setup.direction != 'BUY':
+                    continue
+                elif dir_filter_upper == 'SELL_ONLY' and crt_setup.direction != 'SELL':
+                    continue
+
+                is_cd, cd_reason = self.is_symbol_in_cooldown(symbol, crt_setup.direction)
+                if is_cd:
+                    logger.info(f"[CRT PENDING] {symbol}: Rejet {crt_setup.direction} — Symbole en cooldown: {cd_reason}")
+                    continue
+
+                decision = {
+                    "action": crt_setup.direction,
+                    "confidence": 85 if crt_setup.in_killzone else 80,
+                    "entry": crt_setup.entry_price,
+                    "sl": crt_setup.sl,
+                    "tp": crt_setup.tp,
+                    "tp1": crt_setup.tp1,
+                    "tp2": crt_setup.tp2,
+                    "rr": crt_setup.rr,
+                    "order_type": crt_setup.order_type,
+                    "is_pending": True,
+                    "expiration_bars": crt_setup.expiration_bars,
+                    "expiration_seconds": crt_setup.expiration_seconds,
+                    "in_killzone": crt_setup.in_killzone,
+                    "killzone_name": crt_setup.killzone_name,
+                    "reason": crt_setup.reason,
+                }
+
+                account_info = self.mt5.get_account_info()
+                if not account_info or not sym_info:
+                    continue
+
+                validation = self.risk.validate_proposal(decision, account_info, sym_info)
+                if not validation['valid']:
+                    logger.info(f"[CRT PENDING] {symbol}: Validation de risque échouée — {validation['reason']}")
+                    continue
+
+                results.append({
+                    "status": "PENDING_CRT",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "decision": validation['proposal'],
+                    "crt_data": crt_setup,
+                    "htf": htf,
+                    "reason": crt_setup.reason,
+                })
+                logger.info(f"✅ [CRT PENDING] {symbol}: Ordre limite {crt_setup.order_type} validé @ {crt_setup.entry_price}")
+
+            except Exception as _e:
+                logger.warning(f"[CRT PENDING] {symbol}: erreur — {_e}")
 
         return results
 
