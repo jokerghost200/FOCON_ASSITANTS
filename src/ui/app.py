@@ -1980,6 +1980,9 @@ class MainWindow(QMainWindow):
                     score += 100.0  # OB institutionnel retesté
                 elif status in ("PENDING_CRT", "MARKET_CRT"):
                     score += 95.0   # Setup CRT institutionnel
+                    of_data = r.get("order_flow")
+                    if of_data and (getattr(of_data, 'is_confirmed', False) or (isinstance(of_data, dict) and of_data.get('is_confirmed'))):
+                        score += 20.0  # Confluence Order Flow confirmée (DOM/CVD/Volume Profile/Absorption)
                 elif status == "PENDING_OB":
                     score += 85.0
                 elif status == "SIGNAL":

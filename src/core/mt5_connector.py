@@ -235,6 +235,39 @@ class MT5Connector:
 
             return rates
 
+    def get_ticks(self, symbol: str, count: int = 1000, flags: int = None):
+        """
+        Retrieves recent executed/quote ticks for a symbol.
+        Used by the Order Flow engine (Footprint, CVD, Time & Sales, Absorption).
+        """
+        if not self.check_symbol(symbol):
+            return None
+
+        copy_flags = flags if flags is not None else getattr(mt5, 'COPY_TICKS_ALL', 0)
+
+        with MT5Connector._lock:
+            ticks = mt5.copy_ticks_from_pos(symbol, 0, count, copy_flags)
+            if ticks is None or len(ticks) == 0:
+                logger.debug(f"Failed to copy ticks for {symbol}, error code = {mt5.last_error()}")
+                return None
+            return ticks
+
+    def get_market_depth_book(self, symbol: str):
+        """
+        Retrieves real-time Level 2 Market Depth (DOM) for the symbol if supported by broker.
+        """
+        if not self.check_symbol(symbol):
+            return None
+
+        with MT5Connector._lock:
+            if not mt5.market_book_add(symbol):
+                return None
+            try:
+                items = mt5.market_book_get(symbol)
+                return items
+            finally:
+                mt5.market_book_release(symbol)
+
     def order_check(self, symbol: str, action: str, volume: float, price: float, sl: float, tp: float):
         """
         Validates an order request before sending it.

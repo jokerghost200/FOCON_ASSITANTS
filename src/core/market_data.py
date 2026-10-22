@@ -55,53 +55,163 @@ class MarketDataEngine:
             'time': tick.get('time')
         }
 
-    def get_market_depth(self, symbol: str) -> dict:
+    def get_order_book_snapshot(self, symbol: str) -> dict:
         """
-        Retrieves the Depth of Market (Order Book) for the symbol if available.
-        Returns a summary of resting bids vs asks volume to indicate order flow pressure.
+        Retrieves a full Level 2 Order Book (DOM) snapshot with bid and ask price ladders.
+        Returns:
+            dict with 'available', 'bids', 'asks', 'best_bid', 'best_ask', 'spread',
+            'bids_volume', 'asks_volume', 'imbalance_ratio', 'buy_pressure', 'sell_pressure'.
         """
         import MetaTrader5 as mt5
-        
-        if not self.connector.check_symbol(symbol):
-            return {"available": False, "reason": "Symbol not available"}
-            
-        with MT5Connector._lock:
-            if not mt5.market_book_add(symbol):
-                return {"available": False, "reason": "Broker does not support DOM for this symbol"}
 
-            try:
-                items = mt5.market_book_get(symbol)
-            finally:
-                # Always release the book to not consume MT5 resources unnecessarily
-                mt5.market_book_release(symbol)
-        
-        if not items:
-            return {"available": False, "reason": "DOM is empty"}
-            
+        items = self.connector.get_market_depth_book(symbol)
+        if items is None or len(items) == 0:
+            return {"available": False, "reason": "DOM unavailable or unsupported by broker"}
+
+        bids = []
+        asks = []
         bids_volume = 0.0
         asks_volume = 0.0
-        
+
         for item in items:
-            # Type 1 = BOOK_TYPE_SELL, Type 2 = BOOK_TYPE_BUY
-            if item.type == mt5.BOOK_TYPE_BUY:
-                bids_volume += item.volume_real if hasattr(item, 'volume_real') and item.volume_real > 0 else item.volume
-            elif item.type == mt5.BOOK_TYPE_SELL:
-                asks_volume += item.volume_real if hasattr(item, 'volume_real') and item.volume_real > 0 else item.volume
-                
+            vol = float(item.volume_real if hasattr(item, 'volume_real') and item.volume_real > 0 else item.volume)
+            price = float(item.price)
+            if item.type == getattr(mt5, 'BOOK_TYPE_BUY', 2):
+                bids.append({"price": price, "volume": vol})
+                bids_volume += vol
+            elif item.type == getattr(mt5, 'BOOK_TYPE_SELL', 1):
+                asks.append({"price": price, "volume": vol})
+                asks_volume += vol
+
+        # Sort bids descending (highest bid first) and asks ascending (lowest ask first)
+        bids.sort(key=lambda x: x["price"], reverse=True)
+        asks.sort(key=lambda x: x["price"])
+
         total_vol = bids_volume + asks_volume
         if total_vol == 0:
             return {"available": False, "reason": "Zero volume in DOM"}
-            
-        buy_pressure = (bids_volume / total_vol) * 100
-        sell_pressure = 100 - buy_pressure
-        
+
+        best_bid = bids[0]["price"] if bids else None
+        best_ask = asks[0]["price"] if asks else None
+        spread = (best_ask - best_bid) if (best_bid and best_ask) else 0.0
+        buy_pressure = (bids_volume / total_vol) * 100.0
+        sell_pressure = 100.0 - buy_pressure
+        imbalance = (bids_volume - asks_volume) / total_vol  # -1.0 (100% asks) to +1.0 (100% bids)
+
         return {
             "available": True,
-            "bids_volume": bids_volume,
-            "asks_volume": asks_volume,
+            "bids": bids,
+            "asks": asks,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "bids_volume": round(bids_volume, 2),
+            "asks_volume": round(asks_volume, 2),
+            "imbalance_ratio": round(imbalance, 3),
             "buy_pressure": round(buy_pressure, 1),
-            "sell_pressure": round(sell_pressure, 1)
+            "sell_pressure": round(sell_pressure, 1),
         }
+
+    def get_market_depth(self, symbol: str) -> dict:
+        """
+        Retrieves summary Depth of Market for backward compatibility.
+        """
+        snapshot = self.get_order_book_snapshot(symbol)
+        if not snapshot.get("available"):
+            return snapshot
+        return {
+            "available": True,
+            "bids_volume": snapshot["bids_volume"],
+            "asks_volume": snapshot["asks_volume"],
+            "buy_pressure": snapshot["buy_pressure"],
+            "sell_pressure": snapshot["sell_pressure"]
+        }
+
+    def get_ticks_dataframe(self, symbol: str, count: int = 1500) -> Optional[pd.DataFrame]:
+        """
+        Retrieves recent ticks from MT5 and builds an enriched DataFrame
+        with aggressive side inference (Buy/Sell) and Delta for Order Flow analysis.
+        """
+        raw_ticks = self.connector.get_ticks(symbol, count=count)
+        if raw_ticks is None or len(raw_ticks) == 0:
+            return None
+
+        df = pd.DataFrame(raw_ticks)
+        if df.empty:
+            return None
+
+        # Convert timestamp to datetime
+        if 'time' in df.columns:
+            df['datetime'] = pd.to_datetime(df['time'], unit='s')
+            if 'time_msc' in df.columns:
+                df['datetime'] = pd.to_datetime(df['time_msc'], unit='ms')
+            df.set_index('datetime', inplace=True)
+
+        # Standardize volume
+        if 'volume_real' in df.columns and (df['volume_real'] > 0).any():
+            df['vol'] = df['volume_real']
+        elif 'volume' in df.columns:
+            df['vol'] = df['volume']
+        else:
+            df['vol'] = 1.0
+        # If volume is all 0 (common in some FX quote feeds), fallback to 1.0 unit per tick
+        df['vol'] = df['vol'].apply(lambda x: 1.0 if x <= 0 else float(x))
+
+        # Determine price (use last if > 0, else mid of bid/ask)
+        if 'last' in df.columns and (df['last'] > 0).any():
+            df['price'] = df['last'].where(df['last'] > 0, (df['bid'] + df['ask']) / 2.0)
+        else:
+            df['price'] = (df['bid'] + df['ask']) / 2.0
+
+        # Infer aggressive side (Buy vs Sell)
+        # 1. MT5 flags: TICK_FLAG_BUY = 32, TICK_FLAG_SELL = 64
+        FLAG_BUY = 32
+        FLAG_SELL = 64
+
+        sides = []
+        deltas = []
+        prev_price = None
+
+        flags_col = df['flags'] if 'flags' in df.columns else [0] * len(df)
+        prices = df['price'].values
+        volumes = df['vol'].values
+        bids = df['bid'].values if 'bid' in df.columns else prices
+        asks = df['ask'].values if 'ask' in df.columns else prices
+
+        for i in range(len(df)):
+            flg = int(flags_col.iloc[i]) if hasattr(flags_col, 'iloc') else int(flags_col[i])
+            v = volumes[i]
+            p = prices[i]
+            b = bids[i]
+            a = asks[i]
+
+            if flg & FLAG_BUY:
+                side = "BUY"
+            elif flg & FLAG_SELL:
+                side = "SELL"
+            else:
+                # Lee-Ready / Quote Rule fallback
+                if p >= a:
+                    side = "BUY"
+                elif p <= b:
+                    side = "SELL"
+                elif prev_price is not None:
+                    if p > prev_price:
+                        side = "BUY"
+                    elif p < prev_price:
+                        side = "SELL"
+                    else:
+                        side = sides[-1] if sides else "BUY"
+                else:
+                    side = "BUY"
+
+            prev_price = p
+            sides.append(side)
+            deltas.append(v if side == "BUY" else -v)
+
+        df['side'] = sides
+        df['delta'] = deltas
+        return df
 
     def analyze_amd(self, df: pd.DataFrame) -> dict:
         """

@@ -61,6 +61,10 @@ class CRTSetup:
     expiration_seconds: int = 3600       # Expiration en secondes
     is_pending: bool = False             # True si ordre limite en attente
     reason: str = ""
+    # ── Extensions Order Flow / Microstructure ──
+    order_flow_confluence: Optional[Any] = None  # Synthèse de confluence Order Flow
+    order_flow_confirmed: bool = False           # True si Order Flow valide le setup
+    order_flow_score: float = 0.0                # Score 0 - 100 de confluence Order Flow
 
 
 class CRTDetector:

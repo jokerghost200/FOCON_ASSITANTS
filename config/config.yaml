@@ -35,6 +35,14 @@ crt:
   risk_per_trade_pct: 0.25
   use_pending_orders: true
   order_mode: "both"  # Options : "both" (ordres simples au marché + pending limits), "market" (ordres simples directs uniquement), "pending" (pending limits uniquement)
+order_flow:
+  enabled: true
+  require_confirmation: false  # Si true, n'exécute le setup CRT que si l'Order Flow valide (score >= min_confluence_score)
+  min_confluence_score: 60.0   # Score composite minimum pour confirmation (0 à 100)
+  volume_profile_bins: 50      # Résolution des tranches de prix pour le Volume Profile (POC / Value Area)
+  imbalance_ratio: 3.0         # Ratio de déséquilibre Footprint diagonale (3:1 ou 300%)
+  dom_wall_multiplier: 2.0     # Multiplicateur d'écart-type pour détection des Murs de Liquidité DOM L2
+  cvd_window_ticks: 1000       # Nombre de ticks pour le calcul du Cumulative Volume Delta
 risk_management:
   default_risk_percent: 2.0
   max_daily_loss_percent: 8.0

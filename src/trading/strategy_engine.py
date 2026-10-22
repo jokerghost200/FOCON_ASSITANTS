@@ -175,7 +175,18 @@ class CRTStrategy(Strategy):
             return None
 
         # ── Cas 1 : Mode Universel Pending Limit CRT + ICT/SMC ──
+        of_conf = kwargs.get('order_flow_confluence') or getattr(crt_setup, 'order_flow_confluence', None)
+        of_confirmed = getattr(crt_setup, 'order_flow_confirmed', False)
+        of_score = getattr(crt_setup, 'order_flow_score', 0.0)
+        of_badge = ""
+        if of_conf:
+            of_confirmed = getattr(of_conf, 'is_confirmed', False)
+            of_score = getattr(of_conf, 'confluence_score', 0.0)
+            of_badge = f" [{getattr(of_conf, 'summary_badge', 'OF Confirmed')}]" if of_confirmed else ""
+
         if getattr(crt_setup, 'is_pending', False) and crt_setup.entry_price is not None:
+            base_reason = crt_setup.reason
+            full_reason = f"{base_reason}{of_badge}" if of_badge else base_reason
             return {
                 "strategy": self.name,
                 "direction": direction,
@@ -192,7 +203,9 @@ class CRTStrategy(Strategy):
                 "expiration_seconds": crt_setup.expiration_seconds,
                 "in_killzone": crt_setup.in_killzone,
                 "killzone_name": crt_setup.killzone_name,
-                "reason": crt_setup.reason
+                "reason": full_reason,
+                "order_flow_confirmed": of_confirmed,
+                "order_flow_score": of_score,
             }
 
         entry_price = price
@@ -219,6 +232,8 @@ class CRTStrategy(Strategy):
                     logger.debug(f"[CRT] Rejet: ratio vers TP1 insuffisant ({rr_tp1:.2f} < {self.min_rr_tp1})")
                     return None
 
+            base_reason = f"CRT Bullish: C2 sweep C1 Low ({crt_setup.c1_low:.5f}), close in range ({crt_setup.c2_close:.5f}), TP1 EQ ({tp1:.5f}), TP2 ({tp2:.5f})"
+            full_reason = f"{base_reason}{of_badge}" if of_badge else base_reason
             return {
                 "strategy": self.name,
                 "direction": "BUY",
@@ -230,7 +245,9 @@ class CRTStrategy(Strategy):
                 "rr_tp1": round(rr_tp1, 2),
                 "in_killzone": crt_setup.in_killzone,
                 "killzone_name": crt_setup.killzone_name,
-                "reason": f"CRT Bullish: C2 sweep C1 Low ({crt_setup.c1_low:.5f}), close in range ({crt_setup.c2_close:.5f}), TP1 EQ ({tp1:.5f}), TP2 ({tp2:.5f})"
+                "reason": full_reason,
+                "order_flow_confirmed": of_confirmed,
+                "order_flow_score": of_score,
             }
 
         elif direction == "SELL":
@@ -255,6 +272,8 @@ class CRTStrategy(Strategy):
                     logger.debug(f"[CRT] Rejet: ratio vers TP1 insuffisant ({rr_tp1:.2f} < {self.min_rr_tp1})")
                     return None
 
+            base_reason = f"CRT Bearish: C2 sweep C1 High ({crt_setup.c1_high:.5f}), close in range ({crt_setup.c2_close:.5f}), TP1 EQ ({tp1:.5f}), TP2 ({tp2:.5f})"
+            full_reason = f"{base_reason}{of_badge}" if of_badge else base_reason
             return {
                 "strategy": self.name,
                 "direction": "SELL",
@@ -266,7 +285,9 @@ class CRTStrategy(Strategy):
                 "rr_tp1": round(rr_tp1, 2),
                 "in_killzone": crt_setup.in_killzone,
                 "killzone_name": crt_setup.killzone_name,
-                "reason": f"CRT Bearish: C2 sweep C1 High ({crt_setup.c1_high:.5f}), close in range ({crt_setup.c2_close:.5f}), TP1 EQ ({tp1:.5f}), TP2 ({tp2:.5f})"
+                "reason": full_reason,
+                "order_flow_confirmed": of_confirmed,
+                "order_flow_score": of_score,
             }
 
         return None
@@ -296,6 +317,7 @@ class StrategySelector:
         min_distance: float,
         valid_obs: Optional[List[Any]] = None,
         crt_setup: Optional[Any] = None,
+        **kwargs: Any,
     ) -> list:
         active_strats = []
         
@@ -312,11 +334,11 @@ class StrategySelector:
             if strat:
                 if strat_name == "CRT":
                     proposal = strat.evaluate(
-                        tech_features, amd_context, htf_trend, price, spread, min_distance, valid_obs, crt_setup=crt_setup
+                        tech_features, amd_context, htf_trend, price, spread, min_distance, valid_obs, crt_setup=crt_setup, **kwargs
                     )
                 else:
                     proposal = strat.evaluate(
-                        tech_features, amd_context, htf_trend, price, spread, min_distance, valid_obs
+                        tech_features, amd_context, htf_trend, price, spread, min_distance, valid_obs, **kwargs
                     )
                 if proposal:
                     proposals.append(proposal)

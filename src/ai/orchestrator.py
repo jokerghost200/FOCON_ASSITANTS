@@ -8,6 +8,8 @@ from src.core.boomerang_detector import BoomerangDetector
 from src.core.order_block_detector import OrderBlockDetector
 from src.core.market_context import MarketContextEngine
 from src.core.crt_detector import CRTDetector
+from src.core.order_flow_engine import OrderFlowEngine, OrderFlowConfluence
+from src.core.order_flow_journal import OrderFlowJournal
 from src.trading.strategy_engine import StrategySelector
 from src.ai.local_quant_brain import LocalQuantBrain
 from src.ai.ai_router import AIRouter
@@ -68,6 +70,15 @@ class AIOrchestrator:
             min_range_atr_mult=0.50,
             min_rr_tp1=1.5,
         )
+        # Moteur Order Flow & Microstructure (DOM L2, Heatmap, CVD, Volume Profile, Absorption)
+        of_cfg = self.config.get('order_flow', {}) if isinstance(self.config, dict) else {}
+        self.order_flow_engine = OrderFlowEngine(
+            vp_bins=int(of_cfg.get('volume_profile_bins', 50)),
+            imbalance_ratio=float(of_cfg.get('imbalance_ratio', 3.0)),
+            dom_wall_multiplier=float(of_cfg.get('dom_wall_multiplier', 2.0)),
+            min_confluence_score=float(of_cfg.get('min_confluence_score', 60.0)),
+        )
+        self.order_flow_journal = OrderFlowJournal()
         self._symbol_cooldowns = {}
 
     def set_symbol_cooldown(self, symbol: str, duration_seconds: float = 1800.0, reason: str = "", direction: str = None):
@@ -578,13 +589,48 @@ class AIOrchestrator:
                 "events": [],
             }
                 
-        # 3. Depth of Market (Order Book)
-        dom_data = self.market_data.get_market_depth(symbol)
-        dom_context = "Depth of Market: Not available for this broker/symbol."
-        if dom_data.get("available"):
-            dom_context = f"Depth of Market:\n" \
-                          f"Bids Volume: {dom_data['bids_volume']} ({dom_data['buy_pressure']}% Buy Pressure)\n" \
-                          f"Asks Volume: {dom_data['asks_volume']} ({dom_data['sell_pressure']}% Sell Pressure)"
+        # 3. Order Flow & Microstructure (DOM L2, Heatmap Walls, CVD, Volume Profile, Absorption)
+        ticks_df = None
+        dom_snapshot = None
+        try:
+            ticks_df = self.market_data.get_ticks_dataframe(symbol, count=1000)
+            dom_snapshot = self.market_data.get_order_book_snapshot(symbol)
+        except Exception as _ofe:
+            logger.debug(f"[OF] Erreur lecture ticks/DOM pour {symbol}: {_ofe}")
+
+        of_confluence = self.order_flow_engine.evaluate_setup_confluence(
+            symbol=symbol,
+            crt_setup=crt_setup,
+            ticks_df=ticks_df,
+            dom_data=dom_snapshot,
+            candles_df=df,
+            atr=atr_p,
+        )
+        if crt_setup:
+            crt_setup.order_flow_confluence = of_confluence
+            crt_setup.order_flow_confirmed = of_confluence.is_confirmed
+            crt_setup.order_flow_score = of_confluence.confluence_score
+
+        dom_context = "Depth of Market & Order Flow: Not available for this broker/symbol."
+        if dom_snapshot and isinstance(dom_snapshot, dict) and dom_snapshot.get("available"):
+            try:
+                bids_v = float(dom_snapshot.get('bids_volume', 0.0))
+                asks_v = float(dom_snapshot.get('asks_volume', 0.0))
+                bp = float(dom_snapshot.get('buy_pressure', 50.0))
+                sp = float(dom_snapshot.get('sell_pressure', 50.0))
+                imb = float(dom_snapshot.get('imbalance_ratio', 0.0))
+                score_str = f"{float(of_confluence.confluence_score):.1f}/100" if of_confluence else "N/A"
+                badge_str = f" [{of_confluence.summary_badge}]" if of_confluence and getattr(of_confluence, 'summary_badge', '') else ""
+                dom_context = (
+                    f"Order Flow & DOM Microstructure:\n"
+                    f"  - DOM Bids: {bids_v:.1f} ({bp:.1f}% Buy Pressure)\n"
+                    f"  - DOM Asks: {asks_v:.1f} ({sp:.1f}% Sell Pressure)\n"
+                    f"  - Imbalance Ratio: {imb:+.2f}\n"
+                    f"  - Order Flow Score: {score_str}{badge_str}\n"
+                    f"  - Details: {', '.join(of_confluence.details) if of_confluence and of_confluence.details else 'Standard flow'}"
+                )
+            except Exception:
+                dom_context = "Order Flow & DOM: Available."
 
         # Determine Market Regime and query Strategy Engine (incluant CRT, Sweeps, Order Blocks)
         market_regime = MarketContextEngine.detect_market_regime(tech_features, htf_trend, amd_context)
@@ -598,6 +644,7 @@ class AIOrchestrator:
             min_distance=min_distance,
             valid_obs=valid_obs if has_active_ob else None,
             crt_setup=crt_setup,
+            order_flow_confluence=of_confluence,
         )
         
         strategy_context = "Aucune stratégie spécifique activée."
@@ -1336,6 +1383,33 @@ class AIOrchestrator:
                     logger.info(f"[CRT SCAN] {symbol}: Rejet {crt_setup.direction} — Symbole en cooldown: {cd_reason}")
                     continue
 
+                # ── Analyse Order Flow de Confluence (DOM, CVD, Volume Profile, Absorption) ──
+                ticks_df = None
+                dom_snapshot = None
+                try:
+                    ticks_df = self.market_data.get_ticks_dataframe(symbol, count=1000)
+                    dom_snapshot = self.market_data.get_order_book_snapshot(symbol)
+                except Exception as _ofe:
+                    logger.debug(f"[OF] Erreur lecture ticks/DOM pour {symbol}: {_ofe}")
+
+                of_confluence = self.order_flow_engine.evaluate_setup_confluence(
+                    symbol=symbol,
+                    crt_setup=crt_setup,
+                    ticks_df=ticks_df,
+                    dom_data=dom_snapshot,
+                    candles_df=df_ltf,
+                    atr=atr_ltf,
+                )
+                crt_setup.order_flow_confluence = of_confluence
+                crt_setup.order_flow_confirmed = of_confluence.is_confirmed
+                crt_setup.order_flow_score = of_confluence.confluence_score
+
+                # Filtre strict optionnel si exigé par la configuration
+                of_cfg = raw_cfg.get('order_flow', {}) if isinstance(raw_cfg, dict) else {}
+                if of_cfg.get('require_confirmation', False) and not of_confluence.is_confirmed:
+                    logger.info(f"[CRT SCAN] {symbol}: Rejet {crt_setup.direction} — Confirmation Order Flow requise mais score insuffisant ({of_confluence.confluence_score:.1f}/100)")
+                    continue
+
                 is_p = getattr(crt_setup, 'is_pending', False)
                 if is_p:
                     entry_p = crt_setup.entry_price
@@ -1350,15 +1424,26 @@ class AIOrchestrator:
                     o_type = "MARKET"
                     status_tag = "MARKET_CRT"
 
-                reason_text = (
+                base_reason = (
                     crt_setup.reason
                     if hasattr(crt_setup, 'reason') and crt_setup.reason
                     else f"CRT {crt_setup.direction} direct market ({o_type}) sur {htf}"
                 )
+                of_badge = f" [{of_confluence.summary_badge}]" if of_confluence.is_confirmed else ""
+                reason_text = f"{base_reason}{of_badge}"
+
+                # Calcul de la confiance avec bonus / malus Order Flow
+                base_conf = 85 if crt_setup.in_killzone else 80
+                if of_confluence.is_confirmed:
+                    conf = min(95, base_conf + 10)
+                elif of_confluence.confluence_score < 40:
+                    conf = max(65, base_conf - 10)
+                else:
+                    conf = base_conf
 
                 decision = {
                     "action": crt_setup.direction,
-                    "confidence": 85 if crt_setup.in_killzone else 80,
+                    "confidence": conf,
                     "entry": entry_p,
                     "sl": sl_p,
                     "tp": tp_p,
@@ -1372,6 +1457,9 @@ class AIOrchestrator:
                     "in_killzone": crt_setup.in_killzone,
                     "killzone_name": crt_setup.killzone_name,
                     "reason": reason_text,
+                    "order_flow_confirmed": of_confluence.is_confirmed,
+                    "order_flow_score": of_confluence.confluence_score,
+                    "order_flow_details": of_confluence.details,
                 }
 
                 account_info = self.mt5.get_account_info()
@@ -1383,16 +1471,28 @@ class AIOrchestrator:
                     logger.info(f"[CRT SCAN] {symbol}: Validation de risque échouée — {validation['reason']}")
                     continue
 
+                # Enregistrement dans le Journal Order Flow pour traçabilité et métriques
+                self.order_flow_journal.log_signal(
+                    symbol=symbol,
+                    direction=crt_setup.direction,
+                    entry_price=entry_p,
+                    strategy_name="CRT_ORDER_FLOW",
+                    of_confluence=of_confluence,
+                    status=status_tag,
+                    notes=reason_text,
+                )
+
                 results.append({
                     "status": status_tag,
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "decision": validation['proposal'],
                     "crt_data": crt_setup,
+                    "order_flow": of_confluence,
                     "htf": htf,
                     "reason": reason_text,
                 })
-                logger.info(f"✅ [{status_tag}] {symbol}: Ordre {o_type} validé @ {entry_p}")
+                logger.info(f"✅ [{status_tag}] {symbol}: Ordre {o_type} validé @ {entry_p} (OF Score: {of_confluence.confluence_score:.1f}/100)")
 
             except Exception as _e:
                 logger.warning(f"[CRT SCAN] {symbol}: erreur — {_e}")
