@@ -37,6 +37,7 @@ class OrderFlowJournal:
         of_confluence: Any,
         status: str = "PROPOSAL",
         notes: str = "",
+        ticket: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Enregistre un événement de signal avec son empreinte microstructurale Order Flow.
@@ -45,15 +46,24 @@ class OrderFlowJournal:
         
         record = {
             "timestamp": now_utc,
+            "ticket": ticket,
             "symbol": str(symbol).upper(),
             "direction": str(direction).upper(),
             "entry_price": float(entry_price),
             "strategy": str(strategy_name),
             "status": str(status),
             "notes": str(notes),
+            "pnl_usd": None,
+            "outcome": "OPEN",
+            "exit_reason": "",
             "order_flow": {
                 "confirmed": bool(getattr(of_confluence, 'is_confirmed', False)),
                 "score": float(getattr(of_confluence, 'confluence_score', 0.0)),
+                "data_quality": getattr(of_confluence, 'data_quality', 'ESTIMATED_QUOTE_RULE'),
+                "is_dom_available": bool(getattr(of_confluence, 'is_dom_available', False)),
+                "is_real_volume": bool(getattr(of_confluence, 'is_real_volume', False)),
+                "is_synthetic": bool(getattr(of_confluence, 'is_synthetic', False)),
+                "damping_applied": float(getattr(of_confluence, 'damping_applied', 1.0)),
                 "cvd_confirmed": bool(getattr(of_confluence, 'cvd_confirmed', False)),
                 "absorption_confirmed": bool(getattr(of_confluence, 'absorption_confirmed', False)),
                 "dom_confirmed": bool(getattr(of_confluence, 'dom_confirmed', False)),
@@ -76,6 +86,122 @@ class OrderFlowJournal:
             logger.debug(f"[OF Journal] Échec écriture fichier journal: {e}")
 
         return record
+
+    def log_trade_outcome(
+        self,
+        ticket: int,
+        pnl_usd: float,
+        exit_reason: str = "TP",
+        rr_achieved: float = 0.0,
+    ) -> bool:
+        """
+        Enregistre le dénouement réel d'un trade (PnL, R:R et cause de fermeture).
+        Permet l'évaluation empirique A/B de l'Order Flow sur les performances réelles.
+        """
+        outcome_str = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "BREAK_EVEN"
+        updated = False
+
+        for r in reversed(self._in_memory_records):
+            if r.get("ticket") == ticket:
+                r["pnl_usd"] = round(float(pnl_usd), 2)
+                r["outcome"] = outcome_str
+                r["exit_reason"] = str(exit_reason)
+                r["rr_achieved"] = round(float(rr_achieved), 2)
+                updated = True
+                break
+
+        return updated
+
+    def compare_ab_performance(self) -> Dict[str, Any]:
+        """
+        Compare objectivement la performance A/B :
+          - Groupe A : Setups CRT Pure (sans confirmation Order Flow, score < seuil)
+          - Groupe B : Setups CRT + Order Flow (avec confirmation Order Flow, score >= seuil)
+        Mesure le taux de réussite, le profit factor, l'espérance mathématique et le drawdown.
+        """
+        completed = [r for r in self._in_memory_records if r.get("outcome") in ("WIN", "LOSS", "BREAK_EVEN")]
+
+        def _calc_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+            if not records:
+                return {
+                    "count": 0, "wins": 0, "losses": 0,
+                    "win_rate": 0.0, "total_pnl": 0.0,
+                    "profit_factor": 0.0, "expectancy": 0.0,
+                    "max_drawdown": 0.0,
+                }
+
+            pnls = [float(r.get("pnl_usd", 0.0) or 0.0) for r in records]
+            wins = sum(1 for p in pnls if p > 0)
+            losses = sum(1 for p in pnls if p < 0)
+            gross_win = sum(p for p in pnls if p > 0)
+            gross_loss = abs(sum(p for p in pnls if p < 0))
+
+            pf = (gross_win / gross_loss) if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
+            win_rate = (wins / len(pnls)) * 100.0 if pnls else 0.0
+            tot_pnl = sum(pnls)
+            expectancy = tot_pnl / len(pnls) if pnls else 0.0
+
+            # Calcul du Max Drawdown
+            equity = np.cumsum(pnls)
+            peak = np.maximum.accumulate(equity)
+            dd = peak - equity
+            max_dd = float(np.max(dd)) if len(dd) > 0 else 0.0
+
+            return {
+                "count": len(records),
+                "trades": len(records),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(win_rate, 1),
+                "win_rate_pct": round(win_rate, 1),
+                "total_pnl": round(tot_pnl, 2),
+                "total_pnl_usd": round(tot_pnl, 2),
+                "profit_factor": round(float(pf), 2),
+                "expectancy": round(float(expectancy), 2),
+                "max_drawdown": round(max_dd, 2),
+            }
+
+        group_a = [r for r in completed if not r.get("order_flow", {}).get("confirmed")]
+        group_b = [r for r in completed if r.get("order_flow", {}).get("confirmed")]
+
+        metrics_a = _calc_metrics(group_a)
+        metrics_b = _calc_metrics(group_b)
+
+        wr_delta = round(metrics_b["win_rate"] - metrics_a["win_rate"], 1)
+        pf_delta = round(metrics_b["profit_factor"] - metrics_a["profit_factor"], 2)
+        pnl_delta = round(metrics_b["total_pnl"] - metrics_a["total_pnl"], 2)
+
+        md_report = (
+            f"=== 📊 A/B Testing Quantitatif : CRT Pur vs CRT + Order Flow ===\n"
+            f"• Trades Totaux Évalués : {len(completed)}\n\n"
+            f"| Métrique             | Groupe A (CRT Pur) | Groupe B (CRT + Order Flow) | Écart / Delta |\n"
+            f"|----------------------|--------------------|-----------------------------|---------------|\n"
+            f"| Trades Réalisés      | {metrics_a['trades']:<18} | {metrics_b['trades']:<27} |               |\n"
+            f"| Taux de Victoire (%) | {metrics_a['win_rate']:<17.1f}% | {metrics_b['win_rate']:<26.1f}% | {wr_delta:+5.1f}%       |\n"
+            f"| Profit Factor        | {metrics_a['profit_factor']:<18.2f} | {metrics_b['profit_factor']:<27.2f} | {pf_delta:+5.2f}        |\n"
+            f"| PnL Total ($)        | ${metrics_a['total_pnl']:<17.2f} | ${metrics_b['total_pnl']:<26.2f} | ${pnl_delta:+6.2f}       |\n"
+            f"| Espérance / Trade    | ${metrics_a['expectancy']:<17.2f} | ${metrics_b['expectancy']:<26.2f} |               |\n"
+            f"| Max Drawdown ($)     | ${metrics_a['max_drawdown']:<17.2f} | ${metrics_b['max_drawdown']:<26.2f} |               |\n\n"
+            f"Conclusion : {'✅ Le filtre Order Flow améliore la performance globale.' if wr_delta > 0 and pf_delta >= 0 else '⚠️ Données en cours de convergence ou pas de surperformance nette.'}"
+        )
+
+        delta_dict = {
+            "win_rate_diff_pct": wr_delta,
+            "profit_factor_diff": pf_delta,
+            "pnl_diff_usd": pnl_delta,
+            "pnl_difference_usd": pnl_delta,
+            "order_flow_improves_performance": bool(wr_delta > 0 and pf_delta >= 0),
+        }
+
+        return {
+            "status": "SUCCESS",
+            "total_evaluated_trades": len(completed),
+            "group_a_crt_pure": metrics_a,
+            "group_b_crt_order_flow": metrics_b,
+            "delta": delta_dict,
+            "delta_outperformance": delta_dict,
+            "markdown_report": md_report,
+        }
 
     def get_summary(self) -> Dict[str, Any]:
         """
@@ -110,8 +236,9 @@ class OrderFlowJournal:
     ) -> pd.DataFrame:
         """
         Générateur de ticks synthétiques à microstructure réaliste à partir de bougies OHLCV.
-        Permet le backtest précis du moteur Order Flow (CVD, Absorption, Footprint, Volume Profile)
-        même en l'absence de flux de ticks réels archivés.
+        Permet le test algorithmique du moteur Order Flow (CVD, Absorption, Footprint, Volume Profile).
+        ATTENTION : Les ticks synthétiques ne constituent pas un flux réel et ne doivent pas
+        servir seuls de preuve de rentabilité en trading réel.
         """
         if candles_df is None or candles_df.empty:
             return pd.DataFrame()
@@ -140,7 +267,6 @@ class OrderFlowJournal:
 
             prev_p = o
             for p in sub_prices:
-                # Bruit réaliste
                 p_noisy = float(p + np.random.normal(0, max(1e-5, (h - l) * 0.03)))
                 bid = p_noisy - (spread / 2.0)
                 ask = p_noisy + (spread / 2.0)
@@ -157,4 +283,9 @@ class OrderFlowJournal:
                 })
                 prev_p = p_noisy
 
-        return pd.DataFrame(rows)
+        res_df = pd.DataFrame(rows)
+        # Marquage explicite pour éviter toute confusion avec des ticks réels
+        res_df.attrs["is_synthetic"] = True
+        res_df.attrs["data_quality"] = "SYNTHETIC_SIMULATION"
+        res_df.attrs["has_real_volume"] = False
+        return res_df

@@ -1432,10 +1432,19 @@ class AIOrchestrator:
                 of_badge = f" [{of_confluence.summary_badge}]" if of_confluence.is_confirmed else ""
                 reason_text = f"{base_reason}{of_badge}"
 
-                # Calcul de la confiance avec bonus / malus Order Flow
+                # Calcul de la confiance avec bonus / malus Order Flow calibré selon la qualité de la donnée
                 base_conf = 85 if crt_setup.in_killzone else 80
+                dq = getattr(of_confluence, 'data_quality', 'ESTIMATED_QUOTE_RULE')
                 if of_confluence.is_confirmed:
-                    conf = min(95, base_conf + 10)
+                    if dq == 'REAL_OBSERVED':
+                        bonus = 10
+                    elif dq == 'ESTIMATED_QUOTE_RULE':
+                        bonus = 5
+                    else:  # DEGRADED_STALE ou UNAVAILABLE
+                        bonus = 0
+                    conf = min(95, base_conf + bonus)
+                elif dq == 'DEGRADED_STALE':
+                    conf = max(65, base_conf - 5)
                 elif of_confluence.confluence_score < 40:
                     conf = max(65, base_conf - 10)
                 else:
@@ -1460,6 +1469,7 @@ class AIOrchestrator:
                     "order_flow_confirmed": of_confluence.is_confirmed,
                     "order_flow_score": of_confluence.confluence_score,
                     "order_flow_details": of_confluence.details,
+                    "order_flow_data_quality": dq,
                 }
 
                 account_info = self.mt5.get_account_info()

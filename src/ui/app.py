@@ -436,6 +436,47 @@ class ConfigDialog(QDialog):
         crt_of_layout.addRow("🛡️ Confirmation Stricte :", self.of_require_conf_cb)
         crt_of_layout.addRow("📊 Score Confluence Min :", self.of_min_score_spin)
         crt_of_layout.addRow("⚡ Ratio Déséquilibre Footprint :", self.of_imbalance_spin)
+        # Outils de diagnostic MT5 et A/B
+        tools_box = QHBoxLayout()
+        diag_btn = QPushButton("🩺 Tester la Qualité des Flux MT5 Réels")
+        diag_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 4px; border-radius: 4px;")
+        def _run_diag():
+            p = self.parent()
+            if not p or not hasattr(p, 'market_data'):
+                QMessageBox.warning(self, "Diagnostic", "Module MarketData non disponible.")
+                return
+            sym = "EURUSD"
+            if hasattr(p, 'active_symbol') and p.active_symbol:
+                sym = p.active_symbol
+            elif hasattr(p, 'symbol_combo') and p.symbol_combo.currentText():
+                sym = p.symbol_combo.currentText()
+            diag = p.market_data.diagnose_market_data(sym)
+            msg = (
+                f"Diagnostic MT5 pour {sym} :\n\n"
+                f"• Niveau Courtier : {diag['tier']}\n"
+                f"• Qualité Flux : {diag['data_quality']}\n"
+                f"• Carnet DOM L2 : {'Disponible (' + str(diag['dom_levels']) + ' niveaux)' if diag['dom_available'] else 'Non supporté par le broker'}\n"
+                f"• Fraîcheur Ticks : {'Récent (' + str(round(diag['ticks_stale_seconds'], 1)) + 's)' if diag['ticks_fresh'] else 'Périmé (' + str(round(diag['ticks_stale_seconds'], 1)) + 's)'}\n"
+                f"• Ticks Réels Observés : {round(diag['real_flags_ratio']*100, 1)}%\n\n"
+                f"Recommandation :\n{diag['recommendation']}"
+            )
+            QMessageBox.information(self, f"Audit Flux MT5 - {sym}", msg)
+        diag_btn.clicked.connect(_run_diag)
+        tools_box.addWidget(diag_btn)
+
+        ab_btn = QPushButton("📊 Rapport Comparatif A/B")
+        ab_btn.setStyleSheet("background-color: #9C27B0; color: white; padding: 4px; border-radius: 4px;")
+        def _show_ab():
+            p = self.parent()
+            if not p or not hasattr(p, 'order_flow_journal'):
+                QMessageBox.warning(self, "Rapport A/B", "Journal Order Flow non disponible.")
+                return
+            res = p.order_flow_journal.compare_ab_performance()
+            QMessageBox.information(self, "Comparaison A/B : CRT vs CRT+OF", res.get('markdown_report', 'Données insuffisantes.'))
+        ab_btn.clicked.connect(_show_ab)
+        tools_box.addWidget(ab_btn)
+
+        crt_of_layout.addRow("🧪 Outils de Validation :", tools_box)
 
         tabs.addTab(crt_of_tab, "🎯 CRT & Order Flow")
         
@@ -2056,8 +2097,18 @@ class MainWindow(QMainWindow):
                 elif status in ("PENDING_CRT", "MARKET_CRT"):
                     score += 95.0   # Setup CRT institutionnel
                     of_data = r.get("order_flow")
-                    if of_data and (getattr(of_data, 'is_confirmed', False) or (isinstance(of_data, dict) and of_data.get('is_confirmed'))):
-                        score += 20.0  # Confluence Order Flow confirmée (DOM/CVD/Volume Profile/Absorption)
+                    if of_data:
+                        is_conf = getattr(of_data, 'is_confirmed', False) or (isinstance(of_data, dict) and of_data.get('is_confirmed'))
+                        dq = getattr(of_data, 'data_quality', None) or (of_data.get('data_quality') if isinstance(of_data, dict) else 'ESTIMATED_QUOTE_RULE')
+                        if is_conf:
+                            if dq == 'REAL_OBSERVED':
+                                score += 20.0  # Confluence réelle vérifiée avec flux d'ordres institutionnels
+                            elif dq == 'ESTIMATED_QUOTE_RULE':
+                                score += 10.0  # Estimation Quote-Rule Forex
+                            else:
+                                score += 0.0
+                        elif dq == 'DEGRADED_STALE':
+                            score -= 10.0  # Pénalité stricte de données périmées
                 elif status == "PENDING_OB":
                     score += 85.0
                 elif status == "SIGNAL":
@@ -2458,8 +2509,21 @@ class MainWindow(QMainWindow):
         
         of_line = ""
         if of_score is not None:
+            of_obj = result.get('order_flow')
+            dq = getattr(of_obj, 'data_quality', None) if of_obj else None
+            if not dq and isinstance(decision, dict):
+                dq = decision.get('order_flow_data_quality')
+
+            dq_label = ""
+            if dq == 'REAL_OBSERVED':
+                dq_label = " [Flux Réel ECN]"
+            elif dq == 'ESTIMATED_QUOTE_RULE':
+                dq_label = " [Quote-Rule]"
+            elif dq == 'DEGRADED_STALE':
+                dq_label = " [⚠️ Ticks Périmés]"
+
             badge_of = "🌊 ORDER FLOW : CONFIRMÉ" if of_confirmed else "📊 ORDER FLOW : ANALYSÉ"
-            of_line = f"\n{badge_of} (Score: {float(of_score):.1f}/100)"
+            of_line = f"\n{badge_of}{dq_label} (Score: {float(of_score):.1f}/100)"
             
         exp_line = ""
         if is_pending:
@@ -2926,6 +2990,44 @@ class MainWindow(QMainWindow):
             
         self.chat_input.clear()
         self.chat_display.append(f"<b>Toi :</b> {message}")
+
+        # Commandes directes de diagnostic MT5 et rapport A/B
+        msg_cmd = message.strip().lower()
+        if msg_cmd.startswith(("/diag", "/checkmt5", "/marketdata", "audit mt5", "diagnostic mt5")):
+            parts = message.split()
+            sym = parts[1].upper() if len(parts) > 1 else (getattr(self, 'active_symbol', None) or "EURUSD")
+            try:
+                diag = self.market_data.diagnose_market_data(sym)
+                tier_badge = {
+                    "TIER_A_INSTITUTIONAL": "🏆 TIER A (Institutionnel / Futures)",
+                    "TIER_B_FOREX_ECN": "⚖️ TIER B (Forex ECN / Quote-Rule)",
+                    "TIER_C_LIMITED": "⚠️ TIER C (Limité / Fallback)",
+                }.get(diag['tier'], diag['tier'])
+
+                diag_html = (
+                    f"<b>🩺 Diagnostic MT5 des Données Marché : {sym}</b><br>"
+                    f"• <b>Niveau de Qualité :</b> {tier_badge}<br>"
+                    f"• <b>Qualité Détectée :</b> {diag['data_quality']}<br>"
+                    f"• <b>Carnet d'Ordres (DOM L2) :</b> {'✅ Disponible (' + str(diag['dom_levels']) + ' niveaux)' if diag['dom_available'] else '❌ Non fourni par le courtier'}<br>"
+                    f"• <b>Fraîcheur des Ticks :</b> {'✅ Ticks récents (' + str(round(diag['ticks_stale_seconds'], 1)) + 's)' if diag['ticks_fresh'] else '⚠️ Périmé / Pas de ticks récents (' + str(round(diag['ticks_stale_seconds'], 1)) + 's)'}<br>"
+                    f"• <b>Drapeaux Volume Réel :</b> {round(diag['real_flags_ratio'] * 100, 1)}% ({'✅ Vrai flux transactionnel' if diag['has_real_volume'] else 'ℹ️ Estimation Quote-Rule active'})<br>"
+                    f"• <b>Recommandation Sécurité :</b> {diag['recommendation']}"
+                )
+                self.append_to_chat(diag_html, sender="IA")
+                return
+            except Exception as _de:
+                self.append_to_chat(f"❌ Erreur lors du diagnostic de {sym} : {_de}", sender="IA")
+                return
+
+        if msg_cmd.startswith(("/ab", "/ab_test", "comparaison crt", "stats ab")):
+            try:
+                ab_report = self.order_flow_journal.compare_ab_performance()
+                report_md = ab_report.get('markdown_report', 'Rapport A/B indisponible.')
+                self.append_to_chat(f"<pre style='font-family: monospace;'>{report_md}</pre>", sender="IA")
+                return
+            except Exception as _ae:
+                self.append_to_chat(f"❌ Erreur rapport A/B : {_ae}", sender="IA")
+                return
 
         # 1. Dispatching de commande vocale directe (Autopilot, Profils, Modes, Fermeture, Solde, etc.)
         try:

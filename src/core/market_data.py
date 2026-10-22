@@ -211,7 +211,115 @@ class MarketDataEngine:
 
         df['side'] = sides
         df['delta'] = deltas
+
+        # ── Inspection de la Qualité et de la Fraîcheur des Données ──
+        has_real_volume = 'volume_real' in df.columns and (df['volume_real'] > 0).any()
+        flags_count = sum(1 for f in flags_col if (int(f) & (FLAG_BUY | FLAG_SELL)) != 0)
+        real_flags_ratio = flags_count / len(df) if len(df) > 0 else 0.0
+
+        stale_seconds = 0.0
+        if 'time' in df.columns and len(df) > 0:
+            import datetime
+            now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+            last_ts = float(df['time'].iloc[-1])
+            stale_seconds = max(0.0, now_ts - last_ts)
+
+        if stale_seconds > 300:  # plus de 5 minutes sans nouveau tick
+            data_quality = "DEGRADED_STALE"
+        elif real_flags_ratio > 0.5:
+            data_quality = "REAL_OBSERVED"
+        else:
+            data_quality = "ESTIMATED_QUOTE_RULE"
+
+        df.attrs['data_quality'] = data_quality
+        df.attrs['has_real_volume'] = has_real_volume
+        df.attrs['real_flags_ratio'] = round(real_flags_ratio, 3)
+        df.attrs['stale_seconds'] = round(stale_seconds, 1)
+        df.attrs['is_synthetic'] = False
+
         return df
+
+    def diagnose_market_data(self, symbol: str) -> dict:
+        """
+        Diagnostique la qualité et la disponibilité réelle des flux Order Flow (Ticks et DOM L2)
+        pour un symbole donné sur le broker connecté.
+        Permet de vérifier avant trading réel si le symbole supporte le carnet L2
+        et si les volumes sont réels ou estimés.
+        """
+        import datetime
+        report = {
+            "symbol": str(symbol).upper(),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "market_open": False,
+            "dom_available": False,
+            "dom_levels_count": 0,
+            "ticks_available": False,
+            "ticks_count": 0,
+            "has_real_volume": False,
+            "real_flags_ratio": 0.0,
+            "stale_seconds": 0.0,
+            "order_flow_tier": "TIER_C",
+            "recommendation": "",
+            "details": [],
+        }
+
+        # 1. État du marché
+        is_open = self.connector.is_market_open(symbol) if hasattr(self.connector, 'is_market_open') else True
+        report["market_open"] = bool(is_open)
+        if not is_open:
+            report["details"].append("Marché actuellement fermé pour ce symbole.")
+
+        # 2. Test du Carnet d'Ordres (DOM L2)
+        dom = self.get_order_book_snapshot(symbol)
+        if dom.get("available"):
+            bids_n = len(dom.get("bids", []))
+            asks_n = len(dom.get("asks", []))
+            report["dom_available"] = True
+            report["dom_levels_count"] = bids_n + asks_n
+            report["details"].append(f"DOM L2 supporté : {bids_n} bids / {asks_n} asks disponibles.")
+        else:
+            report["dom_available"] = False
+            report["details"].append("DOM L2 indisponible ou non fourni par le courtier pour ce symbole.")
+
+        # 3. Test du Flux de Ticks
+        ticks_df = self.get_ticks_dataframe(symbol, count=100)
+        if ticks_df is not None and not ticks_df.empty:
+            report["ticks_available"] = True
+            report["ticks_count"] = len(ticks_df)
+            report["has_real_volume"] = bool(ticks_df.attrs.get("has_real_volume", False))
+            report["real_flags_ratio"] = float(ticks_df.attrs.get("real_flags_ratio", 0.0))
+            report["stale_seconds"] = float(ticks_df.attrs.get("stale_seconds", 0.0))
+
+            if report["stale_seconds"] > 180:
+                report["details"].append(f"Flux de ticks périmé ({report['stale_seconds']:.0f}s depuis le dernier tick).")
+            elif report["has_real_volume"] and report["real_flags_ratio"] > 0.5:
+                report["details"].append(f"Ticks réels avec flags d'agressivité ({report['real_flags_ratio']*100:.0f}% de flags réels).")
+            else:
+                report["details"].append("Ticks FX sans volume réel : côté inféré via Quote Rule / Lee-Ready.")
+        else:
+            report["ticks_available"] = False
+            report["details"].append("Aucun tick retourné par MT5.")
+
+        # 4. Classification du Palier Order Flow
+        if report["dom_available"] and report["has_real_volume"] and report["real_flags_ratio"] > 0.5:
+            report["order_flow_tier"] = "TIER_A_INSTITUTIONAL"
+            report["recommendation"] = "Idéal pour Order Flow complet (DOM Murs, CVD réel, Footprint institutionnel)."
+        elif report["ticks_available"] and report["stale_seconds"] <= 180:
+            report["order_flow_tier"] = "TIER_B_FOREX_ECN"
+            report["recommendation"] = "Order Flow estimé (Volume Profile structurel et CVD modéré à 65% sans DOM L2)."
+        else:
+            report["order_flow_tier"] = "TIER_C_LIMITED"
+            report["recommendation"] = "Flux insuffisant : privilégier la stratégie CRT pure sans filtrage Order Flow."
+
+        report["tier"] = report["order_flow_tier"]
+        report["dom_levels"] = report["dom_levels_count"]
+        report["ticks_fresh"] = bool(report["ticks_available"] and report["stale_seconds"] <= 180)
+        report["data_quality"] = (
+            "REAL_OBSERVED" if report["order_flow_tier"] == "TIER_A_INSTITUTIONAL"
+            else ("ESTIMATED_QUOTE_RULE" if report["order_flow_tier"] == "TIER_B_FOREX_ECN" else "DEGRADED_STALE")
+        )
+
+        return report
 
     def analyze_amd(self, df: pd.DataFrame) -> dict:
         """

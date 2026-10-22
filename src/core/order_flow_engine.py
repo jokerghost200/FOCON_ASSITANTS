@@ -92,6 +92,14 @@ class OrderFlowConfluence:
     val: Optional[float] = None
     details: List[str] = field(default_factory=list)
     summary_badge: str = ""
+    # ── Métadonnées de Qualité & Fiabilité des Données ──
+    data_quality: str = "ESTIMATED_QUOTE_RULE"   # "REAL_OBSERVED", "ESTIMATED_QUOTE_RULE", "DEGRADED_STALE", "UNAVAILABLE"
+    is_dom_available: bool = False               # True si carnet L2 fourni par le courtier
+    is_real_volume: bool = False                 # True si volume réel en contrats (pas seulement tick count)
+    is_synthetic: bool = False                   # True si ticks synthétisés à partir de bougies
+    damping_applied: float = 1.0                 # Coefficient réducteur anti-surapprentissage
+    dimensions_breakdown: Dict[str, float] = field(default_factory=dict) # Détail par dimension
+
 
 
 class OrderFlowEngine:
@@ -552,17 +560,28 @@ class OrderFlowEngine:
     ) -> OrderFlowConfluence:
         """
         Synthèse multidimensionnelle Order Flow pour le setup CRT.
-        Évalue le CVD, le DOM, le Volume Profile et l'Absorption.
-        Retourne un score de 0 à 100 et un indicateur de confirmation.
+        Mesure 4 dimensions orthogonales (non redondantes) :
+          1. Flux & Absorption (CVD + Absorption au sweep dé-collinéarisées)
+          2. Liquidité Passive (Carnet DOM L2 & Murs d'ordres)
+          3. Zone de Valeur (Volume Profile POC / VAH / VAL)
+          4. Micro-Enchères (Footprint stacked imbalances)
+
+        Intègre la détection de qualité des données (Observed vs Estimated vs Stale)
+        et applique un coefficient réducteur (damping) si les données sont estimées.
         """
         if crt_setup is None:
-            return OrderFlowConfluence(symbol=symbol, is_confirmed=False, confluence_score=0.0)
+            return OrderFlowConfluence(
+                symbol=symbol,
+                is_confirmed=False,
+                confluence_score=0.0,
+                data_quality="UNAVAILABLE",
+                summary_badge="OF 0/100 [NON DISPO]",
+            )
 
         direction = getattr(crt_setup, 'direction', 'BUY')
         sweep_price = getattr(crt_setup, 'sweep_price', None)
         entry_price = getattr(crt_setup, 'entry_price', None) or getattr(crt_setup, 'c2_close', 0.0)
 
-        score = 50.0  # Base neutre
         details = []
         cvd_confirmed = False
         absorption_confirmed = False
@@ -570,65 +589,139 @@ class OrderFlowEngine:
         vp_confirmed = False
         fp_confirmed = False
 
-        # ── 1. Analyse CVD ──
-        cvd_res = self.calculate_cvd(ticks_df) if ticks_df is not None else None
+        # ── A. Inspection de la Qualité et de la Fraîcheur des Données ──
+        data_quality = "UNAVAILABLE"
+        has_real_vol = False
+        is_synthetic = False
+        stale_sec = 0.0
+
+        if ticks_df is not None and not ticks_df.empty:
+            data_quality = ticks_df.attrs.get("data_quality", "ESTIMATED_QUOTE_RULE")
+            has_real_vol = bool(ticks_df.attrs.get("has_real_volume", False))
+            is_synthetic = bool(ticks_df.attrs.get("is_synthetic", False))
+            stale_sec = float(ticks_df.attrs.get("stale_seconds", 0.0))
+
+            # Auto-détection de secours si attrs absents
+            if "data_quality" not in ticks_df.attrs:
+                has_real_vol = 'vol' in ticks_df.columns and (ticks_df['vol'] > 1.0).any()
+                if 'time' in ticks_df.columns:
+                    import datetime
+                    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+                    stale_sec = max(0.0, now_ts - float(ticks_df['time'].iloc[-1]))
+                    if stale_sec > 180:
+                        data_quality = "DEGRADED_STALE"
+                    elif has_real_vol:
+                        data_quality = "REAL_OBSERVED"
+                    else:
+                        data_quality = "ESTIMATED_QUOTE_RULE"
+                elif has_real_vol:
+                    data_quality = "REAL_OBSERVED"
+                else:
+                    data_quality = "ESTIMATED_QUOTE_RULE"
+
+        # Damping : modère l'impact des indicateurs de ticks si le flux est estimé (Quote-Rule Forex)
+        damping = 1.0
+        if data_quality == "DEGRADED_STALE":
+            damping = 0.0
+            details.append(f"⚠️ Données ticks périmées ({stale_sec:.0f}s sans tick) : confirmation verrouillée")
+        elif data_quality == "ESTIMATED_QUOTE_RULE":
+            damping = 0.65  # Damping 35% sur ticks estimés pour éviter le sur-ajustement
+            details.append("ℹ️ Ticks estimés (Quote Rule / sans volume réel) : pondération modérée 65%")
+        elif data_quality == "REAL_OBSERVED":
+            damping = 1.0
+            details.append("✅ Flux de transactions observé (volumes réels et flags d'agressivité)")
+
+        if is_synthetic:
+            details.append("⚠️ Ticks synthétiques de test : simulation sans garantie de rentabilité réelle")
+
+        # ── DIMENSION 1 : Flux & Absorption (CVD + Absorption au Sweep dé-collinéarisés) ──
+        # Dé-collinéarisation : une divergence CVD et une absorption au sweep mesurent le même
+        # phénomène sous-jacent. On évite le cumul redondant (+25 + +20 = +45) en plafonnant à +30 avec synergie.
+        flow_dim = 0.0
+        has_cvd_divergence = False
+        has_sweep_absorption = False
+
+        cvd_res = self.calculate_cvd(ticks_df) if ticks_df is not None and not ticks_df.empty else None
         if cvd_res:
             if direction == "BUY":
                 if cvd_res.divergence == "BULLISH_DIVERGENCE":
-                    score += 25.0
+                    has_cvd_divergence = True
                     cvd_confirmed = True
-                    details.append("CVD: Divergence haussière (absorption des vendeurs)")
+                    details.append("CVD: Divergence haussière (absorption vendeuse)")
                 elif cvd_res.cvd_trend == "BULLISH":
-                    score += 15.0
+                    flow_dim += 12.0
                     cvd_confirmed = True
-                    details.append(f"CVD: Flux haussier aligné (Delta ratio: {cvd_res.delta_ratio:+.2f})")
+                    details.append(f"CVD: Flux haussier aligné (Delta: {cvd_res.delta_ratio:+.2f})")
                 elif cvd_res.divergence == "BEARISH_DIVERGENCE":
-                    score -= 20.0
+                    flow_dim -= 20.0
                     details.append("CVD Alerte: Divergence baissière adverse")
             elif direction == "SELL":
                 if cvd_res.divergence == "BEARISH_DIVERGENCE":
-                    score += 25.0
+                    has_cvd_divergence = True
                     cvd_confirmed = True
-                    details.append("CVD: Divergence baissière (absorption des acheteurs)")
+                    details.append("CVD: Divergence baissière (absorption acheteuse)")
                 elif cvd_res.cvd_trend == "BEARISH":
-                    score += 15.0
+                    flow_dim += 12.0
                     cvd_confirmed = True
-                    details.append(f"CVD: Flux vendeur aligné (Delta ratio: {cvd_res.delta_ratio:+.2f})")
+                    details.append(f"CVD: Flux vendeur aligné (Delta: {cvd_res.delta_ratio:+.2f})")
                 elif cvd_res.divergence == "BULLISH_DIVERGENCE":
-                    score -= 20.0
+                    flow_dim -= 20.0
                     details.append("CVD Alerte: Divergence haussière adverse")
 
-        # ── 2. Détection d'Absorption au Sweep CRT ──
-        if ticks_df is not None and sweep_price is not None:
+        if ticks_df is not None and not ticks_df.empty and sweep_price is not None:
             abs_res = self.detect_absorption(ticks_df, sweep_price, direction, tolerance=atr * 0.25)
             if abs_res.is_absorbed:
-                score += 20.0
+                has_sweep_absorption = True
                 absorption_confirmed = True
                 details.append(f"Absorption confirmée au sweep ({abs_res.absorption_type})")
 
-        # ── 3. Analyse du DOM L2 (Carnet d'ordres & Murs) ──
+        # Fusion dé-collinéarisée CVD + Absorption au Sweep
+        if has_cvd_divergence and has_sweep_absorption:
+            flow_dim += 30.0  # Plafond combiné (25 de base + 5 synergie, au lieu de 45 cumulés)
+            details.append("Synergie Flow: Divergence CVD + Absorption confirmées ensemble (score combiné)")
+        elif has_cvd_divergence:
+            flow_dim += 25.0
+        elif has_sweep_absorption:
+            flow_dim += 20.0
+
+        flow_dim = float(np.clip(flow_dim, -20.0, 30.0))
+
+        # ── DIMENSION 2 : Liquidité Passive & Carnet DOM L2 ──
+        dom_dim = 0.0
         dom_res = self.analyze_dom(dom_data) if dom_data else None
-        if dom_res and dom_res.available:
+        is_dom_available = bool(dom_res and dom_res.available)
+
+        if is_dom_available:
             if direction == "BUY":
                 if dom_res.imbalance_ratio > 0.15:
-                    score += 15.0
+                    dom_dim += 12.0
                     dom_confirmed = True
-                    details.append(f"DOM: Pression acheteuse (+{dom_res.imbalance_ratio*100:.0f}% bids)")
+                    details.append(f"DOM L2: Pression acheteuse (+{dom_res.imbalance_ratio*100:.0f}% bids)")
+                elif dom_res.imbalance_ratio < -0.20:
+                    dom_dim -= 10.0
+                    details.append(f"DOM Alerte: Pression vendeuse adverse ({dom_res.imbalance_ratio*100:.0f}% asks)")
                 if dom_res.nearest_bid_wall and dom_res.nearest_bid_wall <= entry_price:
-                    score += 10.0
+                    dom_dim += 8.0
                     dom_confirmed = True
-                    details.append(f"DOM: Mur d'achat protecteur @ {dom_res.nearest_bid_wall:.5f}")
+                    details.append(f"DOM L2: Mur d'achat protecteur @ {dom_res.nearest_bid_wall:.5f}")
             elif direction == "SELL":
                 if dom_res.imbalance_ratio < -0.15:
-                    score += 15.0
+                    dom_dim += 12.0
                     dom_confirmed = True
-                    details.append(f"DOM: Pression vendeuse ({dom_res.imbalance_ratio*100:.0f}% asks)")
+                    details.append(f"DOM L2: Pression vendeuse ({dom_res.imbalance_ratio*100:.0f}% asks)")
+                elif dom_res.imbalance_ratio > 0.20:
+                    dom_dim -= 10.0
+                    details.append(f"DOM Alerte: Pression acheteuse adverse (+{dom_res.imbalance_ratio*100:.0f}% bids)")
                 if dom_res.nearest_ask_wall and dom_res.nearest_ask_wall >= entry_price:
-                    score += 10.0
+                    dom_dim += 8.0
                     dom_confirmed = True
-                    details.append(f"DOM: Mur de vente protecteur @ {dom_res.nearest_ask_wall:.5f}")
+                    details.append(f"DOM L2: Mur de vente protecteur @ {dom_res.nearest_ask_wall:.5f}")
+            dom_dim = float(np.clip(dom_dim, -10.0, 20.0))
+        else:
+            details.append("DOM L2: Non disponible sur ce symbole/courtier (dimension neutre)")
 
-        # ── 4. Volume Profile (POC / VAH / VAL / LVN) ──
+        # ── DIMENSION 3 : Zone de Valeur Structurelle (Volume Profile) ──
+        vp_dim = 0.0
         source_vp = ticks_df if ticks_df is not None and not ticks_df.empty else candles_df
         vp_res = self.calculate_volume_profile(source_vp) if source_vp is not None else None
         poc = vp_res.poc if vp_res else None
@@ -637,36 +730,59 @@ class OrderFlowEngine:
 
         if vp_res and vp_res.poc > 0:
             if direction == "BUY":
-                # Achat sous le VAL ou rebond sur POC / LVN
                 if entry_price <= vp_res.val or abs(entry_price - vp_res.poc) <= atr * 0.3:
-                    score += 15.0
+                    vp_dim += 15.0
                     vp_confirmed = True
-                    details.append(f"VP: Entrée sous Value Area Low ({vp_res.val:.5f}) ou sur POC ({vp_res.poc:.5f})")
+                    details.append(f"VP: Entrée sous VAL ({vp_res.val:.5f}) ou sur POC ({vp_res.poc:.5f})")
             elif direction == "SELL":
-                # Vente au-dessus du VAH ou rejet sous POC / LVN
                 if entry_price >= vp_res.vah or abs(entry_price - vp_res.poc) <= atr * 0.3:
-                    score += 15.0
+                    vp_dim += 15.0
                     vp_confirmed = True
-                    details.append(f"VP: Entrée sur Value Area High ({vp_res.vah:.5f}) ou sous POC ({vp_res.poc:.5f})")
+                    details.append(f"VP: Entrée sur VAH ({vp_res.vah:.5f}) ou sous POC ({vp_res.poc:.5f})")
+            vp_dim = float(np.clip(vp_dim, 0.0, 15.0))
 
-        # ── 5. Footprint Imbalances ──
+        # ── DIMENSION 4 : Micro-Enchères (Footprint Stacked Imbalances) ──
+        fp_dim = 0.0
         if ticks_df is not None and len(ticks_df) >= 30:
             fp_res = self.calculate_footprint(ticks_df)
             if direction == "BUY" and fp_res.dominant_side == "BUYERS":
-                score += 10.0
+                fp_dim += 10.0
                 fp_confirmed = True
                 details.append(f"Footprint: Déséquilibres acheteurs ({fp_res.buying_imbalances_count} stacked)")
             elif direction == "SELL" and fp_res.dominant_side == "SELLERS":
-                score += 10.0
+                fp_dim += 10.0
                 fp_confirmed = True
                 details.append(f"Footprint: Déséquilibres vendeurs ({fp_res.selling_imbalances_count} stacked)")
+            fp_dim = float(np.clip(fp_dim, 0.0, 10.0))
 
-        final_score = float(np.clip(score, 0.0, 100.0))
-        is_confirmed = final_score >= self.min_confluence_score
+        # Application du damping sur les dimensions issues du flux de ticks
+        damped_flow = flow_dim * damping
+        damped_fp = fp_dim * damping
+
+        raw_score = 50.0 + damped_flow + dom_dim + vp_dim + damped_fp
+        final_score = float(np.clip(raw_score, 0.0, 100.0))
+
+        # Sécurité : Si les données sont périmées ou indisponibles, interdire la confirmation positive
+        if data_quality in ("DEGRADED_STALE", "UNAVAILABLE"):
+            final_score = min(final_score, 50.0)
+            is_confirmed = False
+        else:
+            is_confirmed = final_score >= self.min_confluence_score
 
         badge = f"OF {final_score:.0f}/100"
         if is_confirmed:
             badge += " [CONFIRMÉ]"
+        elif data_quality == "DEGRADED_STALE":
+            badge += " [PÉRIMÉ]"
+        elif data_quality == "ESTIMATED_QUOTE_RULE":
+            badge += " [ESTIMÉ]"
+
+        breakdown = {
+            "flow_dim": round(damped_flow, 1),
+            "dom_dim": round(dom_dim, 1),
+            "vp_dim": round(vp_dim, 1),
+            "fp_dim": round(damped_fp, 1),
+        }
 
         return OrderFlowConfluence(
             symbol=symbol,
@@ -682,4 +798,10 @@ class OrderFlowEngine:
             val=val,
             details=details,
             summary_badge=badge,
+            data_quality=data_quality,
+            is_dom_available=is_dom_available,
+            is_real_volume=has_real_vol,
+            is_synthetic=is_synthetic,
+            damping_applied=damping,
+            dimensions_breakdown=breakdown,
         )

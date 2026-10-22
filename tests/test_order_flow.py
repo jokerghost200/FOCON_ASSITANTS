@@ -401,3 +401,260 @@ class TestCRTStrategyWithOrderFlow:
         assert proposal["order_flow_confirmed"] is True
         assert proposal["order_flow_score"] == 90.0
         assert "OF 90/100 [CONFIRMÉ]" in proposal["reason"]
+
+
+class TestDecollinearizationAndDataQuality:
+    def test_decollinearized_dimension_capping(self):
+        """Vérifie que CVD divergence et absorption au sweep sont plafonnées à 30 (+ 5 synergie) pour éviter le double comptage."""
+        engine = OrderFlowEngine()
+        crt = CRTSetup(
+            direction="BUY",
+            c1_high=1.08600,
+            c1_low=1.08400,
+            c1_mid=1.08500,
+            c2_high=1.08550,
+            c2_low=1.08380,
+            c2_close=1.08450,
+            sweep_price=1.08380,
+            sweep_depth=0.00020,
+            sl_raw=1.08370,
+            tp1=1.08500,
+            tp2=1.08600,
+            in_killzone=True,
+            killzone_name="London",
+            entry_price=1.08420,
+            order_type="BUY_LIMIT",
+            is_pending=True,
+        )
+
+        # Ticks avec divergence haussière ET absorption au sweep (1.08380)
+        n = 60
+        prices = [1.08380] * 30 + [1.08420] * 30
+        deltas = [-15.0] * 30 + [20.0] * 30
+        df = pd.DataFrame({
+            "price": prices,
+            "bid": [p - 0.00005 for p in prices],
+            "ask": [p + 0.00005 for p in prices],
+            "vol": [20.0] * n,
+            "side": ["SELL"] * 30 + ["BUY"] * 30,
+            "delta": deltas,
+        })
+        df.attrs["data_quality"] = "REAL_OBSERVED"
+        df.attrs["has_real_volume"] = True
+        df.attrs["stale_seconds"] = 5.0
+
+        confluence = engine.evaluate_setup_confluence(
+            symbol="EURUSD",
+            crt_setup=crt,
+            ticks_df=df,
+            dom_data={"available": False},
+            atr=0.00060,
+        )
+
+        dim_breakdown = confluence.dimensions_breakdown
+        assert dim_breakdown["flow_dim"] <= 35.0  # Plafonné à 30 + 5 synergie max
+        assert confluence.cvd_confirmed is True
+        assert confluence.absorption_confirmed is True
+        assert confluence.data_quality == "REAL_OBSERVED"
+
+    def test_damping_factor_applied_on_quote_rule(self):
+        """Vérifie que les données estimées Quote-Rule reçoivent un facteur d'amortissement de 0.65."""
+        engine = OrderFlowEngine()
+        crt = CRTSetup(
+            direction="BUY",
+            c1_high=1.08600,
+            c1_low=1.08400,
+            c1_mid=1.08500,
+            c2_high=1.08550,
+            c2_low=1.08380,
+            c2_close=1.08450,
+            sweep_price=1.08380,
+            sweep_depth=0.00020,
+            sl_raw=1.08370,
+            tp1=1.08500,
+            tp2=1.08600,
+            in_killzone=True,
+            killzone_name="London",
+            entry_price=1.08420,
+            order_type="BUY_LIMIT",
+            is_pending=True,
+        )
+
+        n = 40
+        prices = [1.08380] * 20 + [1.08420] * 20
+        df = pd.DataFrame({
+            "price": prices,
+            "bid": [p - 0.00005 for p in prices],
+            "ask": [p + 0.00005 for p in prices],
+            "vol": [10.0] * n,
+            "side": ["SELL"] * 20 + ["BUY"] * 20,
+            "delta": [-8.0] * 20 + [12.0] * 20,
+        })
+        df.attrs["data_quality"] = "ESTIMATED_QUOTE_RULE"
+        df.attrs["has_real_volume"] = False
+        df.attrs["stale_seconds"] = 10.0
+
+        confluence = engine.evaluate_setup_confluence(
+            symbol="EURUSD",
+            crt_setup=crt,
+            ticks_df=df,
+            dom_data={"available": False},
+            atr=0.00060,
+        )
+
+        assert confluence.data_quality == "ESTIMATED_QUOTE_RULE"
+        assert confluence.damping_applied == 0.65
+
+    def test_stale_ticks_safety_lock(self):
+        """Vérifie que des ticks périmés (>180s) verrouillent le score à 50.0 et interdisent toute confirmation."""
+        engine = OrderFlowEngine()
+        crt = CRTSetup(
+            direction="BUY",
+            c1_high=1.08600,
+            c1_low=1.08400,
+            c1_mid=1.08500,
+            c2_high=1.08550,
+            c2_low=1.08380,
+            c2_close=1.08450,
+            sweep_price=1.08380,
+            sweep_depth=0.00020,
+            sl_raw=1.08370,
+            tp1=1.08500,
+            tp2=1.08600,
+            in_killzone=True,
+            killzone_name="London",
+            entry_price=1.08420,
+            order_type="BUY_LIMIT",
+            is_pending=True,
+        )
+
+        df = pd.DataFrame({
+            "price": [1.08400] * 10,
+            "bid": [1.08395] * 10,
+            "ask": [1.08405] * 10,
+            "vol": [10.0] * 10,
+            "side": ["BUY"] * 10,
+            "delta": [10.0] * 10,
+        })
+        df.attrs["data_quality"] = "DEGRADED_STALE"
+        df.attrs["stale_seconds"] = 350.0  # Plus de 5 minutes de retard
+
+        confluence = engine.evaluate_setup_confluence(
+            symbol="EURUSD",
+            crt_setup=crt,
+            ticks_df=df,
+            dom_data={"available": False},
+            atr=0.00060,
+        )
+
+        assert confluence.data_quality == "DEGRADED_STALE"
+        assert confluence.is_confirmed is False
+        assert confluence.confluence_score == 50.0
+        assert "PÉRIMÉ" in confluence.summary_badge
+
+
+class TestMarketDataDiagnostics:
+    def test_diagnose_market_data_institutional(self):
+        from unittest.mock import MagicMock
+        from src.core.market_data import MarketDataEngine
+
+        mock_conn = MagicMock()
+        mock_conn.is_market_open.return_value = True
+        collector = MarketDataEngine(mock_conn)
+
+        # Mock DOM L2
+        collector.get_order_book_snapshot = MagicMock(return_value={
+            "available": True,
+            "bids": [{"price": 1.08400, "volume": 10.0}],
+            "asks": [{"price": 1.08500, "volume": 10.0}],
+        })
+
+        # Mock ticks avec vrai volume
+        df_ticks = pd.DataFrame({"price": [1.08450], "vol": [10.0], "flags": [56]})
+        df_ticks.attrs["has_real_volume"] = True
+        df_ticks.attrs["real_flags_ratio"] = 0.90
+        df_ticks.attrs["stale_seconds"] = 2.0
+        df_ticks.attrs["data_quality"] = "REAL_OBSERVED"
+        collector.get_ticks_dataframe = MagicMock(return_value=df_ticks)
+
+        diag = collector.diagnose_market_data("EURUSD")
+        assert diag["order_flow_tier"] == "TIER_A_INSTITUTIONAL"
+        assert diag["tier"] == "TIER_A_INSTITUTIONAL"
+        assert diag["dom_available"] is True
+        assert diag["has_real_volume"] is True
+        assert diag["ticks_fresh"] is True
+
+    def test_diagnose_market_data_forex_ecn(self):
+        from unittest.mock import MagicMock
+        from src.core.market_data import MarketDataEngine
+
+        mock_conn = MagicMock()
+        mock_conn.is_market_open.return_value = True
+        collector = MarketDataEngine(mock_conn)
+
+        # Pas de DOM
+        collector.get_order_book_snapshot = MagicMock(return_value={"available": False})
+
+        # Ticks FX récents sans flags réels (Quote Rule)
+        df_ticks = pd.DataFrame({"price": [1.08450], "vol": [1.0]})
+        df_ticks.attrs["has_real_volume"] = False
+        df_ticks.attrs["real_flags_ratio"] = 0.0
+        df_ticks.attrs["stale_seconds"] = 15.0
+        collector.get_ticks_dataframe = MagicMock(return_value=df_ticks)
+
+        diag = collector.diagnose_market_data("EURUSD")
+        assert diag["order_flow_tier"] == "TIER_B_FOREX_ECN"
+        assert diag["dom_available"] is False
+        assert diag["ticks_fresh"] is True
+        assert diag["dom_available"] is False
+        assert diag["ticks_fresh"] is True
+
+
+class TestABComparison:
+    def test_compare_ab_performance(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            journal = OrderFlowJournal(log_dir=tmp_dir)
+
+            # Signal 1 : Groupe A (Sans OF / non confirmé)
+            of_unconf = OrderFlowConfluence(
+                symbol="EURUSD",
+                is_confirmed=False,
+                confluence_score=45.0,
+            )
+            r1 = journal.log_signal("EURUSD", "BUY", 1.0850, "CRT_PURE", of_unconf, "PENDING_CRT", ticket=101)
+            journal.log_trade_outcome(ticket=101, pnl_usd=50.0, exit_reason="TP", rr_achieved=2.0)
+
+            # Signal 2 : Groupe A perdant
+            r2 = journal.log_signal("EURUSD", "SELL", 1.0860, "CRT_PURE", of_unconf, "PENDING_CRT", ticket=102)
+            journal.log_trade_outcome(ticket=102, pnl_usd=-30.0, exit_reason="SL", rr_achieved=-1.0)
+
+            # Signal 3 : Groupe B (Avec OF confirmé)
+            of_conf = OrderFlowConfluence(
+                symbol="EURUSD",
+                is_confirmed=True,
+                confluence_score=80.0,
+            )
+            r3 = journal.log_signal("EURUSD", "BUY", 1.0840, "CRT_ORDER_FLOW", of_conf, "PENDING_CRT", ticket=201)
+            journal.log_trade_outcome(ticket=201, pnl_usd=90.0, exit_reason="TP", rr_achieved=3.0)
+
+            # Signal 4 : Groupe B gagnant
+            r4 = journal.log_signal("EURUSD", "SELL", 1.0870, "CRT_ORDER_FLOW", of_conf, "PENDING_CRT", ticket=202)
+            journal.log_trade_outcome(ticket=202, pnl_usd=60.0, exit_reason="TP", rr_achieved=2.0)
+
+            comparison = journal.compare_ab_performance()
+            assert comparison["status"] == "SUCCESS"
+            group_a = comparison["group_a_crt_pure"]
+            group_b = comparison["group_b_crt_order_flow"]
+
+            assert group_a["trades"] == 2
+            assert group_a["win_rate_pct"] == 50.0
+            assert group_a["total_pnl_usd"] == 20.0
+
+            assert group_b["trades"] == 2
+            assert group_b["win_rate_pct"] == 100.0
+            assert group_b["total_pnl_usd"] == 150.0
+
+            assert comparison["delta"]["pnl_difference_usd"] == 130.0
+            assert "A/B Testing Quantitatif" in comparison["markdown_report"]
+
