@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -9,7 +9,7 @@ class Strategy:
         self.name = name
         self.type = strategy_type
         
-    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: list = None) -> Optional[Dict[str, Any]]:
+    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: Optional[List[Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         """
         Evaluate market conditions to generate a trade signal.
         Returns a dictionary with proposed trade parameters if valid, or None.
@@ -25,7 +25,7 @@ class LiquiditySweepMSSStrategy(Strategy):
     def __init__(self):
         super().__init__("LIQUIDITY_SWEEP_MSS", "REVERSAL")
         
-    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: list = None) -> Optional[Dict[str, Any]]:
+    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: Optional[List[Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         liquidity_grab = amd_context.get('Liquidity_Grab', 'None')
         bos_mss = amd_context.get('BOS_MSS', 'None')
         fvg = amd_context.get('FVG', 'None')
@@ -71,7 +71,7 @@ class ObFvgRetestStrategy(Strategy):
     def __init__(self):
         super().__init__("OB_FVG_RETEST", "REVERSAL_CONTINUATION")
         
-    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: list = None) -> Optional[Dict[str, Any]]:
+    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: Optional[List[Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         # Check active Order Blocks
         if not valid_obs:
             return None
@@ -103,7 +103,7 @@ class TrendPullbackStrategy(Strategy):
     def __init__(self):
         super().__init__("TREND_PULLBACK", "TREND")
         
-    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: list = None) -> Optional[Dict[str, Any]]:
+    def evaluate(self, tech_features: dict, amd_context: dict, htf_trend: str, price: float, spread: float, min_distance: float, valid_obs: Optional[List[Any]] = None, **kwargs: Any) -> Optional[Dict[str, Any]]:
         ltf_trend = str(tech_features.get('trend', 'Unknown')).upper()
         htf_trend_upper = str(htf_trend).upper()
         bos_mss = amd_context.get('BOS_MSS', 'None')
@@ -156,8 +156,9 @@ class CRTStrategy(Strategy):
         price: float,
         spread: float,
         min_distance: float,
-        valid_obs: list = None,
+        valid_obs: Optional[List[Any]] = None,
         crt_setup: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Optional[Dict[str, Any]]:
         if crt_setup is None:
             return None
@@ -272,7 +273,7 @@ class StrategySelector:
         price: float,
         spread: float,
         min_distance: float,
-        valid_obs: list = None,
+        valid_obs: Optional[List[Any]] = None,
         crt_setup: Optional[Any] = None,
     ) -> list:
         active_strats = []

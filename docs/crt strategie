@@ -1,20 +1,198 @@
-CRT en trading : Candle Range Theory
-CRT signifie Candle Range Theory (théorie de l'amplitude de bougie). C'est une approche issue de la communauté SMC/ICT, qui repose sur une idée simple : une bougie d'une unité de temps supérieure définit un range (son high et son low), et le prix va chercher à balayer un côté de ce range avant de se diriger vers l'autre.
-Le modèle à 3 bougies
-1. Bougie 1 (C1), la bougie de range. Son high et son low sont les niveaux de liquidité de référence, par exemple une bougie H4, Daily ou Weekly.
-2. Bougie 2 (C2), la manipulation. Le prix dépasse le high ou le low de C1 (c'est le sweep de liquidité, qui piège les traders qui entrent sur la cassure), puis referme à l'intérieur du range de C1. Cette clôture à l'intérieur est la confirmation clé : sans elle, il s'agit peut-être d'une vraie cassure.
-3. Bougie 3 (C3), la distribution. Le prix part dans la direction opposée au sweep et vise l'autre extrémité du range de C1.
-Cela correspond à la logique AMD (Accumulation, Manipulation, Distribution) : C1 est l'accumulation, C2 la manipulation, C3 la distribution.
-Exemple
-• C1 (H4) a un high à 1.1000 et un low à 1.0950.
-• C2 descend à 1.0940, sous le low de C1, puis referme à 1.0965, donc dans le range.
-• Biais haussier : on cherche un achat avec pour objectif le high de C1 (1.1000), ou au minimum le milieu du range (50 %).
-Comment l'exploiter
-• Entrée : sur une unité de temps inférieure (M15, M5, M1), après le sweep, on attend une confirmation : changement de structure (MSS/CISD), FVG ou order block.
-• Stop loss : au-delà de la mèche du sweep.
-• Objectifs : le milieu du range de C1 (équilibre), puis son extrémité opposée.
-• Combinaisons classiques : Weekly → Daily, Daily → H1/H4, H4 → M15/M5.
-Limites à garder en tête
-• Un sweep ne garantit pas un retournement : si C2 clôture hors du range, c'est une continuation, et le setup est invalidé.
-• Il faut un contexte (biais de tendance sur l'unité supérieure, sessions, news), car le CRT seul génère de faux signaux.
-• C'est un modèle de lecture du marché, pas une méthode infaillible. Un backtest sur plusieurs mois et une gestion du risque stricte restent indispensables.
+# STRATÉGIE AUTOMATIQUE · GUIDE UNIVERSEL
+## Pending Orders MT5 : CRT + ICT/SMC (Balayage de liquidité, MSS et entrée sur FVG)
+
+Guide explicatif et détaillé, applicable à n'importe quel actif et timeframe : règles de détection, calcul des prix d'entrée, stop-loss, take-profit, expiration des ordres, gestion du risque, automatisation MetaTrader 5 et protocole de backtest en Python. EURUSD en M15 sert d'exemple chiffré.
+
+| Élément | Choix retenu |
+| :--- | :--- |
+| **Actif** | Configurable (EURUSD, XAUUSD, GBPUSD, indices…). EURUSD sert d'exemple |
+| **Timeframes** | HTF (contexte) et LTF (entrée) configurables. Exemple : H1 + M15 (ou H4 + M15) |
+| **Approche** | CRT + ICT/SMC (sweep, MSS, FVG) |
+| **Mode** | Automatique : le bot place et gère les ordres |
+| **Type d'ordre** | BUY LIMIT / SELL LIMIT avec expiration |
+| **Plateforme** | MetaTrader 5 piloté par Python |
+
+> **Avertissement important**  
+> Cette stratégie est une hypothèse à tester, pas un système dont la rentabilité est garantie. Aucun backtest ne garantit les résultats futurs. Ne passer en réel qu'après : tests unitaires, backtest net de coûts, test hors échantillon, puis plusieurs semaines de compte démo.
+
+---
+
+## Sommaire
+1. [Principe général de la stratégie](#1-principe-général-de-la-stratégie)
+2. [Les concepts à maîtriser](#2-les-concepts-à-maîtriser)
+3. [Règles exactes de détection](#3-règles-exactes-de-détection)
+4. [Calcul automatique des prix](#4-calcul-automatique-des-prix)
+5. [Gestion du risque](#5-gestion-du-risque)
+6. [Machine à états de l'automatisation](#6-machine-à-états-de-lautomatisation)
+7. [Exécution sur MetaTrader 5 avec Python](#7-exécution-sur-metatrader-5-avec-python)
+8. [Protocole de backtest Python](#8-protocole-de-backtest-python)
+9. [Organisation du projet Python](#9-organisation-du-projet-python)
+10. [Paramètres de configuration](#10-paramètres-de-configuration)
+11. [Adapter la stratégie à un autre actif ou timeframe](#11-adapter-la-stratégie-à-un-autre-actif-ou-timeframe)
+12. [Du backtest au réel : feuille de route](#12-du-backtest-au-réel--feuille-de-route)
+13. [Limites et risques](#13-limites-et-risques)
+14. [Glossaire](#14-glossaire)
+
+---
+
+## 1. Principe général de la stratégie
+L'idée est de ne jamais placer un pending order « au hasard ». Chaque ordre doit répondre à quatre questions :
+- Où le prix a pris de la liquidité ?
+- Quelle confirmation le marché a donnée ?
+- Où l'idée est invalidée (stop-loss) ?
+- Quel objectif est cohérent (take-profit) ?
+
+**La logique en une phrase :**  
+Le prix balaie une liquidité évidente (le plus haut ou le plus bas d'un range de référence HTF), réintègre le range, casse la structure LTF dans l'autre sens (MSS), laisse un déséquilibre (FVG), puis on attend un retour dans ce FVG avec un ordre LIMIT.
+
+### 1.1 Les quatre couches de la stratégie
+| Couche | Rôle | Sortie |
+| :--- | :--- | :--- |
+| **1. Contexte HTF** | Définir le range CRT de référence, vérifier spread et conditions de marché | Niveaux $H$ (haut) et $L$ (bas) du range |
+| **2. Détection LTF** | Sweep de liquidité, réintégration, déplacement impulsif, MSS, FVG | Setup BUY ou SELL candidat |
+| **3. Validation** | Calcul entrée, SL, TP, ratio risque/rendement, taille de position | Setup validé ou rejeté (avec motif) |
+| **4. Exécution MT5** | Pending order, suivi, expiration ou annulation, journalisation | Ordre actif, position ou setup clos |
+
+> **Règle fondamentale : bougies clôturées uniquement**  
+> Le bot confirme un sweep, un MSS ou un FVG uniquement sur des bougies clôturées. Il ne doit jamais anticiper un signal à partir d'une bougie encore en formation : c'est la première source de faux signaux et de fuite de données futures (lookahead bias).
+
+---
+
+## 2. Les concepts à maîtriser
+| Concept | Définition opérationnelle (programmable) |
+| :--- | :--- |
+| **HTF / LTF** | HTF = timeframe de contexte (range CRT). LTF = timeframe d'entrée (sweep, MSS, FVG). Ex : HTF = H1, LTF = M15. |
+| **CRT (Candle Range Theory)** | Le plus haut $H$ et le plus bas $L$ de la dernière bougie HTF clôturée forment le range de référence. $M = (H + L) / 2$ est l'équilibre (50%). |
+| **Liquidité** | Zones d'ordres stop concentrés : $H$ et $L$ du range HTF. |
+| **Sweep (balayage)** | Dépassement de $H$ ou $L$ puis clôture LTF de nouveau à l'intérieur du range (réintégration). |
+| **Swing high / Swing low** | Sommet/creux local LTF : bougie dont le High (ou Low) est supérieur (ou inférieur) aux 2 bougies précédentes et aux 2 suivantes (`swing_lookback = 2`). |
+| **MSS (Market Structure Shift)** | Clôture LTF au-dessus du dernier swing high confirmé (MSS haussier) ou sous le dernier swing low confirmé (MSS baissier). |
+| **FVG (Fair Value Gap)** | Sur 3 bougies consécutives : Haussier si $\text{Low}(B_3) > \text{High}(B_1)$ ; Baissier si $\text{High}(B_3) < \text{Low}(B_1)$. |
+| **ATR(14)** | Average True Range 14 périodes LTF pour calibrer la marge de sécurité du stop. |
+| **R** | Distance unitaire de risque : $|\text{Entrée} - \text{SL}|$. |
+
+---
+
+## 3. Règles exactes de détection
+
+### 3.1 Définir le range CRT
+1. À chaque nouvelle bougie HTF clôturée, enregistrer son plus haut $H$ et son plus bas $L$.
+2. Calculer le milieu $M = (H + L) / 2$.
+3. Surveiller en LTF le franchissement de $H$ ou de $L$.
+4. Un dépassement seul n'est pas un signal : il faut obligatoirement une clôture LTF de retour dans le range (réintégration).
+
+### 3.2 Setup BUY : achat après balayage du bas
+1. Le prix passe sous $L$ (plus bas du range HTF). On mémorise l'extrême : `sweep_low`.
+2. Une bougie LTF clôture au-dessus de $L$ (réintégration du range).
+3. Dans les 3 bougies LTF suivantes au maximum, une clôture dépasse le dernier swing high LTF confirmé : c'est le **MSS haussier**.
+4. Le déplacement haussier du MSS crée un **FVG haussier** non comblé et non invalidé.
+5. Le ratio risque/rendement vers la cible retenue est $\ge 1:1{,}5$ après coûts.
+6. Si les contrôles de risque sont validés : soumettre un **BUY LIMIT**.
+
+### 3.3 Setup SELL : vente après balayage du haut
+1. Le prix dépasse $H$. On mémorise `sweep_high`.
+2. Une bougie LTF clôture sous $H$ (réintégration).
+3. Dans les 3 bougies LTF suivantes au maximum, une clôture passe sous le dernier swing low confirmé : **MSS baissier**.
+4. Un **FVG baissier** apparaît dans ce déplacement et reste valide.
+5. Le ratio risque/rendement est $\ge 1:1{,}5$.
+6. Si les contrôles de risque sont validés : soumettre un **SELL LIMIT**.
+
+### 3.4 Quel FVG retenir ?
+Ne retenir que les FVG créés par l'impulsion qui a confirmé le MSS. S'il y en a plusieurs, retenir le plus récent situé dans le sens du mouvement. Un FVG est invalidé si une bougie LTF clôture au-delà de sa borne opposée.
+
+### 3.5 Confirmation des swings
+Avec `swing_lookback = 2`, un swing n'est validé qu'après la clôture de 2 bougies ultérieures pour interdire tout biais d'anticipation.
+
+---
+
+## 4. Calcul automatique des prix
+
+| Paramètre | Règle de calcul |
+| :--- | :--- |
+| **Entrée BUY LIMIT** | Milieu du FVG haussier : $(FVG_{high} + FVG_{low}) / 2$ |
+| **Entrée SELL LIMIT** | Milieu du FVG baissier : $(FVG_{high} + FVG_{low}) / 2$ |
+| **Stop-Loss BUY** | $\text{sweep\_low} - \text{marge}$ |
+| **Stop-Loss SELL** | $\text{sweep\_high} + \text{marge}$ |
+| **Marge de sécurité** | $\max(\text{spread}, 0{,}1 \times \text{ATR}(14))$ |
+| **TP1 (Équilibre)** | Milieu du range CRT $M = (H + L) / 2$ |
+| **TP2 (Principal)** | Borne opposée du range ($H$ pour un BUY, $L$ pour un SELL) |
+| **TP de secours** | Entrée $+ 2R$ si la liquidité opposée est trop proche ou absente |
+| **Expiration** | 4 bougies LTF après placement (ex: 60 min en M15) |
+
+### Conditions d'annulation d'un ordre en attente :
+- **Expiration** : 4 bougies LTF écoulées sans exécution.
+- **Invalidation** : Clôture LTF au-delà de `sweep_low` (BUY) ou `sweep_high` (SELL).
+- **Cible atteinte prématurément** : Le cours touche le TP avant de déclencher l'ordre LIMIT.
+- **Limite journalière** : Seuil de perte max atteint ou filtre d'actualités majeures.
+
+---
+
+## 5. Gestion du risque
+
+| Limite | Valeur par défaut | Action |
+| :--- | :--- | :--- |
+| **Risque par trade** | $0{,}25\%$ du capital | Perte max au SL |
+| **Perte journalière max** | $1{,}0\%$ | Arrêt du bot pour la journée, annulation des pending orders |
+| **Pertes consécutives** | 2 maximum | Pause jusqu'à la session suivante |
+| **Positions simultanées** | 1 maximum par symbole | Aucun empilement d'ordres |
+| **Ordres en attente** | 1 maximum | Un seul setup actif à la fois |
+
+### Calcul du volume :
+$$\text{risque\_argent} = \text{capital} \times 0{,}0025$$
+$$\text{perte\_1\_lot} = |\text{mt5.order\_calc\_profit}(\text{type}, \text{symbol}, 1{,}0, \text{entree}, \text{sl})|$$
+$$\text{lots} = \text{floor\_to\_step}(\text{risque\_argent} / \text{perte\_1\_lot})$$
+
+---
+
+## 6. Machine à états de l'automatisation
+```mermaid
+stateDiagram-v2
+    [*] --> SCAN
+    SCAN --> SWEEP : Dépassement H ou L de C1
+    SWEEP --> CONFIRM : Clôture LTF réintégrant le range
+    SWEEP --> SCAN : Pas de réintégration (continuation)
+    CONFIRM --> FVG : MSS confirmé dans les 3 bougies
+    CONFIRM --> SCAN : Pas de MSS / délai dépassé
+    FVG --> VALIDATE : FVG valide dans l'impulsion
+    FVG --> SCAN : Pas de FVG / FVG comblé
+    VALIDATE --> PENDING : R:R >= 1.5 & filtres OK
+    VALIDATE --> SCAN : Ratio insuffisant / filtres KO
+    PENDING --> POSITION : Ordre exécuté
+    PENDING --> SCAN : Expiration (4 bougies) ou annulation
+    POSITION --> SCAN : Position clôturée (SL/TP)
+```
+
+---
+
+## 7. Exécution sur MetaTrader 5 avec Python
+1. Récupération des contraintes via `mt5.symbol_info` (digits, volume min/max/step, stop levels).
+2. Normalisation stricte des décimales des prix.
+3. Envoi de l'ordre en `TRADE_ACTION_PENDING` (`ORDER_TYPE_BUY_LIMIT` ou `ORDER_TYPE_SELL_LIMIT`) avec `type_time = ORDER_TIME_SPECIFIED`.
+4. Contrôle préalable avec `mt5.order_check()`.
+5. Journalisation complète du ticket, retcode et commentaire.
+
+---
+
+## 8. Paramètres de configuration recommandés
+```python
+CRT_CONFIG = {
+    "htf": "H1",                   # Timeframe du range CRT
+    "ltf": "M15",                  # Timeframe d'entrée
+    "swing_lookback": 2,           # Bougies pour valider un swing
+    "mss_max_bars": 3,             # Délai max post-réintégration pour le MSS
+    "entry_mode": "fvg_midpoint",  # Entrée au milieu du FVG
+    "min_rr": 1.5,                 # Ratio R:R minimum
+    "expiration_bars": 4,          # Durée de vie du pending order (bougies LTF)
+    "risk_per_trade_pct": 0.25,    # 0.25% de risque par opération
+    "daily_loss_limit_pct": 1.0,   # Coupe-circuit journalier à 1%
+    "max_consecutive_losses": 2,   # Pause après 2 pertes consécutives
+}
+```
+
+---
+
+## 9. Glossaire
+- **CRT** : *Candle Range Theory* — Théorie exploitant l'amplitude (High/Low) d'une bougie de référence HTF.
+- **Sweep** : Balayage rapide de la liquidité suivi d'un rejet immédiat.
+- **MSS** : *Market Structure Shift* — Cassure structurelle marquant le retournement en unité inférieure.
+- **FVG** : *Fair Value Gap* — Déséquilibre de cotation sur 3 bougies consécutives offrant une zone de retour de prix à rabais.
