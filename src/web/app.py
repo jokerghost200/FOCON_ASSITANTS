@@ -168,4 +168,40 @@ def create_app(state: WebState) -> Flask:
             "message": a.get("message", ""),
         }})
 
+    @app.get("/api/pro-traders")
+    def get_pro_traders():
+        try:
+            mgr = getattr(state.orchestrator, "strategy_profile_manager", None)
+            if not mgr:
+                return jsonify({"ok": False, "reason": "StrategyProfileManager non disponible"}), 503
+            return jsonify({
+                "ok": True,
+                "active_profile": mgr.get_active_profile_id(),
+                "active_mode": mgr.get_active_mode(),
+                "profiles": mgr.get_all_profiles_info(),
+            })
+        except Exception as e:
+            logger.exception("get_pro_traders failed")
+            return jsonify({"ok": False, "reason": str(e)}), 500
+
+    @app.post("/api/pro-traders/activate")
+    def activate_pro_trader():
+        try:
+            mgr = getattr(state.orchestrator, "strategy_profile_manager", None)
+            if not mgr:
+                return jsonify({"ok": False, "reason": "StrategyProfileManager non disponible"}), 503
+            data = request.get_json(force=True, silent=True) or {}
+            profile_id = data.get("profile_id")
+            mode = data.get("mode", "simulation")
+            custom_cfg = data.get("custom_cfg")
+            mgr.set_active_profile(profile_id=profile_id, mode=mode, custom_cfg=custom_cfg)
+            return jsonify({
+                "ok": True,
+                "active_profile": mgr.get_active_profile_id(),
+                "active_mode": mgr.get_active_mode(),
+            })
+        except Exception as e:
+            logger.exception("activate_pro_trader failed")
+            return jsonify({"ok": False, "reason": str(e)}), 500
+
     return app

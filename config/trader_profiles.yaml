@@ -1,0 +1,101 @@
+# Configuration des 4 Stratégies de Traders Professionnels (FOCON Strategy Copy)
+# Référence : Compétition "4 traders pros s'affrontent en direct"
+# Corentin Trading, Benjamin Mauger, Romain Bailleul, Nada FX
+
+pro_trader_profiles:
+  # Profil actif : null (désactivé) | "corentin" | "benjamin" | "romain" | "nada"
+  active_profile: null
+
+  # Mode de fonctionnement :
+  # - "simulation" : Détecte et journalise sans placer d'ordres sur MT5
+  # - "copy"       : Exécute fidèlement les règles sur compte démo MT5 avec gestion du risque
+  # - "custom"     : Applique la stratégie avec les paramètres personnalisés par l'utilisateur
+  mode: "simulation"
+
+  corentin:
+    name: "Corentin Trading"
+    style: "Order Flow & Inducement"
+    description: "Analyse des imbalances M15, fenêtres précises de reversal (16h00), cassures de trendlines et confirmation M5/M3."
+    symbols:
+      - EURUSD
+      - EURUSD.r
+      - EURUSDm
+    zone_tf: "M15"
+    confirm_tf: "M5"
+    allowed_windows:
+      - start: "15:45"
+        end: "16:30"
+      - start: "09:45"
+        end: "10:30"
+    range_atr_ratio: 0.8
+    use_flow: true
+    min_flow_score: 55.0
+    risk_pct: 1.0
+    min_rr: 2.0
+
+  benjamin:
+    name: "Benjamin Mauger"
+    style: "Scalping d'ouverture · Carnet & Clusters"
+    description: "Exploitation de la volatilité d'ouverture US/London, micro-scalps en grappes d'ordres limites, filtre spread strict et anti-ATH."
+    symbols:
+      - US30
+      - NAS100
+      - US100
+      - XAUUSD
+      - DJ30
+      - USTEC
+    timeframe: "M1"
+    open_window_min: 15
+    max_spread: 2.5
+    cluster_n: 3
+    step_pts: 5.0
+    tp_pts: 8.0
+    sl_pts: 12.0
+    ath_pct: 0.3
+    decay_mode: "trades"  # "trades" ou "time"
+    decay_rate: 0.2
+    risk_pct: 0.5
+
+  romain:
+    name: "Romain Bailleul"
+    style: "Price Action · Stats · Fibonacci"
+    description: "Pullback sur prix d'ouverture (OPR), repli Fibonacci 61.8%, filtre d'annonces économiques, validation ADR 60j et trailing stop."
+    symbols:
+      - NAS100
+      - US100
+      - US500
+      - US30
+      - SPX500
+    timeframe: "M15"
+    news_minutes: 30
+    vix_max: 32.0
+    opr_tolerance_pct: 0.05
+    fib_level: 0.618
+    atr_mult: 1.5
+    be_r: 1.0
+    trail_r: 1.5
+    avg_days: 60
+    risk_pct: 1.0
+    min_rr: 1.8
+
+  nada:
+    name: "Nada FX"
+    style: "BMC · Structure & Fibonacci 50-61.8%"
+    description: "Prise de liquidité des extrêmes de Londres à l'ouverture US, cassure de structure H1 (BOS/CHoCH) et retest Fibo 50-61.8%."
+    symbols:
+      - XAUUSD
+      - GOLD
+      - NAS100
+      - US100
+    structure_tf: "H1"
+    entry_tf: "M15"
+    london_session:
+      start: "08:00"
+      end: "15:00"
+    us_open_window:
+      start: "15:15"
+      end: "16:45"
+    fib_zone_min: 0.50
+    fib_zone_max: 0.618
+    min_rr: 2.0
+    risk_pct: 1.0

@@ -14,6 +14,7 @@ from src.trading.strategy_engine import StrategySelector
 from src.ai.local_quant_brain import LocalQuantBrain
 from src.ai.ai_router import AIRouter
 from src.trading.risk_manager import RiskManager
+from src.strategies.strategy_profile_manager import StrategyProfileManager
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class AIOrchestrator:
             min_confluence_score=float(of_cfg.get('min_confluence_score', 60.0)),
         )
         self.order_flow_journal = OrderFlowJournal()
+        self.strategy_profile_manager = StrategyProfileManager()
         self._symbol_cooldowns = {}
 
     def set_symbol_cooldown(self, symbol: str, duration_seconds: float = 1800.0, reason: str = "", direction: str = None):
@@ -631,6 +633,92 @@ class AIOrchestrator:
                 )
             except Exception:
                 dom_context = "Order Flow & DOM: Available."
+
+        # ─── ÉVALUATION DU PROFIL DE TRADER PROFESSIONNEL (SI ACTIF) ───
+        if hasattr(self, 'strategy_profile_manager') and self.strategy_profile_manager.is_active():
+            active_strat = self.strategy_profile_manager.get_active_strategy()
+            if active_strat and active_strat.is_symbol_supported(symbol):
+                ltf_df = self.market_data.get_dataframe(symbol, "M5", num_bars=100)
+                pro_signal = self.strategy_profile_manager.evaluate_symbol(
+                    symbol=symbol,
+                    df_primary=df,
+                    df_htf=htf_df,
+                    df_ltf=ltf_df,
+                    spread=spread_price,
+                    min_distance=min_distance,
+                    tech_features=tech_features,
+                    amd_context=amd_context,
+                    order_flow_confluence=of_confluence,
+                    news_context=news_context,
+                )
+
+                active_mode = self.strategy_profile_manager.get_active_mode()
+
+                # Cas 1 : Le trader pro valide un setup A+
+                if pro_signal:
+                    logger.info(
+                        f"👑 [Copie {pro_signal.trader}] Signal {pro_signal.direction} validé sur {symbol} "
+                        f"(Mode {active_mode.upper()}). Entry={pro_signal.entry}, SL={pro_signal.sl}, TP={pro_signal.tp}"
+                    )
+                    pro_decision = {
+                        "action": pro_signal.direction,
+                        "confidence": 95,
+                        "entry": pro_signal.entry,
+                        "sl": pro_signal.sl,
+                        "tp": pro_signal.tp,
+                        "rr": pro_signal.rr,
+                        "reason": f"[{pro_signal.trader} · {active_mode.upper()}] {pro_signal.reason}",
+                        "is_pending": pro_signal.is_pending,
+                        "order_type": pro_signal.order_type,
+                        "pro_trader": pro_signal.trader,
+                        "profile_id": pro_signal.profile_id,
+                        "cluster_orders": pro_signal.cluster_orders,
+                        "be_at_r": pro_signal.be_at_r,
+                        "trail": pro_signal.trail,
+                        "decay_risk_mult": pro_signal.decay_risk_mult,
+                        "simulation_only": (active_mode == "simulation"),
+                    }
+
+                    account_info = self.mt5.get_account_info()
+                    val = self.risk.validate_proposal(pro_decision, account_info, symbol_info)
+                    if not val['valid']:
+                        logger.warning(f"👑 [Copie {pro_signal.trader}] Risque MT5 rejeté : {val['reason']}")
+                        return {"error": f"Risk validation failed: {val['reason']}"}
+
+                    return {
+                        "status": "SIGNAL",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "tech_features": tech_features,
+                        "amd_context": amd_context,
+                        "news_context": news_context,
+                        "decision": val['proposal']
+                    }
+
+                # Cas 2 : Le trader pro n'a pas de setup (Discipline du Trader Pro = WAIT)
+                else:
+                    logger.info(
+                        f"👑 [Copie {active_strat.name}] Aucun setup selon les règles du trader pour {symbol}. "
+                        f"Discipline respectée = WAIT."
+                    )
+                    wait_decision = {
+                        "action": "WAIT",
+                        "confidence": 0,
+                        "entry": close_p,
+                        "sl": 0.0,
+                        "tp": 0.0,
+                        "reason": f"Discipline {active_strat.name} : Conditions de trade non réunies pour {symbol} (Attente de setup A+).",
+                        "pro_trader": active_strat.name,
+                    }
+                    return {
+                        "status": "WAIT",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "tech_features": tech_features,
+                        "amd_context": amd_context,
+                        "news_context": news_context,
+                        "decision": wait_decision
+                    }
 
         # Determine Market Regime and query Strategy Engine (incluant CRT, Sweeps, Order Blocks)
         market_regime = MarketContextEngine.detect_market_regime(tech_features, htf_trend, amd_context)

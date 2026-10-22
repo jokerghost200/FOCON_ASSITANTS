@@ -905,6 +905,12 @@ class MainWindow(QMainWindow):
         # Démarre maintenant : protège les positions même sans autopilot
         interval_ms = int(self.config.get('ui', {}).get('trade_manager_interval_ms', 3000))
         self.tm_timer.start(max(1000, interval_ms))
+
+        # Initialise l'état visuel du bouton Pro Trader
+        if hasattr(self.orchestrator, 'strategy_profile_manager'):
+            p_id = self.orchestrator.strategy_profile_manager.get_active_profile_id()
+            p_mode = self.orchestrator.strategy_profile_manager.get_active_mode()
+            self.on_pro_trader_updated(p_id, p_mode)
         
     def open_memory_dialog(self):
         """Ouvre le panneau de la Conscience Évolutive, Journal Réflexif et Poids Adaptatifs."""
@@ -925,6 +931,70 @@ class MainWindow(QMainWindow):
             dlg.exec()
         except Exception as e:
             QMessageBox.critical(self, "Erreur Backtest", f"Impossible d'ouvrir le module de backtest : {e}")
+
+    def open_pro_trader_dialog(self):
+        """Ouvre le panneau de Copie de Stratégies des 4 Traders Professionnels."""
+        try:
+            from src.ui.pro_trader_dialog import ProTraderCopyDialog
+            mgr = getattr(self.orchestrator, 'strategy_profile_manager', None)
+            if not mgr:
+                from src.strategies.strategy_profile_manager import StrategyProfileManager
+                mgr = StrategyProfileManager()
+                self.orchestrator.strategy_profile_manager = mgr
+
+            dlg = ProTraderCopyDialog(mgr, self)
+            dlg.profile_updated.connect(self.on_pro_trader_updated)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur Stratégies Pros", f"Impossible d'ouvrir le panneau des traders professionnels : {e}")
+
+    def on_pro_trader_updated(self, profile_id: str, mode: str):
+        """Met à jour l'intitulé et le style du bouton Pro Trader sur la barre principale."""
+        if not hasattr(self, 'pro_trader_btn'):
+            return
+
+        mgr = getattr(self.orchestrator, 'strategy_profile_manager', None)
+        if profile_id and mgr and profile_id in mgr.strategies:
+            strat = mgr.strategies[profile_id]
+            strat_short = strat.name.split()[0].upper()
+            mode_tag = "SIMU" if mode == "simulation" else ("DÉMO" if mode == "copy" else "CUSTOM")
+            self.pro_trader_btn.setText(f"👑 {strat_short} [{mode_tag}]")
+            self.pro_trader_btn.setToolTip(
+                f"Stratégie active : {strat.name} (Mode: {mode.upper()})\n"
+                f"Cliquer pour changer de profil ou désactiver."
+            )
+            self.pro_trader_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1b5e20, stop:1 #2e7d32);
+                    font-weight: bold;
+                    padding: 10px 14px;
+                    color: #ffd54f;
+                    border-radius: 4px;
+                    border: 2px solid #81c784;
+                }
+                QPushButton:hover {
+                    background: #388e3c;
+                }
+            """)
+        else:
+            self.pro_trader_btn.setText("👑 COPIE TRADERS PROS")
+            self.pro_trader_btn.setToolTip(
+                "Activer et configurer la copie des 4 traders professionnels\n"
+                "(Corentin, Benjamin, Romain, Nada FX)"
+            )
+            self.pro_trader_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff8f00, stop:1 #ff6f00);
+                    font-weight: bold;
+                    padding: 10px 14px;
+                    color: white;
+                    border-radius: 4px;
+                    border: 1px solid #ffd54f;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ffa000, stop:1 #ff8f00);
+                }
+            """)
 
 
     def on_trade_manager_timer(self):
@@ -1085,6 +1155,23 @@ class MainWindow(QMainWindow):
         """)
         self.backtest_btn.clicked.connect(self.open_backtest_dialog)
 
+        self.pro_trader_btn = QPushButton("👑 COPIE TRADERS PROS")
+        self.pro_trader_btn.setToolTip("Activer et configurer la copie des 4 traders professionnels\n(Corentin, Benjamin, Romain, Nada FX)")
+        self.pro_trader_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff8f00, stop:1 #ff6f00);
+                font-weight: bold;
+                padding: 10px 14px;
+                color: white;
+                border-radius: 4px;
+                border: 1px solid #ffd54f;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ffa000, stop:1 #ff8f00);
+            }
+        """)
+        self.pro_trader_btn.clicked.connect(self.open_pro_trader_dialog)
+
         self.settings_btn = QPushButton("⚙️")
         self.settings_btn.setToolTip("Paramètres")
         self.settings_btn.setStyleSheet("background-color: #555555; padding: 10px;")
@@ -1093,6 +1180,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(symbol_label)
         header_layout.addWidget(self.tier_badge)
         header_layout.addStretch()
+        header_layout.addWidget(self.pro_trader_btn)
         header_layout.addWidget(self.backtest_btn)
         header_layout.addWidget(self.memory_btn)
         header_layout.addWidget(self.autopilot_btn)

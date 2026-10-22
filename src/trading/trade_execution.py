@@ -34,6 +34,13 @@ class TradeExecutionEngine:
         decision = signal.get('decision', {})
         action = str(decision.get('action', '')).upper()
 
+        if decision.get('simulation_only'):
+            logger.info(
+                f"🧪 [SIMULATION PRO TRADER] Signal {decision.get('pro_trader', 'Pro')} pour {symbol} "
+                f"enregistré en simulation. Aucun ordre réel ou démo envoyé à MT5."
+            )
+            return None
+
         if not symbol or action not in ('BUY', 'SELL'):
             logger.error(f"Invalid signal: symbol={symbol} action={decision.get('action')}")
             return None
@@ -272,7 +279,10 @@ class TradeExecutionEngine:
             "tp": tp,
             "deviation": 20,
             "magic": 123456,
-            "comment": decision.get('order_comment') or ("CRT Pending Limit" if is_pending else "AI Assistant Trade"),
+            "comment": decision.get('order_comment') or (
+                f"FOCON_{decision.get('profile_id', 'PRO')[:7].upper()}" if decision.get('pro_trader')
+                else ("CRT Pending Limit" if is_pending else "AI Assistant Trade")
+            ),
             "type_time": mt5.ORDER_TIME_SPECIFIED if is_pending else mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
             "_snapshot": snapshot,
