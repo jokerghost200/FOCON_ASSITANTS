@@ -16,7 +16,7 @@ Modes disponibles :
 import logging
 from typing import Optional, Dict, Any
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QScrollArea,
     QWidget, QGroupBox, QMessageBox, QTabWidget, QAbstractItemView
@@ -38,8 +38,15 @@ class ProTraderCopyDialog(QDialog):
         super().__init__(parent)
         self.manager = profile_manager
         self.setWindowTitle("👑 FOCON — Copie de Stratégies Professionnelles (4 Traders Pros)")
-        self.setMinimumSize(850, 680)
-        self.resize(900, 720)
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            target_w = min(1000, max(720, int(avail.width() * 0.85)))
+            target_h = min(820, max(520, int(avail.height() * 0.85)))
+            self.resize(target_w, target_h)
+        else:
+            self.resize(880, 680)
+        self.setMinimumSize(660, 480)
 
         # Style sombre & élégant
         self.setStyleSheet("""
@@ -289,9 +296,24 @@ class ProTraderCopyDialog(QDialog):
         self.build_parameters_panel()
         tab_cfg_lay.addWidget(self.params_grp)
 
-        tabs.addTab(tab_config, "⚙️ Configuration de la Stratégie")
+        # --- Onglet 1 : Sélection & Paramétrage (Déroulant / Réactif) ---
+        scroll_config = QScrollArea()
+        scroll_config.setWidgetResizable(True)
+        scroll_config.setFrameShape(QFrame.NoFrame)
+        scroll_config.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_config.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_config.setStyleSheet("background: transparent;")
+        scroll_config.setWidget(tab_config)
+        tabs.addTab(scroll_config, "⚙️ Configuration de la Stratégie")
 
-        # --- Onglet 2 : Journal des Performances & Comparatif ---
+        # --- Onglet 2 : Journal des Performances & Comparatif (Déroulant / Réactif) ---
+        scroll_stats = QScrollArea()
+        scroll_stats.setWidgetResizable(True)
+        scroll_stats.setFrameShape(QFrame.NoFrame)
+        scroll_stats.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_stats.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_stats.setStyleSheet("background: transparent;")
+
         tab_stats = QWidget()
         tab_stats_lay = QVBoxLayout(tab_stats)
         tab_stats_lay.setSpacing(8)
@@ -306,6 +328,7 @@ class ProTraderCopyDialog(QDialog):
             "Trader Pro", "Style", "Statut", "Signaux", "Trades Démo", "Winrate", "PnL Total ($)"
         ])
         self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.stats_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.stats_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         tab_stats_lay.addWidget(self.stats_table)
@@ -315,7 +338,8 @@ class ProTraderCopyDialog(QDialog):
         self.refresh_stats_btn.clicked.connect(self.refresh_stats_table)
         tab_stats_lay.addWidget(self.refresh_stats_btn)
 
-        tabs.addTab(tab_stats, "📈 Performance & Comparatif")
+        scroll_stats.setWidget(tab_stats)
+        tabs.addTab(scroll_stats, "📈 Performance & Comparatif")
 
         main_layout.addWidget(tabs)
 

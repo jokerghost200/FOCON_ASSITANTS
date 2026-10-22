@@ -1,85 +1,209 @@
 <!doctype html>
 <html lang="fr">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Focon Assistant — Web</title>
-<link rel="stylesheet" href="../static/style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>FOCON Assistant — Intelligence de Trading & Copie Pro</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>Focon Assistant — Web</h1>
-  <span id="healthDot">●</span><span id="healthTxt">MT5 : …</span>
-  <span id="autoTxt">Autopilot : OFF</span>
-  <button id="btnScan">SCANNER LES MARCHES</button>
-  <button id="btnStop" class="danger">STOP</button>
-  <button id="btnAuto">AUTOPILOT : OFF</button>
-  <button id="btnPos">Positions</button>
-</header>
-<main>
-  <div>
-    <section>
-      <h2>Scan</h2>
-      <div id="scanStatus">En attente…</div>
-      <div id="signals"></div>
-    </section>
-    <section>
-      <h2>Positions ouvertes</h2>
-      <table><thead><tr>
-        <th>Ticket</th><th>Symbole</th><th>Type</th><th>Volume</th>
-        <th>Ouverture</th><th>SL</th><th>TP</th><th>Prix</th><th>Profit</th>
-      </tr></thead><tbody id="posBody"><tr><td colspan="9">—</td></tr></tbody></table>
-    </section>
-    <section>
-      <h2>Config</h2>
-      <div class="row">
-        <label>Risque % <input id="cfgRisk" type="number" step="0.1" min="0.1" max="100" style="width:70px"></label>
-        <label>Perte max % <input id="cfgLoss" type="number" step="0.5" min="0.1" max="100" style="width:70px"></label>
-        <label>Lot max <input id="cfgLot" type="number" step="0.01" min="0.01" style="width:70px"></label>
-        <label>Positions max <input id="cfgPos" type="number" step="1" min="1" max="20" style="width:60px"></label>
+  <header class="app-header">
+    <div class="header-brand">
+      <div class="brand-badge">⚡ FOCON</div>
+      <h1 class="brand-title">Assistant Trade</h1>
+    </div>
+
+    <div class="header-status">
+      <div class="status-pill status-mt5">
+        <span id="healthDot" class="dot">●</span>
+        <span id="healthTxt">MT5 : Connexion…</span>
       </div>
-      <div class="row">
-        <label>Mode <select id="cfgMode">
-          <option value="assist">assist</option>
-          <option value="semi-auto">semi-auto</option>
-          <option value="auto">auto</option>
-        </select></label>
-        <label>Timeframe <select id="cfgTf">
-          <option>M5</option><option>M15</option><option>H1</option><option>H4</option>
-        </select></label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Forex"> Forex</label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Crypto"> Crypto</label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Indices"> Indices</label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Metals"> Metals</label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Energies"> Energies</label>
-        <label style="font-size:12px"><input type="checkbox" class="mtype" value="Stocks"> Stocks</label>
-        <button id="btnCfg" class="success">Sauvegarder</button>
+      <div class="status-pill status-auto">
+        <span id="autoTxt">Autopilot : OFF</span>
       </div>
-    </section>
-  </div>
-  <div>
-    <section>
-      <h2>Assistant</h2>
-      <div id="chatBox"></div>
-      <div id="chatRow">
-        <input id="chatInput" placeholder="Ecris ton message…">
-        <button id="btnChat">Envoyer</button>
+      <div id="proTraderBadge" class="status-pill status-pro" title="Stratégie Pro Active">
+        👑 Pro : Inactif
       </div>
-      <div class="assistantTools">
-        <button id="btnVoice" title="Parler au conseiller">Parler</button>
-        <button id="btnAdvisor" title="Demander une proposition de reglages">Conseil reglages</button>
-        <label class="voiceToggle"><input id="voiceReplies" type="checkbox" checked> Reponse vocale</label>
-      </div>
-      <div id="voiceStatus" class="voiceStatus" aria-live="polite"></div>
-      <div id="proposalBox" class="proposalBox" hidden></div>
-    </section>
-    <section>
-      <h2>Compte</h2>
-      <div id="accountBox">—</div>
-    </section>
-  </div>
-</main>
-<script src="/static/app.js"></script>
+    </div>
+
+    <div class="header-actions">
+      <button id="btnScan" class="btn btn-primary" title="Lancer une analyse complète de marché">🔍 SCANNER</button>
+      <button id="btnAuto" class="btn btn-warning" title="Basculer le mode Autopilot">🤖 AUTOPILOT : OFF</button>
+      <button id="btnStop" class="btn btn-danger" title="Arrêt d'urgence">⛔ STOP</button>
+      <button id="btnPos" class="btn btn-secondary" title="Rafraîchir les positions">📊 Positions</button>
+    </div>
+  </header>
+
+  <main class="app-container">
+    <!-- COLONNE GAUCHE : MARCHÉS, SIGNAUX, POSITIONS, CONFIG -->
+    <div class="col-main">
+      <!-- Section Copie Traders Professionnels -->
+      <section class="card pro-trader-card">
+        <div class="card-header">
+          <h2>👑 Copie de Stratégies Professionnelles</h2>
+          <span class="card-subtitle">4 Traders Pros du Challenge</span>
+        </div>
+        <div class="pro-selector-grid">
+          <button class="pro-btn" data-trader="corentin">
+            <span class="pro-tag corentin">CORENTIN</span>
+            <span class="pro-sub">Order Flow · M15 FVG</span>
+          </button>
+          <button class="pro-btn" data-trader="benjamin">
+            <span class="pro-tag benjamin">BENJAMIN</span>
+            <span class="pro-sub">Scalp Open · Clusters</span>
+          </button>
+          <button class="pro-btn" data-trader="romain">
+            <span class="pro-tag romain">ROMAIN</span>
+            <span class="pro-sub">Price Action · Fibo 61.8%</span>
+          </button>
+          <button class="pro-btn" data-trader="nada">
+            <span class="pro-tag nada">NADA FX</span>
+            <span class="pro-sub">BMC · Retest 50-61.8%</span>
+          </button>
+          <button class="pro-btn pro-btn-off" data-trader="off">
+            <span class="pro-tag off">DÉSACTIVER</span>
+            <span class="pro-sub">Mode Standard</span>
+          </button>
+        </div>
+        <div id="proTraderInfo" class="pro-status-banner">
+          Stratégie active : <strong>Standard (FOCON Bot)</strong>
+        </div>
+      </section>
+
+      <!-- Section Scanner & Signaux -->
+      <section class="card">
+        <div class="card-header">
+          <h2>🔍 Opportunités & Signaux de Marché</h2>
+          <div id="scanStatus" class="status-indicator">En attente d'analyse…</div>
+        </div>
+        <div id="signals" class="signals-feed"></div>
+      </section>
+
+      <!-- Section Positions Ouvertes -->
+      <section class="card">
+        <div class="card-header">
+          <h2>📊 Positions Ouvertes en Direct</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Symbole</th>
+                <th>Type</th>
+                <th>Volume</th>
+                <th>Ouverture</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>Prix Actuel</th>
+                <th>Profit ($)</th>
+              </tr>
+            </thead>
+            <tbody id="posBody">
+              <tr><td colspan="9" class="empty-state">Aucune position ouverte actuellement.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section Configuration du Risque -->
+      <section class="card">
+        <div class="card-header">
+          <h2>⚙️ Paramètres du Risque & Filtres de Marché</h2>
+        </div>
+        <div class="config-grid">
+          <div class="form-group">
+            <label for="cfgRisk">Risque / Trade (%)</label>
+            <input id="cfgRisk" type="number" step="0.1" min="0.1" max="100">
+          </div>
+          <div class="form-group">
+            <label for="cfgLoss">Perte Max Jour (%)</label>
+            <input id="cfgLoss" type="number" step="0.5" min="0.1" max="100">
+          </div>
+          <div class="form-group">
+            <label for="cfgLot">Lot Global Max</label>
+            <input id="cfgLot" type="number" step="0.01" min="0.01">
+          </div>
+          <div class="form-group">
+            <label for="cfgPos">Positions Simultanées Max</label>
+            <input id="cfgPos" type="number" step="1" min="1" max="20">
+          </div>
+        </div>
+
+        <div class="config-grid-sub">
+          <div class="form-group">
+            <label for="cfgMode">Mode d'Automatisation</label>
+            <select id="cfgMode">
+              <option value="assist">Assisté (Conseil & Confirmation)</option>
+              <option value="semi-auto">Semi-Automatique</option>
+              <option value="auto">Automatique Total</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="cfgTf">Timeframe de Base</label>
+            <select id="cfgTf">
+              <option>M5</option>
+              <option>M15</option>
+              <option>H1</option>
+              <option>H4</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="markets-checklist">
+          <span class="checklist-title">Marchés Surveillés :</span>
+          <div class="checkbox-cluster">
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Forex"> Forex</label>
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Crypto"> Crypto</label>
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Indices"> Indices</label>
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Metals"> Métaux (Gold)</label>
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Energies"> Énergies (Pétrole)</label>
+            <label class="check-pill"><input type="checkbox" class="mtype" value="Stocks"> Actions</label>
+          </div>
+        </div>
+
+        <div class="config-actions">
+          <button id="btnCfg" class="btn btn-success">💾 Sauvegarder la Configuration</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- COLONNE DROITE : ASSISTANT IA, VOCAL, COMPTE -->
+    <div class="col-sidebar">
+      <!-- Section Assistant IA & Conseil Stratégique -->
+      <section class="card chat-card">
+        <div class="card-header">
+          <h2>💬 Conseiller Stratégique & IA</h2>
+          <span class="ai-badge">Deep Analysis</span>
+        </div>
+        <div id="chatBox" class="chat-viewport"></div>
+        <div id="chatRow" class="chat-input-row">
+          <input id="chatInput" placeholder="Posez une question ou demandez un conseil..." autocomplete="off">
+          <button id="btnChat" class="btn btn-send">➤</button>
+        </div>
+
+        <div class="assistantTools">
+          <button id="btnVoice" class="btn btn-tool" title="Parler au micro via reconnaissance vocale">🎙️ Parler</button>
+          <button id="btnAdvisor" class="btn btn-tool" title="Demander une proposition de réglages adaptée au compte">💡 Proposer Réglages</button>
+          <label class="voiceToggle"><input id="voiceReplies" type="checkbox" checked> 🔊 Réponse vocale</label>
+        </div>
+        <div id="voiceStatus" class="voiceStatus" aria-live="polite"></div>
+        <div id="proposalBox" class="proposalBox" hidden></div>
+      </section>
+
+      <!-- Section État du Compte MT5 -->
+      <section class="card account-card">
+        <div class="card-header">
+          <h2>💳 État du Compte MT5</h2>
+        </div>
+        <div id="accountBox" class="account-summary">—</div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>
-

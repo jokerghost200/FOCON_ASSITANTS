@@ -3,7 +3,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QLineEdit, QFrame, QMessageBox, QGroupBox,
     QScrollArea, QDialog, QCheckBox, QDoubleSpinBox, QSpinBox, QFormLayout, QTabWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QComboBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QComboBox,
+    QSplitter, QSizePolicy
 )
 import yaml
 import json
@@ -894,8 +895,21 @@ class MainWindow(QMainWindow):
 
         self._transcription_thread = None
 
-        self.setWindowTitle("🤖 FOCON ASSISTANT TRADE 1.1")                 
-        self.setMinimumSize(800, 600)
+        self.setWindowTitle("🤖 FOCON ASSISTANT TRADE 1.1")
+        # Calcul réactif des dimensions de la fenêtre selon la résolution de l'écran
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            init_w = min(1380, max(820, int(avail.width() * 0.88)))
+            init_h = min(880, max(560, int(avail.height() * 0.88)))
+            self.resize(init_w, init_h)
+            self.move(
+                avail.x() + max(0, (avail.width() - init_w) // 2),
+                avail.y() + max(0, (avail.height() - init_h) // 2),
+            )
+        else:
+            self.resize(1100, 750)
+        self.setMinimumSize(780, 520)
         self.init_ui()
 
         # Trade Manager Timer: surveille les positions ouvertes (TP/SL/Trailing)
@@ -1559,8 +1573,20 @@ class MainWindow(QMainWindow):
         self.positions_table.setHorizontalHeaderLabels(['Ticket', 'Symbole', 'Type', 'Volume', 'Ouverture', 'SL', 'TP', 'Prix Actuel', 'Profit'])
         self.positions_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.positions_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.positions_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.positions_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.positions_table.setStyleSheet("QTableWidget { background-color: #2D2D2D; color: white; } QHeaderView::section { background-color: #3D3D3D; font-weight: bold; }")
+        p_hdr = self.positions_table.horizontalHeader()
+        p_hdr.setSectionResizeMode(QHeaderView.Interactive)
+        p_hdr.setStretchLastSection(True)
+        p_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        p_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        p_hdr.setSectionResizeMode(8, QHeaderView.Stretch)
         positions_layout.addWidget(self.positions_table)
 
         # ── Tab 2b : Pendings (Order Blocks en attente) — nom modifiable ──
@@ -1580,17 +1606,24 @@ class MainWindow(QMainWindow):
         self.pendings_table = QTableWidget(0, 6)
         self.pendings_table.setHorizontalHeaderLabels(['Ticket', 'Symbole', 'Sens', 'Nom (modifiable)', 'Entrée', 'Statut'])
         self.pendings_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.pendings_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.pendings_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.pendings_table.setStyleSheet("QTableWidget { background-color: #1a2a4a; color: white; } QHeaderView::section { background-color: #24365e; font-weight: bold; }")
         self.pendings_table.setToolTip("Double-cliquez sur un nom pour le modifier.")
         self.pendings_table.cellChanged.connect(self.on_pending_name_edited)
+        p_hdr2 = self.pendings_table.horizontalHeader()
+        p_hdr2.setSectionResizeMode(QHeaderView.Interactive)
+        p_hdr2.setStretchLastSection(True)
+        p_hdr2.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        p_hdr2.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        p_hdr2.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        p_hdr2.setSectionResizeMode(3, QHeaderView.Stretch)
+        p_hdr2.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        p_hdr2.setSectionResizeMode(5, QHeaderView.Stretch)
         pendings_layout.addWidget(self.pendings_table)
         self.tabs.addTab(self.pendings_tab, "📌 Pendings (nommables)")
 
         self.tabs.addTab(self.positions_tab, "📊 Positions Ouvertes")
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        
-        main_layout.addWidget(self.tabs, stretch=2)
         
         # Chat Panel
         chat_group = QGroupBox("💬 Assistant")
@@ -1697,7 +1730,26 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.send_btn)
         chat_layout.addLayout(input_layout)
         
-        main_layout.addWidget(chat_group, stretch=1)
+        # Agencement réactif et redimensionnable entre Onglets et Chat via QSplitter
+        self.main_splitter = QSplitter(Qt.Vertical)
+        self.main_splitter.setObjectName("main_splitter")
+        self.main_splitter.addWidget(self.tabs)
+        self.main_splitter.addWidget(chat_group)
+        self.main_splitter.setStretchFactor(0, 3)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setStyleSheet("""
+            QSplitter#main_splitter::handle {
+                background-color: #212636;
+                height: 6px;
+                margin: 2px 0;
+                border-radius: 3px;
+            }
+            QSplitter#main_splitter::handle:hover {
+                background-color: #2962ff;
+            }
+        """)
+        main_layout.addWidget(self.main_splitter, stretch=1)
         
     def _cleanup_scanner_thread(self):
         """Détruit proprement l'ancien ScannerThread avant d'en créer un nouveau.

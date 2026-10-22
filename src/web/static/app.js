@@ -327,13 +327,56 @@
     };
   }
 
+  async function refreshProTraders() {
+    const res = await api("/api/pro-traders");
+    const badge = $("proTraderBadge");
+    const info = $("proTraderInfo");
+    if (!badge || !info) return;
+
+    if (res.ok && res.active_profile) {
+      const p = res.profiles && res.profiles[res.active_profile];
+      const name = p ? p.name : res.active_profile.toUpperCase();
+      const mode = (res.active_mode || "simulation").toUpperCase();
+      badge.textContent = `👑 ${name.split(" ")[0]} [${mode}]`;
+      badge.className = "status-pill status-pro active";
+      info.innerHTML = `Stratégie active : <strong>${esc(name)}</strong> (Mode: <strong>${esc(mode)}</strong>)`;
+      document.querySelectorAll(".pro-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.trader === res.active_profile);
+      });
+    } else {
+      badge.textContent = "👑 Pro : Inactif";
+      badge.className = "status-pill status-pro";
+      info.innerHTML = `Stratégie active : <strong>Standard (FOCON Bot)</strong>`;
+      document.querySelectorAll(".pro-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.trader === "off");
+      });
+    }
+  }
+
+  function setupProTraders() {
+    document.querySelectorAll(".pro-btn").forEach((btn) => {
+      btn.onclick = async () => {
+        const trader = btn.dataset.trader;
+        const profileId = trader === "off" ? null : trader;
+        await api("/api/pro-traders/activate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile_id: profileId, mode: "simulation" }),
+        });
+        refreshProTraders();
+      };
+    });
+  }
+
   $("btnChat").onclick = sendChat;
   $("btnAdvisor").onclick = () => askAdvisor();
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
 
   setupVoice();
-  loadConfig(); refreshHealth(); refreshAccount(); refreshPositions(); refreshAuto();
+  setupProTraders();
+  loadConfig(); refreshHealth(); refreshAccount(); refreshPositions(); refreshAuto(); refreshProTraders();
   setInterval(refreshPositions, 10000);
   setInterval(refreshHealth, 15000);
   setInterval(refreshAuto, 5000);
+  setInterval(refreshProTraders, 10000);
 })();
