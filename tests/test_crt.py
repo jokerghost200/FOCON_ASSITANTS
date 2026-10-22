@@ -502,6 +502,58 @@ class TestCRTDetector(unittest.TestCase):
         self.assertEqual(len(cancelled2), 1)
         self.assertIn("Objectif journalier", cancelled2[0]["reason"])
 
+    def test_trade_execution_simple_market_order_request(self):
+        """Vérifie la création correcte d'un ordre simple au marché (TRADE_ACTION_DEAL / exécution directe)."""
+        from src.trading.trade_execution import TradeExecutionEngine
+        import MetaTrader5 as mt5
+
+        mock_mt5 = MagicMock()
+        mock_mt5.get_symbol_info.return_value = {
+            "ask": 1.0968,
+            "bid": 1.0967,
+            "digits": 5,
+            "trade_tick_value": 1.0,
+            "trade_tick_size": 0.00001,
+            "trade_stops_level": 10,
+            "point": 0.00001,
+        }
+        mock_mt5.get_open_positions.return_value = []
+        mock_mt5.get_daily_profit.return_value = 0.0
+
+        engine = TradeExecutionEngine(
+            mt5_connector=mock_mt5,
+            mode="auto",
+            min_confidence=50,
+            min_reward_risk=1.5
+        )
+
+        signal = {
+            "symbol": "EURUSD",
+            "decision": {
+                "action": "BUY",
+                "is_pending": False,  # Ordre simple au marché
+                "order_type": "MARKET",
+                "entry": 1.0968,
+                "sl": 1.0940,
+                "tp": 1.1010,
+                "lot": 0.02,
+                "confidence": 80,
+                "reason": "CRT Simple Market Order",
+            },
+            "tech_features": {"atr_14": 0.0010},
+        }
+
+        req = engine.prepare_order_request(signal)
+        self.assertIsNotNone(req)
+        # Ordre simple direct au marché
+        self.assertEqual(req["action"], mt5.TRADE_ACTION_DEAL)
+        self.assertEqual(req["type"], mt5.ORDER_TYPE_BUY)
+        self.assertEqual(req["price"], 1.0968)
+        self.assertEqual(req["sl"], 1.0940)
+        self.assertEqual(req["tp"], 1.1010)
+        self.assertEqual(req["type_time"], mt5.ORDER_TIME_GTC)
+        self.assertNotIn("expiration", req)
+
 
 if __name__ == "__main__":
     unittest.main()

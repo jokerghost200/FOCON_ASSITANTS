@@ -34,6 +34,7 @@ crt:
   expiration_bars: 4
   risk_per_trade_pct: 0.25
   use_pending_orders: true
+  order_mode: "both"  # Options : "both" (ordres simples au marché + pending limits), "market" (ordres simples directs uniquement), "pending" (pending limits uniquement)
 risk_management:
   default_risk_percent: 2.0
   max_daily_loss_percent: 8.0

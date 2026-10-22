@@ -29,10 +29,12 @@ class AIOrchestrator:
         allowed_trade_direction: str = "BOTH",
         trade_memory=None,
         weights_engine=None,
+        config: dict = None,
     ):
         self.mt5 = mt5_connector
         self.market_data = market_data
         self.tech = tech_indicators
+        self.config = config or {}
         self.router = ai_router
         self.live_news_enabled = live_news_enabled
         self.order_block_scan_enabled = order_block_scan_enabled
@@ -464,17 +466,25 @@ class AIOrchestrator:
         crt_context = "Aucun setup CRT actif sur l'unité supérieure."
         if htf_df is not None and len(htf_df) >= 3:
             try:
-                # 1. Essai du modèle universel complet (Sweep + MSS + FVG sur LTF)
-                crt_setup = self.crt_detector.detect_smc_pending(
-                    df_htf=htf_df,
-                    df_ltf=df,
-                    atr_ltf=float(tech_features.get('atr_14') or 0.0006),
-                    spread=spread_price,
-                    min_rr=1.5,
-                    expiration_bars=4,
-                )
-                # 2. Fallback sur le modèle conservateur direct si pas de FVG LTF
-                if not crt_setup:
+                raw_cfg = getattr(self, 'config', {}) or {}
+                crt_cfg = raw_cfg.get('crt', {}) if isinstance(raw_cfg, dict) else {}
+                order_mode = str(crt_cfg.get('order_mode', 'both')).lower()
+                use_pending = crt_cfg.get('use_pending_orders', True) and order_mode != "market"
+                allow_market = order_mode in ("both", "market") or not use_pending
+
+                # 1. Modèle Pending Limit CRT + ICT/SMC (si autorisé par la configuration)
+                if use_pending:
+                    crt_setup = self.crt_detector.detect_smc_pending(
+                        df_htf=htf_df,
+                        df_ltf=df,
+                        atr_ltf=float(tech_features.get('atr_14') or 0.0006),
+                        spread=spread_price,
+                        min_rr=float(crt_cfg.get('min_rr', 1.5)),
+                        expiration_bars=int(crt_cfg.get('expiration_bars', 4)),
+                    )
+
+                # 2. Modèle Ordre Simple Direct au Marché (si pas de pending ou si mode marché autorisé)
+                if not crt_setup and allow_market:
                     crt_setup = self.crt_detector.detect(htf_df, atr=htf_atr, spread=spread_price)
 
                 if crt_setup:
@@ -775,11 +785,21 @@ class AIOrchestrator:
                     decision["tp1"] = matching_prop["tp1"]
                 if "tp2" in matching_prop:
                     decision["tp2"] = matching_prop["tp2"]
-                
+
+                # Prise en charge explicite des deux types d'ordres : Simples (DEAL) vs En attente (PENDING)
+                if matching_prop.get("is_pending"):
+                    decision["is_pending"] = True
+                    decision["order_type"] = matching_prop.get("order_type", "BUY_LIMIT" if decision["action"] == "BUY" else "SELL_LIMIT")
+                    decision["expiration_bars"] = matching_prop.get("expiration_bars", 4)
+                    decision["expiration_seconds"] = matching_prop.get("expiration_seconds", 3600)
+                else:
+                    decision["is_pending"] = False
+                    decision["order_type"] = "MARKET"
+
                 # ─── PHASE 3: MEMORY & PERFORMANCE ENGINE (EXPECTANCY) ───
                 if self.trade_memory:
                     import datetime
-                    current_hour = datetime.datetime.utcnow().hour
+                    current_hour = datetime.datetime.now(datetime.timezone.utc).hour
                     if 0 <= current_hour < 8:
                         session = "ASIA"
                     elif 8 <= current_hour < 13:
@@ -1282,14 +1302,26 @@ class AIOrchestrator:
                 point = float(sym_info.get('point', 0.00001))
                 spread_val = float(sym_info.get('spread', 0)) * point
 
-                crt_setup = self.crt_detector.detect_smc_pending(
-                    df_htf=htf_df,
-                    df_ltf=df_ltf,
-                    atr_ltf=atr_ltf,
-                    spread=spread_val,
-                    min_rr=1.5,
-                    expiration_bars=4,
-                )
+                raw_cfg = getattr(self, 'config', {}) or {}
+                crt_cfg = raw_cfg.get('crt', {}) if isinstance(raw_cfg, dict) else {}
+                order_mode = str(crt_cfg.get('order_mode', 'both')).lower()
+                use_pending = crt_cfg.get('use_pending_orders', True) and order_mode != "market"
+                allow_market = order_mode in ("both", "market") or not use_pending
+
+                crt_setup = None
+                if use_pending:
+                    crt_setup = self.crt_detector.detect_smc_pending(
+                        df_htf=htf_df,
+                        df_ltf=df_ltf,
+                        atr_ltf=atr_ltf,
+                        spread=spread_val,
+                        min_rr=float(crt_cfg.get('min_rr', 1.5)),
+                        expiration_bars=int(crt_cfg.get('expiration_bars', 4)),
+                    )
+
+                if not crt_setup and allow_market:
+                    crt_setup = self.crt_detector.detect(htf_df, atr=atr_ltf, spread=spread_val)
+
                 if not crt_setup:
                     continue
 
@@ -1301,25 +1333,45 @@ class AIOrchestrator:
 
                 is_cd, cd_reason = self.is_symbol_in_cooldown(symbol, crt_setup.direction)
                 if is_cd:
-                    logger.info(f"[CRT PENDING] {symbol}: Rejet {crt_setup.direction} — Symbole en cooldown: {cd_reason}")
+                    logger.info(f"[CRT SCAN] {symbol}: Rejet {crt_setup.direction} — Symbole en cooldown: {cd_reason}")
                     continue
+
+                is_p = getattr(crt_setup, 'is_pending', False)
+                if is_p:
+                    entry_p = crt_setup.entry_price
+                    sl_p = crt_setup.sl
+                    tp_p = crt_setup.tp
+                    o_type = crt_setup.order_type
+                    status_tag = "PENDING_CRT"
+                else:
+                    entry_p = float(sym_info.get('ask') if crt_setup.direction == 'BUY' else sym_info.get('bid'))
+                    sl_p = crt_setup.sl_raw
+                    tp_p = crt_setup.tp2
+                    o_type = "MARKET"
+                    status_tag = "MARKET_CRT"
+
+                reason_text = (
+                    crt_setup.reason
+                    if hasattr(crt_setup, 'reason') and crt_setup.reason
+                    else f"CRT {crt_setup.direction} direct market ({o_type}) sur {htf}"
+                )
 
                 decision = {
                     "action": crt_setup.direction,
                     "confidence": 85 if crt_setup.in_killzone else 80,
-                    "entry": crt_setup.entry_price,
-                    "sl": crt_setup.sl,
-                    "tp": crt_setup.tp,
+                    "entry": entry_p,
+                    "sl": sl_p,
+                    "tp": tp_p,
                     "tp1": crt_setup.tp1,
                     "tp2": crt_setup.tp2,
-                    "rr": crt_setup.rr,
-                    "order_type": crt_setup.order_type,
-                    "is_pending": True,
-                    "expiration_bars": crt_setup.expiration_bars,
-                    "expiration_seconds": crt_setup.expiration_seconds,
+                    "rr": getattr(crt_setup, 'rr', 2.0),
+                    "order_type": o_type,
+                    "is_pending": is_p,
+                    "expiration_bars": getattr(crt_setup, 'expiration_bars', 4),
+                    "expiration_seconds": getattr(crt_setup, 'expiration_seconds', 3600),
                     "in_killzone": crt_setup.in_killzone,
                     "killzone_name": crt_setup.killzone_name,
-                    "reason": crt_setup.reason,
+                    "reason": reason_text,
                 }
 
                 account_info = self.mt5.get_account_info()
@@ -1328,22 +1380,22 @@ class AIOrchestrator:
 
                 validation = self.risk.validate_proposal(decision, account_info, sym_info)
                 if not validation['valid']:
-                    logger.info(f"[CRT PENDING] {symbol}: Validation de risque échouée — {validation['reason']}")
+                    logger.info(f"[CRT SCAN] {symbol}: Validation de risque échouée — {validation['reason']}")
                     continue
 
                 results.append({
-                    "status": "PENDING_CRT",
+                    "status": status_tag,
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "decision": validation['proposal'],
                     "crt_data": crt_setup,
                     "htf": htf,
-                    "reason": crt_setup.reason,
+                    "reason": reason_text,
                 })
-                logger.info(f"✅ [CRT PENDING] {symbol}: Ordre limite {crt_setup.order_type} validé @ {crt_setup.entry_price}")
+                logger.info(f"✅ [{status_tag}] {symbol}: Ordre {o_type} validé @ {entry_p}")
 
             except Exception as _e:
-                logger.warning(f"[CRT PENDING] {symbol}: erreur — {_e}")
+                logger.warning(f"[CRT SCAN] {symbol}: erreur — {_e}")
 
         return results
 
