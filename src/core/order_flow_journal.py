@@ -25,8 +25,85 @@ class OrderFlowJournal:
     def __init__(self, log_dir: str = "logs"):
         self.log_dir = log_dir
         self.log_file = os.path.join(log_dir, "order_flow_signals.jsonl")
+        self.outcomes_file = os.path.join(log_dir, "order_flow_outcomes.jsonl")
         self._in_memory_records: List[Dict[str, Any]] = []
         os.makedirs(log_dir, exist_ok=True)
+        self._load_persisted_records()
+
+    def _load_persisted_records(self) -> None:
+        """
+        Recharge les signaux et les dénouements de trades persistés depuis le disque.
+        Garantit la survie des statistiques et de l'analyse A/B après un redémarrage du bot.
+        """
+        records_by_ticket: Dict[int, Dict[str, Any]] = {}
+        ordered_records: List[Dict[str, Any]] = []
+
+        # 1. Charger les signaux
+        if os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                            ordered_records.append(rec)
+                            ticket = rec.get("ticket")
+                            if ticket is not None:
+                                records_by_ticket[int(ticket)] = rec
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug(f"[OF Journal] Erreur lecture signaux: {e}")
+
+        # 2. Rejouer les dénouements réels de trades
+        if os.path.exists(self.outcomes_file):
+            try:
+                with open(self.outcomes_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            out = json.loads(line)
+                            ticket = out.get("ticket")
+                            if ticket is not None and int(ticket) in records_by_ticket:
+                                r = records_by_ticket[int(ticket)]
+                                r["pnl_usd"] = out.get("pnl_usd")
+                                r["outcome"] = out.get("outcome")
+                                r["exit_reason"] = out.get("exit_reason", "")
+                                r["rr_achieved"] = out.get("rr_achieved", 0.0)
+                            else:
+                                # Outcome sans signal initial trouvé (ex: trade antérieur)
+                                fallback_rec = {
+                                    "timestamp": out.get("timestamp", ""),
+                                    "ticket": ticket,
+                                    "symbol": "UNKNOWN",
+                                    "direction": "UNKNOWN",
+                                    "entry_price": 0.0,
+                                    "strategy": "EXTERNAL_OUTCOME",
+                                    "status": "CLOSED",
+                                    "notes": "Persisted outcome rehydrated",
+                                    "pnl_usd": out.get("pnl_usd"),
+                                    "outcome": out.get("outcome"),
+                                    "exit_reason": out.get("exit_reason", ""),
+                                    "rr_achieved": out.get("rr_achieved", 0.0),
+                                    "order_flow": {
+                                        "confirmed": False,
+                                        "score": 0.0,
+                                        "data_quality": "UNKNOWN",
+                                    }
+                                }
+                                ordered_records.append(fallback_rec)
+                                if ticket is not None:
+                                    records_by_ticket[int(ticket)] = fallback_rec
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug(f"[OF Journal] Erreur lecture outcomes: {e}")
+
+        self._in_memory_records = ordered_records
 
     def log_signal(
         self,
@@ -96,10 +173,12 @@ class OrderFlowJournal:
     ) -> bool:
         """
         Enregistre le dénouement réel d'un trade (PnL, R:R et cause de fermeture).
-        Permet l'évaluation empirique A/B de l'Order Flow sur les performances réelles.
+        Persiste immédiatement le résultat sur disque dans order_flow_outcomes.jsonl
+        pour permettre la persistance et les analyses A/B à long terme.
         """
         outcome_str = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "BREAK_EVEN"
         updated = False
+        target_record = None
 
         for r in reversed(self._in_memory_records):
             if r.get("ticket") == ticket:
@@ -108,7 +187,47 @@ class OrderFlowJournal:
                 r["exit_reason"] = str(exit_reason)
                 r["rr_achieved"] = round(float(rr_achieved), 2)
                 updated = True
+                target_record = r
                 break
+
+        # Si le ticket n'était pas dans la mémoire, on crée un enregistrement pour garder la trace
+        if not updated:
+            new_r = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticket": ticket,
+                "symbol": "UNKNOWN",
+                "direction": "UNKNOWN",
+                "entry_price": 0.0,
+                "strategy": "EXTERNAL_OUTCOME",
+                "status": "CLOSED",
+                "notes": f"Exit: {exit_reason}",
+                "pnl_usd": round(float(pnl_usd), 2),
+                "outcome": outcome_str,
+                "exit_reason": str(exit_reason),
+                "rr_achieved": round(float(rr_achieved), 2),
+                "order_flow": {
+                    "confirmed": False,
+                    "score": 0.0,
+                    "data_quality": "UNKNOWN",
+                }
+            }
+            self._in_memory_records.append(new_r)
+            updated = True
+
+        # Persistance disque JSONL de l'événement outcome
+        outcome_event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ticket": ticket,
+            "pnl_usd": round(float(pnl_usd), 2),
+            "outcome": outcome_str,
+            "exit_reason": str(exit_reason),
+            "rr_achieved": round(float(rr_achieved), 2),
+        }
+        try:
+            with open(self.outcomes_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(outcome_event, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error(f"[OF Journal] Échec écriture outcome persistant dans {self.outcomes_file}: {e}")
 
         return updated
 
@@ -124,9 +243,9 @@ class OrderFlowJournal:
         def _calc_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             if not records:
                 return {
-                    "count": 0, "wins": 0, "losses": 0,
-                    "win_rate": 0.0, "total_pnl": 0.0,
-                    "profit_factor": 0.0, "expectancy": 0.0,
+                    "count": 0, "trades": 0, "wins": 0, "losses": 0,
+                    "win_rate": 0.0, "win_rate_pct": 0.0, "total_pnl": 0.0,
+                    "total_pnl_usd": 0.0, "profit_factor": 0.0, "expectancy": 0.0,
                     "max_drawdown": 0.0,
                 }
 

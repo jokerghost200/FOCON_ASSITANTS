@@ -49,23 +49,46 @@ class TestRiskManager(unittest.TestCase):
         self.assertLessEqual(lot, 1.0)
         self.assertGreaterEqual(lot, 0.01)
 
-    def test_zero_sl_distance_returns_min_lot(self):
+    def test_zero_sl_distance_returns_zero_lot_and_fails_closed(self):
         lot, raw, risk_amt, loss_per_lot = self.risk.calculate_lot_size(
             capital=10000.0, risk_percent=1.0, entry_price=1.1000,
             sl_price=1.1000, contract_size=100000.0, tick_size=0.00001,
             tick_value=1.0, min_lot=0.01, max_lot=100.0, lot_step=0.01
         )
-        self.assertEqual(lot, 0.01)
+        self.assertEqual(lot, 0.0)
+        self.assertEqual(loss_per_lot, 0.0)
 
-    def test_zero_tick_value_returns_tuple(self):
-        # tick_value = 0 -> loss_per_lot <= 0 -> doit renvoyer un tuple, pas un float
+    def test_zero_tick_value_fails_closed(self):
+        # tick_value = 0 -> loss_per_lot <= 0 -> doit renvoyer 0.0 pour bloquer l'ordre
         result = self.risk.calculate_lot_size(
             capital=10000.0, risk_percent=1.0, entry_price=1.1000,
             sl_price=1.0900, contract_size=100000.0, tick_size=0.00001,
             tick_value=0.0, min_lot=0.01, max_lot=100.0, lot_step=0.01
         )
         self.assertIsInstance(result, tuple)
-        self.assertEqual(result[0], 0.01)
+        self.assertEqual(result[0], 0.0)
+        self.assertEqual(result[3], 0.0)
+
+    def test_fixed_lot_exceeding_capital_is_rejected(self):
+        # Fixed lot 1.2 sur compte de 500 $ avec SL de 50 pips (perte = 600 $ > capital disponible de 500 $)
+        risk_mgr = RiskManager(fixed_lot_size=1.2)
+        account = {"balance": 500.0, "margin_free": 500.0}
+        symbol = {
+            "name": "EURUSD", "volume_max": 100.0, "volume_min": 0.01,
+            "volume_step": 0.01, "trade_contract_size": 100000.0,
+            "trade_tick_size": 0.00001, "trade_tick_value": 1.0,
+            "trade_stops_level": 0, "point": 0.00001, "spread": 10,
+        }
+        proposal = {
+            "action": "BUY",
+            "entry": 1.1000,
+            "sl": 1.0950, # 50 pips -> 500 ticks * 1$ * 1.2 = 600 $
+            "tp": 1.1150,
+            "confidence": 80.0
+        }
+        res = risk_mgr.validate_proposal(proposal, account, symbol)
+        self.assertFalse(res["valid"])
+        self.assertIn("Lot fixe", res["reason"])
 
     def test_validate_proposal_missing_sl(self):
         account = {"balance": 10000.0, "margin_free": 10000.0}

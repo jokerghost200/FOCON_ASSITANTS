@@ -16,6 +16,7 @@ class MT5Connector:
     def __init__(self):
         self.connected = False
         self.state_manager = StateManager()
+        self._subscribed_books = set()
 
     def check_connection(self) -> bool:
         """Ping MT5. If disconnected, try to reconnect automatically."""
@@ -83,6 +84,7 @@ class MT5Connector:
         """Disconnects from the MetaTrader 5 terminal."""
         with MT5Connector._lock:
             if self.connected:
+                self.unsubscribe_all_market_books()
                 mt5.shutdown()
                 self.connected = False
                 logger.info("Disconnected from MT5")
@@ -252,21 +254,68 @@ class MT5Connector:
                 return None
             return ticks
 
-    def get_market_depth_book(self, symbol: str):
+    def subscribe_market_book(self, symbol: str) -> bool:
+        """
+        Souscrit durablement au carnet d'ordres L2 (DOM) de MT5 pour le symbole.
+        Maintient le flux ouvert sans libération intempestive, permettant
+        l'enregistrement d'un historique continu de profondeur (Heatmap).
+        """
+        if not self.check_symbol(symbol):
+            return False
+        with MT5Connector._lock:
+            if symbol in self._subscribed_books:
+                return True
+            if mt5.market_book_add(symbol):
+                self._subscribed_books.add(symbol)
+                logger.debug(f"[MT5 DOM] Souscription continue activée pour {symbol}")
+                return True
+            return False
+
+    def unsubscribe_market_book(self, symbol: str) -> bool:
+        """
+        Libère la souscription au carnet d'ordres L2 pour le symbole.
+        """
+        with MT5Connector._lock:
+            if symbol in self._subscribed_books:
+                mt5.market_book_release(symbol)
+                self._subscribed_books.discard(symbol)
+                logger.debug(f"[MT5 DOM] Souscription libérée pour {symbol}")
+                return True
+            return False
+
+    def unsubscribe_all_market_books(self) -> None:
+        """
+        Libère toutes les souscriptions aux carnets d'ordres actives.
+        """
+        with MT5Connector._lock:
+            for sym in list(self._subscribed_books):
+                try:
+                    mt5.market_book_release(sym)
+                except Exception:
+                    pass
+            self._subscribed_books.clear()
+
+    def get_market_depth_book(self, symbol: str, auto_release: bool = False):
         """
         Retrieves real-time Level 2 Market Depth (DOM) for the symbol if supported by broker.
+        Maintient la souscription active (auto_release=False par défaut) pour garantir
+        un flux continu de profondeur et alimenter l'historique de la Heatmap Bookmap.
         """
         if not self.check_symbol(symbol):
             return None
 
         with MT5Connector._lock:
-            if not mt5.market_book_add(symbol):
-                return None
-            try:
-                items = mt5.market_book_get(symbol)
-                return items
-            finally:
+            if symbol not in self._subscribed_books:
+                if not mt5.market_book_add(symbol):
+                    return None
+                if not auto_release:
+                    self._subscribed_books.add(symbol)
+
+            items = mt5.market_book_get(symbol)
+            if auto_release:
                 mt5.market_book_release(symbol)
+                self._subscribed_books.discard(symbol)
+            return items
 
     def order_check(self, symbol: str, action: str, volume: float, price: float, sl: float, tp: float):
         """

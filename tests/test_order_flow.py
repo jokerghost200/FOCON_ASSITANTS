@@ -577,12 +577,21 @@ class TestMarketDataDiagnostics:
         df_ticks.attrs["data_quality"] = "REAL_OBSERVED"
         collector.get_ticks_dataframe = MagicMock(return_value=df_ticks)
 
-        diag = collector.diagnose_market_data("EURUSD")
-        assert diag["order_flow_tier"] == "TIER_A_INSTITUTIONAL"
-        assert diag["tier"] == "TIER_A_INSTITUTIONAL"
-        assert diag["dom_available"] is True
-        assert diag["has_real_volume"] is True
-        assert diag["ticks_fresh"] is True
+        # Test 1 : Symbole de marché centralisé régulé (CME Euro FX Futures '6E')
+        diag_fut = collector.diagnose_market_data("6E")
+        assert diag_fut["order_flow_tier"] == "TIER_A_INSTITUTIONAL"
+        assert diag_fut["tier"] == "TIER_A_INSTITUTIONAL"
+        assert diag_fut["dom_available"] is True
+        assert diag_fut["has_real_volume"] is True
+        assert diag_fut["ticks_fresh"] is True
+        assert diag_fut["data_quality"] == "REAL_OBSERVED"
+
+        # Test 2 : Symbole Forex Spot OTC ('EURUSD') -> Décentralisé, ne doit JAMAIS être sur-estimé en TIER_A
+        diag_fx = collector.diagnose_market_data("EURUSD")
+        assert diag_fx["order_flow_tier"] == "TIER_B_FOREX_ECN"
+        assert diag_fx["is_spot_forex"] is True
+        assert diag_fx["data_quality"] == "ESTIMATED_QUOTE_RULE"
+        assert "Forex Spot OTC décentralisé" in diag_fx["recommendation"]
 
     def test_diagnose_market_data_forex_ecn(self):
         from unittest.mock import MagicMock
@@ -604,8 +613,6 @@ class TestMarketDataDiagnostics:
 
         diag = collector.diagnose_market_data("EURUSD")
         assert diag["order_flow_tier"] == "TIER_B_FOREX_ECN"
-        assert diag["dom_available"] is False
-        assert diag["ticks_fresh"] is True
         assert diag["dom_available"] is False
         assert diag["ticks_fresh"] is True
 
@@ -657,4 +664,62 @@ class TestABComparison:
 
             assert comparison["delta"]["pnl_difference_usd"] == 130.0
             assert "A/B Testing Quantitatif" in comparison["markdown_report"]
+
+    def test_journal_rehydration_after_restart(self):
+        """Vérifie que les signaux et dénouements de trades survivent à un redémarrage du bot."""
+        import tempfile
+        import os
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Session 1 : le bot enregistre un signal et un dénouement
+            journal1 = OrderFlowJournal(log_dir=tmp_dir)
+            of_conf = OrderFlowConfluence(symbol="EURUSD", is_confirmed=True, confluence_score=85.0)
+            journal1.log_signal("EURUSD", "BUY", 1.0850, "CRT_ORDER_FLOW", of_conf, "PENDING_CRT", ticket=777)
+            journal1.log_trade_outcome(ticket=777, pnl_usd=120.50, exit_reason="TP", rr_achieved=2.5)
+
+            # Vérifier que les fichiers existent sur disque
+            assert os.path.exists(journal1.log_file)
+            assert os.path.exists(journal1.outcomes_file)
+
+            # Session 2 : nouveau démarrage (nouvelle instance sans passer d'objets en mémoire)
+            journal2 = OrderFlowJournal(log_dir=tmp_dir)
+            assert len(journal2._in_memory_records) == 1
+            rehydrated = journal2._in_memory_records[0]
+            assert rehydrated["ticket"] == 777
+            assert rehydrated["pnl_usd"] == 120.50
+            assert rehydrated["outcome"] == "WIN"
+            assert rehydrated["exit_reason"] == "TP"
+            assert rehydrated["rr_achieved"] == 2.5
+
+            # Vérifier que les métriques A/B fonctionnent après redémarrage
+            ab = journal2.compare_ab_performance()
+            assert ab["status"] == "SUCCESS"
+            assert ab["group_b_crt_order_flow"]["trades"] == 1
+            assert ab["group_b_crt_order_flow"]["total_pnl_usd"] == 120.50
+
+    def test_dom_history_and_heatmap_matrix(self):
+        """Vérifie la collecte continue de l'historique DOM et la matrice Heatmap."""
+        from unittest.mock import MagicMock
+        from src.core.market_data import MarketDataEngine
+
+        mock_conn = MagicMock()
+        mock_conn.check_symbol.return_value = True
+        
+        # Simuler 2 snapshots DOM successifs avec des items MT5
+        mock_item1 = MagicMock(price=1.08500, volume=15.0, type=2, volume_real=0.0) # Buy
+        mock_item2 = MagicMock(price=1.08520, volume=20.0, type=1, volume_real=0.0) # Sell
+        mock_conn.get_market_depth_book.return_value = [mock_item1, mock_item2]
+
+        engine = MarketDataEngine(mock_conn)
+        s1 = engine.get_order_book_snapshot("EURUSD")
+        s2 = engine.get_order_book_snapshot("EURUSD")
+
+        assert s1["available"] is True
+        assert len(engine._dom_history) == 2
+
+        matrix = engine.get_dom_heatmap_matrix("EURUSD", limit=10)
+        assert matrix["available"] is True
+        assert matrix["snapshots_count"] == 2
+        assert len(matrix["timestamps"]) == 2
+        assert 1.08500 in matrix["price_levels"]
+        assert 1.08520 in matrix["price_levels"]
 

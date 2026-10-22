@@ -1,15 +1,67 @@
 import pandas as pd
-from typing import Optional
+from typing import Optional, List, Dict, Any
+from collections import deque
+import datetime
+import re
 from src.core.mt5_connector import MT5Connector
 from src.core.amd_detector import AMDEngine
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Liste des devises Forex majeures et mineures pour identification robuste du Spot FX OTC
+FOREX_CURRENCIES = {
+    "EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+    "SEK", "NOK", "SGD", "HKD", "ZAR", "TRY", "MXN", "PLN", "CNH"
+}
+
 class MarketDataEngine:
     def __init__(self, connector: MT5Connector):
         self.connector = connector
         self.amd_engine = AMDEngine(lookback_period=20)
+        self._dom_history: deque = deque(maxlen=600)  # Historique glissant DOM pour Heatmap Bookmap
+
+    def is_spot_forex_symbol(self, symbol: str) -> bool:
+        """
+        Détermine si le symbole est une paire de devises Forex Spot de gré à gré (OTC).
+        Les cotations Spot FX ne possèdent aucun carnet d'ordres ou ruban de transactions
+        centralisé au niveau mondial : les volumes sont des tick-counts ou des cotations ECN.
+        """
+        if not symbol:
+            return False
+        clean = re.sub(r'[^A-Za-z]', '', str(symbol)).upper()
+        # Supprime suffixes courants des courtiers (ex: EURUSD.m, EURUSD_i, EURUSDpro)
+        for sfx in ("MICRO", "MINI", "PRO", "ECN", "STP", "RAW", "ZERO", "C", "M", "I"):
+            if clean.endswith(sfx) and len(clean) > len(sfx) + 5:
+                clean = clean[:-len(sfx)]
+        if len(clean) == 6:
+            c1, c2 = clean[:3], clean[3:]
+            if c1 in FOREX_CURRENCIES and c2 in FOREX_CURRENCIES:
+                return True
+        return False
+
+    def classify_market_type(self, symbol: str) -> str:
+        """
+        Classe la microstructure du symbole :
+        - SPOT_FOREX : Décentralisé OTC (ticks de cotation, jamais de volume institutionnel consolidé)
+        - COMMODITY_CFD : Métaux / Énergie CFD (XAUUSD, WTI...)
+        - CRYPTO_CFD : CFD Crypto (BTCUSD, ETHUSD...)
+        - INDEX_CFD : Indices CFD (US30, NAS100, GER40...)
+        - CENTRALIZED_EXCHANGE : Futures régulés avec flux de transactions centralisé (CME, Eurex...)
+        """
+        sym = str(symbol).upper()
+        if self.is_spot_forex_symbol(sym):
+            return "SPOT_FOREX"
+        clean = re.sub(r'[^A-Za-z0-9]', '', sym)
+        if clean.startswith(("XAU", "XAG", "USO", "BRENT", "OIL")):
+            return "COMMODITY_CFD"
+        if clean.startswith(("BTC", "ETH", "SOL", "XRP", "BNB")):
+            return "CRYPTO_CFD"
+        if any(idx in clean for idx in ("US30", "NAS100", "SPX500", "GER40", "FRA40", "UK100", "DAX")):
+            return "INDEX_CFD"
+        if clean.startswith(("6E", "6B", "6J", "ES", "NQ", "YM", "CL", "GC")):
+            return "CENTRALIZED_EXCHANGE"
+        return "CFD_GENERAL"
 
     def get_dataframe(self, symbol: str, timeframe: str, num_bars: int = 700) -> Optional[pd.DataFrame]:
         """
@@ -55,7 +107,7 @@ class MarketDataEngine:
             'time': tick.get('time')
         }
 
-    def get_order_book_snapshot(self, symbol: str) -> dict:
+    def get_order_book_snapshot(self, symbol: str, record_history: bool = True) -> dict:
         """
         Retrieves a full Level 2 Order Book (DOM) snapshot with bid and ask price ladders.
         Returns:
@@ -98,8 +150,11 @@ class MarketDataEngine:
         sell_pressure = 100.0 - buy_pressure
         imbalance = (bids_volume - asks_volume) / total_vol  # -1.0 (100% asks) to +1.0 (100% bids)
 
-        return {
+        now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        snapshot = {
             "available": True,
+            "symbol": str(symbol).upper(),
+            "timestamp": now_ts,
             "bids": bids,
             "asks": asks,
             "best_bid": best_bid,
@@ -110,6 +165,60 @@ class MarketDataEngine:
             "imbalance_ratio": round(imbalance, 3),
             "buy_pressure": round(buy_pressure, 1),
             "sell_pressure": round(sell_pressure, 1),
+        }
+
+        if record_history:
+            self._dom_history.append({
+                "timestamp": now_ts,
+                "symbol": str(symbol).upper(),
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "spread": spread,
+                "bids": bids[:10],
+                "asks": asks[:10],
+                "bids_volume": round(bids_volume, 2),
+                "asks_volume": round(asks_volume, 2),
+                "imbalance_ratio": round(imbalance, 3),
+            })
+
+        return snapshot
+
+    def get_dom_history(self, symbol: Optional[str] = None, limit: int = 100) -> List[dict]:
+        """
+        Retourne l'historique chronologique des instantanés du carnet d'ordres.
+        Nécessaire pour construire la Heatmap de liquidité temporelle type Bookmap.
+        """
+        if symbol:
+            sym_clean = str(symbol).upper()
+            filtered = [s for s in self._dom_history if s.get("symbol") == sym_clean]
+            return filtered[-limit:]
+        return list(self._dom_history)[-limit:]
+
+    def get_dom_heatmap_matrix(self, symbol: Optional[str] = None, limit: int = 50) -> dict:
+        """
+        Génère une matrice temporelle de distribution de liquidité prête pour affichage Heatmap :
+        permet d'observer les concentrations d'ordres passifs, les absorptions et le spoofing.
+        """
+        history = self.get_dom_history(symbol=symbol, limit=limit)
+        if not history:
+            return {"available": False, "reason": "Aucun historique DOM enregistré pour ce symbole"}
+
+        timestamps = [h["timestamp"] for h in history]
+        all_prices = set()
+        for h in history:
+            for b in h.get("bids", []):
+                all_prices.add(b["price"])
+            for a in h.get("asks", []):
+                all_prices.add(a["price"])
+
+        sorted_prices = sorted(list(all_prices))
+        return {
+            "available": True,
+            "symbol": str(symbol or "ALL").upper(),
+            "snapshots_count": len(history),
+            "timestamps": timestamps,
+            "price_levels": sorted_prices,
+            "history": history,
         }
 
     def get_market_depth(self, symbol: str) -> dict:
@@ -213,27 +322,53 @@ class MarketDataEngine:
         df['delta'] = deltas
 
         # ── Inspection de la Qualité et de la Fraîcheur des Données ──
+        is_spot_fx = self.is_spot_forex_symbol(symbol)
+        market_type = self.classify_market_type(symbol)
         has_real_volume = 'volume_real' in df.columns and (df['volume_real'] > 0).any()
         flags_count = sum(1 for f in flags_col if (int(f) & (FLAG_BUY | FLAG_SELL)) != 0)
         real_flags_ratio = flags_count / len(df) if len(df) > 0 else 0.0
 
         stale_seconds = 0.0
         if 'time' in df.columns and len(df) > 0:
-            import datetime
             now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
             last_ts = float(df['time'].iloc[-1])
             stale_seconds = max(0.0, now_ts - last_ts)
 
+        # 1. Statut des flags d'agressivité
+        if real_flags_ratio > 0.8 and not is_spot_fx and has_real_volume:
+            flags_status = "CENTRALIZED_FLAGS"
+        elif real_flags_ratio > 0:
+            flags_status = "BROKER_FLAGS"
+        else:
+            flags_status = "NO_FLAGS"
+
+        # 2. Méthode d'estimation du côté agressif
+        if flags_status == "CENTRALIZED_FLAGS":
+            estimation_method = "CENTRALIZED_TAPE"
+        elif flags_status == "BROKER_FLAGS" and real_flags_ratio > 0.5:
+            estimation_method = "BROKER_FLAGS_ESTIMATED"
+        else:
+            estimation_method = "LEE_READY_QUOTE_RULE"
+
+        # 3. Qualification stricte de la qualité des données
+        # Pour EURUSD et tout le Spot FX OTC décentralisé, ne JAMAIS assimiler
+        # des ticks de cotation à des transactions institutionnelles centralisées.
         if stale_seconds > 300:  # plus de 5 minutes sans nouveau tick
             data_quality = "DEGRADED_STALE"
-        elif real_flags_ratio > 0.5:
+        elif is_spot_fx or market_type != "CENTRALIZED_EXCHANGE" or not has_real_volume:
+            data_quality = "ESTIMATED_QUOTE_RULE"
+        elif has_real_volume and real_flags_ratio > 0.8:
             data_quality = "REAL_OBSERVED"
         else:
             data_quality = "ESTIMATED_QUOTE_RULE"
 
         df.attrs['data_quality'] = data_quality
+        df.attrs['market_type'] = market_type
+        df.attrs['is_spot_forex'] = is_spot_fx
         df.attrs['has_real_volume'] = has_real_volume
         df.attrs['real_flags_ratio'] = round(real_flags_ratio, 3)
+        df.attrs['flags_status'] = flags_status
+        df.attrs['estimation_method'] = estimation_method
         df.attrs['stale_seconds'] = round(stale_seconds, 1)
         df.attrs['is_synthetic'] = False
 
@@ -246,10 +381,14 @@ class MarketDataEngine:
         Permet de vérifier avant trading réel si le symbole supporte le carnet L2
         et si les volumes sont réels ou estimés.
         """
-        import datetime
+        is_spot_fx = self.is_spot_forex_symbol(symbol)
+        market_type = self.classify_market_type(symbol)
+
         report = {
             "symbol": str(symbol).upper(),
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "market_type": market_type,
+            "is_spot_forex": is_spot_fx,
             "market_open": False,
             "dom_available": False,
             "dom_levels_count": 0,
@@ -257,6 +396,8 @@ class MarketDataEngine:
             "ticks_count": 0,
             "has_real_volume": False,
             "real_flags_ratio": 0.0,
+            "flags_status": "NO_FLAGS",
+            "estimation_method": "LEE_READY_QUOTE_RULE",
             "stale_seconds": 0.0,
             "order_flow_tier": "TIER_C",
             "recommendation": "",
@@ -288,36 +429,50 @@ class MarketDataEngine:
             report["ticks_count"] = len(ticks_df)
             report["has_real_volume"] = bool(ticks_df.attrs.get("has_real_volume", False))
             report["real_flags_ratio"] = float(ticks_df.attrs.get("real_flags_ratio", 0.0))
+            report["flags_status"] = str(ticks_df.attrs.get("flags_status", "NO_FLAGS"))
+            report["estimation_method"] = str(ticks_df.attrs.get("estimation_method", "LEE_READY_QUOTE_RULE"))
             report["stale_seconds"] = float(ticks_df.attrs.get("stale_seconds", 0.0))
 
             if report["stale_seconds"] > 180:
                 report["details"].append(f"Flux de ticks périmé ({report['stale_seconds']:.0f}s depuis le dernier tick).")
-            elif report["has_real_volume"] and report["real_flags_ratio"] > 0.5:
-                report["details"].append(f"Ticks réels avec flags d'agressivité ({report['real_flags_ratio']*100:.0f}% de flags réels).")
+            elif is_spot_fx:
+                report["details"].append("Forex Spot OTC décentralisé : transactions réelles non centralisées, ticks de cotation estimés via Quote Rule.")
+            elif report["has_real_volume"] and report["real_flags_ratio"] > 0.8:
+                report["details"].append(f"Flux centralisé vérifié : {report['real_flags_ratio']*100:.0f}% de flags d'agressivité réels et volumes contrats.")
             else:
-                report["details"].append("Ticks FX sans volume réel : côté inféré via Quote Rule / Lee-Ready.")
+                report["details"].append("Ticks CFD / Quote Rule sans volume centralisé consolidé.")
         else:
             report["ticks_available"] = False
             report["details"].append("Aucun tick retourné par MT5.")
 
         # 4. Classification du Palier Order Flow
-        if report["dom_available"] and report["has_real_volume"] and report["real_flags_ratio"] > 0.5:
+        # Pour le Forex Spot OTC (EURUSD...), la cotation est décentralisée :
+        # Pas de carnet central mondial ni de ruban consolidé. TIER_A est réservé aux Futures régulés.
+        if is_spot_fx:
+            if report["ticks_available"] and report["stale_seconds"] <= 180:
+                report["order_flow_tier"] = "TIER_B_FOREX_ECN"
+                report["data_quality"] = "ESTIMATED_QUOTE_RULE"
+                report["recommendation"] = "Forex Spot OTC décentralisé : CVD pondéré à 65% et Volume Profile de cotation. DOM L2 indicatif broker."
+            else:
+                report["order_flow_tier"] = "TIER_C_LIMITED"
+                report["data_quality"] = "DEGRADED_STALE"
+                report["recommendation"] = "Flux Spot Forex insuffisant ou périmé : privilégier la stratégie CRT pure sans filtrage Order Flow."
+        elif report["dom_available"] and report["has_real_volume"] and report["real_flags_ratio"] > 0.8 and market_type == "CENTRALIZED_EXCHANGE":
             report["order_flow_tier"] = "TIER_A_INSTITUTIONAL"
-            report["recommendation"] = "Idéal pour Order Flow complet (DOM Murs, CVD réel, Footprint institutionnel)."
+            report["data_quality"] = "REAL_OBSERVED"
+            report["recommendation"] = "Marché centralisé régulé : idéal pour Order Flow complet (DOM Murs, CVD réel, Footprint institutionnel)."
         elif report["ticks_available"] and report["stale_seconds"] <= 180:
             report["order_flow_tier"] = "TIER_B_FOREX_ECN"
-            report["recommendation"] = "Order Flow estimé (Volume Profile structurel et CVD modéré à 65% sans DOM L2)."
+            report["data_quality"] = "ESTIMATED_QUOTE_RULE"
+            report["recommendation"] = "Order Flow estimé (Volume Profile structurel et CVD modéré à 65% sans flux centralisé)."
         else:
             report["order_flow_tier"] = "TIER_C_LIMITED"
+            report["data_quality"] = "DEGRADED_STALE"
             report["recommendation"] = "Flux insuffisant : privilégier la stratégie CRT pure sans filtrage Order Flow."
 
         report["tier"] = report["order_flow_tier"]
         report["dom_levels"] = report["dom_levels_count"]
         report["ticks_fresh"] = bool(report["ticks_available"] and report["stale_seconds"] <= 180)
-        report["data_quality"] = (
-            "REAL_OBSERVED" if report["order_flow_tier"] == "TIER_A_INSTITUTIONAL"
-            else ("ESTIMATED_QUOTE_RULE" if report["order_flow_tier"] == "TIER_B_FOREX_ECN" else "DEGRADED_STALE")
-        )
 
         return report
 

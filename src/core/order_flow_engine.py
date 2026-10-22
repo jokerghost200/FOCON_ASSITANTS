@@ -94,6 +94,8 @@ class OrderFlowConfluence:
     summary_badge: str = ""
     # ── Métadonnées de Qualité & Fiabilité des Données ──
     data_quality: str = "ESTIMATED_QUOTE_RULE"   # "REAL_OBSERVED", "ESTIMATED_QUOTE_RULE", "DEGRADED_STALE", "UNAVAILABLE"
+    market_type: str = "SPOT_FOREX"              # "SPOT_FOREX", "COMMODITY_CFD", "CENTRALIZED_EXCHANGE", etc.
+    estimation_method: str = "LEE_READY_QUOTE_RULE" # "CENTRALIZED_TAPE", "BROKER_FLAGS_ESTIMATED", "LEE_READY_QUOTE_RULE"
     is_dom_available: bool = False               # True si carnet L2 fourni par le courtier
     is_real_volume: bool = False                 # True si volume réel en contrats (pas seulement tick count)
     is_synthetic: bool = False                   # True si ticks synthétisés à partir de bougies
@@ -590,13 +592,18 @@ class OrderFlowEngine:
         fp_confirmed = False
 
         # ── A. Inspection de la Qualité et de la Fraîcheur des Données ──
+        # Inspection de la qualité des données et distinction Spot Forex OTC vs Centralisé
         data_quality = "UNAVAILABLE"
         has_real_vol = False
         is_synthetic = False
         stale_sec = 0.0
+        market_type = "SPOT_FOREX"
+        estimation_method = "LEE_READY_QUOTE_RULE"
 
         if ticks_df is not None and not ticks_df.empty:
             data_quality = ticks_df.attrs.get("data_quality", "ESTIMATED_QUOTE_RULE")
+            market_type = ticks_df.attrs.get("market_type", "SPOT_FOREX")
+            estimation_method = ticks_df.attrs.get("estimation_method", "LEE_READY_QUOTE_RULE")
             has_real_vol = bool(ticks_df.attrs.get("has_real_volume", False))
             is_synthetic = bool(ticks_df.attrs.get("is_synthetic", False))
             stale_sec = float(ticks_df.attrs.get("stale_seconds", 0.0))
@@ -610,12 +617,8 @@ class OrderFlowEngine:
                     stale_sec = max(0.0, now_ts - float(ticks_df['time'].iloc[-1]))
                     if stale_sec > 180:
                         data_quality = "DEGRADED_STALE"
-                    elif has_real_vol:
-                        data_quality = "REAL_OBSERVED"
                     else:
                         data_quality = "ESTIMATED_QUOTE_RULE"
-                elif has_real_vol:
-                    data_quality = "REAL_OBSERVED"
                 else:
                     data_quality = "ESTIMATED_QUOTE_RULE"
 
@@ -626,10 +629,13 @@ class OrderFlowEngine:
             details.append(f"⚠️ Données ticks périmées ({stale_sec:.0f}s sans tick) : confirmation verrouillée")
         elif data_quality == "ESTIMATED_QUOTE_RULE":
             damping = 0.65  # Damping 35% sur ticks estimés pour éviter le sur-ajustement
-            details.append("ℹ️ Ticks estimés (Quote Rule / sans volume réel) : pondération modérée 65%")
+            if market_type == "SPOT_FOREX":
+                details.append("ℹ️ Forex Spot OTC décentralisé : pas de ruban mondial consolidé, flux estimé (Quote Rule), pondération 65%")
+            else:
+                details.append("ℹ️ Ticks estimés (Quote Rule / sans volume réel consolidé) : pondération modérée 65%")
         elif data_quality == "REAL_OBSERVED":
             damping = 1.0
-            details.append("✅ Flux de transactions observé (volumes réels et flags d'agressivité)")
+            details.append("✅ Marché centralisé régulé : flux de transactions vérifié (volumes réels et flags d'agressivité)")
 
         if is_synthetic:
             details.append("⚠️ Ticks synthétiques de test : simulation sans garantie de rentabilité réelle")
@@ -799,6 +805,8 @@ class OrderFlowEngine:
             details=details,
             summary_badge=badge,
             data_quality=data_quality,
+            market_type=market_type,
+            estimation_method=estimation_method,
             is_dom_available=is_dom_available,
             is_real_volume=has_real_vol,
             is_synthetic=is_synthetic,

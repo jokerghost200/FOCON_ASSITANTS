@@ -1450,9 +1450,11 @@ class AIOrchestrator:
                 else:
                     conf = base_conf
 
+                crt_risk_pct = float(crt_cfg.get('risk_per_trade_pct', getattr(self.risk, 'default_risk_percent', 1.0)))
                 decision = {
                     "action": crt_setup.direction,
                     "confidence": conf,
+                    "risk_percent": crt_risk_pct,
                     "entry": entry_p,
                     "sl": sl_p,
                     "tp": tp_p,

@@ -197,12 +197,12 @@ class RiskManager:
             # Absolute price difference between entry and SL
             sl_distance = abs(entry_price - sl_price)
             if sl_distance <= 0:
-                logger.error("Stop Loss distance must be greater than 0")
-                return min_lot, min_lot, 0.0, 0.0
+                logger.error("Stop Loss distance must be strictly greater than 0. Cannot compute lot size.")
+                return 0.0, 0.0, 0.0, 0.0
 
             if not tick_size or tick_size <= 0:
                 logger.error(f"Invalid tick_size ({tick_size}). Cannot compute lot size.")
-                return min_lot, min_lot, 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
             
             # Calculate distance in ticks
             ticks = sl_distance / tick_size
@@ -212,8 +212,8 @@ class RiskManager:
             loss_per_lot = ticks * tick_value
             
             if loss_per_lot <= 0:
-                logger.error("Loss per lot calculated to 0 or less.")
-                return min_lot, min_lot, 0.0, 0.0
+                logger.error(f"Loss per lot calculated to <= 0 ({loss_per_lot}). Cannot compute lot size.")
+                return 0.0, 0.0, 0.0, 0.0
                 
             # Desired lot size
             raw_lot = risk_amount / loss_per_lot
@@ -250,7 +250,7 @@ class RiskManager:
             
         except Exception as e:
             logger.error(f"Error calculating lot size: {e}")
-            return min_lot, min_lot, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0
 
     def validate_proposal(self, proposal: dict, account_info: dict, symbol_info: dict) -> dict:
         """
@@ -414,6 +414,17 @@ class RiskManager:
             lot_step=lot_step
         )
         
+        # --- VÉRIFICATION CRITIQUE : ÉCHEC DU CALCUL DE LOT ---
+        if lot <= 0.0 or loss_per_lot <= 0.0:
+            return {
+                "valid": False,
+                "reason": (
+                    f"Calcul du risque invalide : lot nul ou perte par lot indéterminée "
+                    f"(lot={lot}, loss_per_lot={loss_per_lot}). "
+                    f"Distance SL nulle ou métriques de tick broker corrompues. Ordre bloqué pour protection."
+                )
+            }
+
         # --- NEW BROKER & ACTUAL RISK CHECKS ---
         effective_max = min(max_lot, self.global_max_lot)
         if raw_lot > effective_max:
@@ -451,8 +462,6 @@ class RiskManager:
         if not is_fixed_lot and actual_risk_amount > allowed_risk_amount * 1.05 and lot > min_lot: # Allow tiny 5% rounding margin
             # Only fail if the lot is bigger than min_lot and risk is still too high
             return {"valid": False, "reason": f"Actual risk (${actual_risk_amount:.2f}) exceeds allowed risk (${allowed_risk_amount:.2f})"}
-        elif is_fixed_lot:
-            logger.info(f"🎯 [Fixed Lot Override] Volume fixé par l'utilisateur : {lot} lot(s). Risque calculé : ${actual_risk_amount:.2f}.")
         # ---------------------------------------
         
         # --- NEW MARGIN CHECK ---
@@ -506,6 +515,20 @@ class RiskManager:
                     lot = round(lot, decimals)
         # ------------------------
         
+        # --- CONTRÔLE DE RISQUE ULTIME SUR VOLUME FINAL (FIXE OU AJUSTÉ) ---
+        final_risk_amount = lot * loss_per_lot
+        if is_fixed_lot:
+            # Sécurité absolue : un volume fixe ne doit JAMAIS dépasser le capital disponible du compte
+            if capital > 0 and final_risk_amount >= capital:
+                return {
+                    "valid": False,
+                    "reason": (
+                        f"Lot fixe ({lot}) rejeté : le risque monétaire encouru (${final_risk_amount:.2f}) "
+                        f"dépasse l'intégralité du capital disponible (${capital:.2f}). Ordre bloqué pour protection."
+                    )
+                }
+            logger.info(f"🎯 [Fixed Lot Override] Volume effectif : {lot} lot(s). Risque calculé : ${final_risk_amount:.2f}.")
+
         digits = int(symbol_info.get('digits', 5) or 5)
         proposal['entry'] = round(entry, digits)
         proposal['sl'] = round(sl, digits)
