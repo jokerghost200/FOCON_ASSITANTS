@@ -1,19 +1,22 @@
 # STRATÉGIE AUTOMATIQUE · GUIDE UNIVERSEL
-## Pending Orders MT5 : CRT + ICT/SMC (Balayage de liquidité, MSS et entrée sur FVG)
+## Pending Orders MT5
+### CRT + ICT/SMC : balayage de liquidité, MSS et entrée sur FVG
 
-Guide explicatif et détaillé, applicable à n'importe quel actif et timeframe : règles de détection, calcul des prix d'entrée, stop-loss, take-profit, expiration des ordres, gestion du risque, automatisation MetaTrader 5 et protocole de backtest en Python. EURUSD en M15 sert d'exemple chiffré.
+Guide explicatif et détaillé, applicable à n'importe quel actif et timeframe : règles de détection, calcul des prix d'entrée, stop-loss, take-profit, expiration des ordres, gestion du risque, automatisation MetaTrader 5 et protocole de backtest en Python. EURUSD en M15 sert uniquement d'exemple chiffré.
 
 | Élément | Choix retenu |
 | :--- | :--- |
 | **Actif** | Configurable (EURUSD, XAUUSD, GBPUSD, indices…). EURUSD sert d'exemple |
-| **Timeframes** | HTF (contexte) et LTF (entrée) configurables. Exemple : H1 + M15 (ou H4 + M15) |
+| **Timeframes** | HTF (contexte) et LTF (entrée) configurables. Exemple : H1 + M15 |
 | **Approche** | CRT + ICT/SMC (sweep, MSS, FVG) |
 | **Mode** | Automatique : le bot place et gère les ordres |
 | **Type d'ordre** | BUY LIMIT / SELL LIMIT avec expiration |
 | **Plateforme** | MetaTrader 5 piloté par Python |
 
+> [!CAUTION]
 > **Avertissement important**  
-> Cette stratégie est une hypothèse à tester, pas un système dont la rentabilité est garantie. Aucun backtest ne garantit les résultats futurs. Ne passer en réel qu'après : tests unitaires, backtest net de coûts, test hors échantillon, puis plusieurs semaines de compte démo.
+> Cette stratégie est une hypothèse à tester, pas un système dont la rentabilité est garantie. Aucun backtest ne garantit les résultats futurs.  
+> Ne passe en réel qu'après : tests unitaires, backtest net de coûts, test hors échantillon, puis plusieurs semaines de compte démo.
 
 ---
 
@@ -45,6 +48,9 @@ L'idée est de ne jamais placer un pending order « au hasard ». Chaque ordre d
 **La logique en une phrase :**  
 Le prix balaie une liquidité évidente (le plus haut ou le plus bas d'un range de référence HTF), réintègre le range, casse la structure LTF dans l'autre sens (MSS), laisse un déséquilibre (FVG), puis on attend un retour dans ce FVG avec un ordre LIMIT.
 
+### Stratégie générique
+Le document est écrit avec deux timeframes génériques : HTF (contexte, range CRT) et LTF (entrée). La logique ne dépend ni d'un actif ni d'un timeframe précis. EURUSD H1/M15 n'est utilisé que comme exemple chiffré ; la section 11 explique comment adapter les paramètres à un autre actif ou à un autre style.
+
 ### 1.1 Les quatre couches de la stratégie
 | Couche | Rôle | Sortie |
 | :--- | :--- | :--- |
@@ -53,23 +59,26 @@ Le prix balaie une liquidité évidente (le plus haut ou le plus bas d'un range 
 | **3. Validation** | Calcul entrée, SL, TP, ratio risque/rendement, taille de position | Setup validé ou rejeté (avec motif) |
 | **4. Exécution MT5** | Pending order, suivi, expiration ou annulation, journalisation | Ordre actif, position ou setup clos |
 
+> [!IMPORTANT]
 > **Règle fondamentale : bougies clôturées uniquement**  
-> Le bot confirme un sweep, un MSS ou un FVG uniquement sur des bougies clôturées. Il ne doit jamais anticiper un signal à partir d'une bougie encore en formation : c'est la première source de faux signaux et de fuite de données futures (lookahead bias).
+> Le bot confirme un sweep, un MSS ou un FVG uniquement sur des bougies clôturées. Il ne doit jamais anticiper un signal à partir d'une bougie encore en formation : c'est la première source de faux backtests (fuite de données futures).
 
 ---
 
 ## 2. Les concepts à maîtriser
 | Concept | Définition opérationnelle (programmable) |
 | :--- | :--- |
-| **HTF / LTF** | HTF = timeframe de contexte (range CRT). LTF = timeframe d'entrée (sweep, MSS, FVG). Ex : HTF = H1, LTF = M15. |
-| **CRT (Candle Range Theory)** | Le plus haut $H$ et le plus bas $L$ de la dernière bougie HTF clôturée forment le range de référence. $M = (H + L) / 2$ est l'équilibre (50%). |
-| **Liquidité** | Zones d'ordres stop concentrés : $H$ et $L$ du range HTF. |
-| **Sweep (balayage)** | Dépassement de $H$ ou $L$ puis clôture LTF de nouveau à l'intérieur du range (réintégration). |
-| **Swing high / Swing low** | Sommet/creux local LTF : bougie dont le High (ou Low) est supérieur (ou inférieur) aux 2 bougies précédentes et aux 2 suivantes (`swing_lookback = 2`). |
-| **MSS (Market Structure Shift)** | Clôture LTF au-dessus du dernier swing high confirmé (MSS haussier) ou sous le dernier swing low confirmé (MSS baissier). |
-| **FVG (Fair Value Gap)** | Sur 3 bougies consécutives : Haussier si $\text{Low}(B_3) > \text{High}(B_1)$ ; Baissier si $\text{High}(B_3) < \text{Low}(B_1)$. |
-| **ATR(14)** | Average True Range 14 périodes LTF pour calibrer la marge de sécurité du stop. |
-| **R** | Distance unitaire de risque : $|\text{Entrée} - \text{SL}|$. |
+| **HTF / LTF** | HTF = timeframe de contexte, qui fournit le range CRT. LTF = timeframe d'entrée, sur lequel on détecte sweep, MSS et FVG. Exemple de ce document : HTF = H1, LTF = M15. |
+| **CRT (Candle Range Theory)** | On prend le plus haut $H$ et le plus bas $L$ de la dernière bougie HTF clôturée comme range de référence. $M = (H + L) / 2$ est le milieu du range. |
+| **Liquidité** | Zone où se concentrent des ordres stop : ici le plus haut $H$ et le plus bas $L$ du range HTF de référence. |
+| **Sweep (balayage)** | Le prix dépasse $H$ ou $L$ (mèche ou clôture), puis une bougie LTF clôture de nouveau à l'intérieur du range : c'est la réintégration. |
+| **Swing high / swing low** | Sommet ou creux local LTF. Définition de départ : une bougie dont le high (ou low) est supérieur (ou inférieur) à celui des 2 bougies à gauche et des 2 bougies à droite. Le swing n'est « confirmé » qu'après la clôture de la 2e bougie de droite. |
+| **MSS (Market Structure Shift)** | Clôture LTF au-dessus du dernier swing high confirmé (MSS haussier) ou sous le dernier swing low confirmé (MSS baissier), après le sweep. |
+| **FVG (Fair Value Gap)** | Sur 3 bougies consécutives : FVG haussier si $\text{low}(\text{bougie } 3) > \text{high}(\text{bougie } 1)$ ; FVG baissier si $\text{high}(\text{bougie } 3) < \text{low}(\text{bougie } 1)$. La zone du FVG est l'intervalle entre ces deux prix. |
+| **ATR(14)** | Average True Range sur 14 périodes LTF : mesure de la volatilité récente, utilisée pour la marge de sécurité du stop. |
+| **R** | Distance entre le prix d'entrée et le stop-loss. Les résultats sont exprimés en multiples de R. |
+
+*Ces définitions sont des choix de modélisation : les concepts ICT/SMC sont en partie subjectifs sur un graphique. Les rendre numériques est ce qui permet de les coder, de les tester et de les comparer.*
 
 ---
 
@@ -78,121 +87,423 @@ Le prix balaie une liquidité évidente (le plus haut ou le plus bas d'un range 
 ### 3.1 Définir le range CRT
 1. À chaque nouvelle bougie HTF clôturée, enregistrer son plus haut $H$ et son plus bas $L$.
 2. Calculer le milieu $M = (H + L) / 2$.
-3. Surveiller en LTF le franchissement de $H$ ou de $L$.
-4. Un dépassement seul n'est pas un signal : il faut obligatoirement une clôture LTF de retour dans le range (réintégration).
+3. Surveiller en LTF un dépassement de $H$ ou de $L$.
+4. Un dépassement seul n'est pas un signal : il faut ensuite une clôture LTF de retour dans le range (réintégration).
 
 ### 3.2 Setup BUY : achat après balayage du bas
-1. Le prix passe sous $L$ (plus bas du range HTF). On mémorise l'extrême : `sweep_low`.
-2. Une bougie LTF clôture au-dessus de $L$ (réintégration du range).
-3. Dans les 3 bougies LTF suivantes au maximum, une clôture dépasse le dernier swing high LTF confirmé : c'est le **MSS haussier**.
-4. Le déplacement haussier du MSS crée un **FVG haussier** non comblé et non invalidé.
+1. Le prix passe sous $L$ (plus bas du range HTF). On mémorise l'extrême du sweep : `sweep_low`.
+2. Une bougie LTF clôture de nouveau au-dessus de $L$ : réintégration du range.
+3. Dans les 3 bougies LTF suivantes au maximum, une bougie clôture au-dessus du dernier swing high LTF confirmé : c'est le **MSS haussier**.
+4. Le déplacement haussier qui a produit le MSS crée un **FVG haussier** encore valide (non comblé, non invalidé).
 5. Le ratio risque/rendement vers la cible retenue est $\ge 1:1{,}5$ après coûts.
-6. Si les contrôles de risque sont validés : soumettre un **BUY LIMIT**.
+6. Si toutes les conditions sont réunies et que les filtres de risque passent : préparer un **BUY LIMIT**.
 
 ### 3.3 Setup SELL : vente après balayage du haut
 1. Le prix dépasse $H$. On mémorise `sweep_high`.
-2. Une bougie LTF clôture sous $H$ (réintégration).
-3. Dans les 3 bougies LTF suivantes au maximum, une clôture passe sous le dernier swing low confirmé : **MSS baissier**.
+2. Une bougie LTF clôture sous $H$.
+3. Dans les 3 bougies LTF suivantes au maximum, une clôture casse le dernier swing low confirmé : **MSS baissier**.
 4. Un **FVG baissier** apparaît dans ce déplacement et reste valide.
 5. Le ratio risque/rendement est $\ge 1:1{,}5$.
-6. Si les contrôles de risque sont validés : soumettre un **SELL LIMIT**.
+6. Préparer un **SELL LIMIT** après les contrôles de risque.
 
 ### 3.4 Quel FVG retenir ?
-Ne retenir que les FVG créés par l'impulsion qui a confirmé le MSS. S'il y en a plusieurs, retenir le plus récent situé dans le sens du mouvement. Un FVG est invalidé si une bougie LTF clôture au-delà de sa borne opposée.
+Pour éviter de choisir arbitrairement n'importe quelle zone du graphique, on ne retient que les FVG créés par le déplacement qui a confirmé le MSS. S'il y en a plusieurs, la règle de départ est de prendre le plus récent dont la zone est entièrement dans le sens du trade. Un FVG est invalidé si une bougie LTF clôture au-delà de son bord opposé (sous le bas d'un FVG haussier, au-dessus du haut d'un FVG baissier).
 
-### 3.5 Confirmation des swings
-Avec `swing_lookback = 2`, un swing n'est validé qu'après la clôture de 2 bougies ultérieures pour interdire tout biais d'anticipation.
+### 3.5 Précision sur les swings et le décalage de confirmation
+Avec la définition à 2 bougies de chaque côté, un swing high n'est connu qu'après la clôture de 2 bougies suivantes. Le backtest doit respecter ce décalage : utiliser un swing avant qu'il soit confirmé revient à regarder le futur. Le paramètre `swing_lookback` (2 par défaut) doit être testé (2, 3) pendant la phase de robustesse.
 
 ---
 
 ## 4. Calcul automatique des prix
+Le bot calcule tous les niveaux à partir des données réelles. Aucun prix fixe (type 1.08000) n'est codé en dur.
 
-| Paramètre | Règle de calcul |
-| :--- | :--- |
-| **Entrée BUY LIMIT** | Milieu du FVG haussier : $(FVG_{high} + FVG_{low}) / 2$ |
-| **Entrée SELL LIMIT** | Milieu du FVG baissier : $(FVG_{high} + FVG_{low}) / 2$ |
-| **Stop-Loss BUY** | $\text{sweep\_low} - \text{marge}$ |
-| **Stop-Loss SELL** | $\text{sweep\_high} + \text{marge}$ |
-| **Marge de sécurité** | $\max(\text{spread}, 0{,}1 \times \text{ATR}(14))$ |
-| **TP1 (Équilibre)** | Milieu du range CRT $M = (H + L) / 2$ |
-| **TP2 (Principal)** | Borne opposée du range ($H$ pour un BUY, $L$ pour un SELL) |
-| **TP de secours** | Entrée $+ 2R$ si la liquidité opposée est trop proche ou absente |
-| **Expiration** | 4 bougies LTF après placement (ex: 60 min en M15) |
+| Paramètre | Règle de départ | Remarque |
+| :--- | :--- | :--- |
+| **Entrée BUY LIMIT** | Milieu du FVG haussier | Compromis entre probabilité d'exécution et qualité du prix |
+| **Entrée SELL LIMIT** | Milieu du FVG baissier | Idem |
+| **SL BUY** | Sous $\text{sweep\_low} - \text{marge}$ | Le SL invalide l'idée : si le balayage est dépassé, le setup est faux |
+| **SL SELL** | Au-dessus de $\text{sweep\_high} + \text{marge}$ | Idem |
+| **Marge de sécurité** | $\max(\text{spread actuel} \,;\, 0{,}1 \times \text{ATR}(14)\text{ LTF})$ | Paramètre à tester, pas une valeur optimale universelle |
+| **TP principal** | Liquidité opposée ($H$ pour un BUY, $L$ pour un SELL) | Retenu seulement si le ratio $\ge 1:1{,}5$ |
+| **TP de remplacement** | $2R$ | Si la liquidité opposée est absente ou trop proche |
+| **Expiration** | 4 bougies LTF après placement (ex. 60 min en LTF) | L'ordre est annulé s'il n'est pas exécuté |
 
-### Conditions d'annulation d'un ordre en attente :
-- **Expiration** : 4 bougies LTF écoulées sans exécution.
-- **Invalidation** : Clôture LTF au-delà de `sweep_low` (BUY) ou `sweep_high` (SELL).
-- **Cible atteinte prématurément** : Le cours touche le TP avant de déclencher l'ordre LIMIT.
-- **Limite journalière** : Seuil de perte max atteint ou filtre d'actualités majeures.
+### 4.1 Exemple numérique illustratif (BUY, EURUSD H1/M15)
+Les chiffres ci-dessous sont inventés pour illustrer le calcul sur EURUSD avec $\text{HTF} = \text{H1}$ et $\text{LTF} = \text{M15}$ ; ils ne représentent pas un trade réel. Sur un autre actif, seules les valeurs changent, pas la méthode.
+
+| Donnée | Valeur | Commentaire |
+| :--- | :--- | :--- |
+| Range H1 : $L$ | 1,08500 | Plus bas de la dernière bougie H1 clôturée |
+| Range H1 : $H$ | 1,08900 | Plus haut = liquidité opposée (cible) |
+| Sweep low | 1,08450 | Le prix passe sous $L$ puis réintègre |
+| ATR(14) M15 | 0,00060 | 6 pips |
+| Spread | 0,00008 | 0,8 pip |
+| Marge | 0,00008 | $\max(0{,}00008 \,;\, 0{,}1 \times 0{,}00060) = 0{,}00008$ |
+| FVG haussier | 1,08560 – 1,08620 | Créé par le déplacement du MSS |
+| Entrée BUY LIMIT | 1,08590 | Milieu du FVG |
+| Stop-loss | 1,08442 | $1{,}08450 - 0{,}00008$ |
+| R (entrée − SL) | 0,00148 | 14,8 pips |
+| TP principal | 1,08900 | Liquidité opposée $H$ |
+| Gain potentiel | 0,00310 | 31 pips |
+| Ratio R:R | $\approx 2{,}09$ | $\ge 1{,}5$ : setup accepté |
+
+> [!NOTE]
+> **Attention au spread (Bid / Ask)**  
+> Un BUY LIMIT s'exécute sur le prix Ask, tandis que le SL et le TP d'une position acheteuse se déclenchent sur le Bid. Pour un SELL LIMIT, c'est l'inverse. Le calcul du ratio R:R doit intégrer cet écart, ainsi que les commissions éventuelles.
+
+### 4.2 Conditions de rejet : le bot ne place pas l'ordre si
+- L'entrée est déjà dépassée ou du mauvais côté du marché pour un ordre LIMIT (BUY LIMIT doit être sous l'Ask, SELL LIMIT au-dessus du Bid).
+- Le stop est trop proche selon les contraintes du broker (distance minimale des stops).
+- Le ratio risque/rendement est insuffisant après coûts.
+- Le FVG ou le balayage est invalidé avant l'exécution.
+- Le volume calculé est inférieur au volume minimum autorisé sans dépasser le risque prévu.
+
+### 4.3 Annulation d'un ordre en attente
+Un pending order existant est annulé par le bot dans les cas suivants :
+- **Expiration** : le nombre de bougies LTF prévu (4 par défaut) est écoulé sans exécution.
+- **Invalidation** : une bougie LTF clôture au-delà du `sweep_low` (BUY) ou du `sweep_high` (SELL), ou le FVG est invalidé.
+- **Cible atteinte avant l'entrée** : le prix touche le TP avant d'avoir pris l'entrée (le mouvement est déjà parti, le trade n'a plus de sens).
+- **Limite journalière atteinte** (voir section 5).
+- **Filtre de news** : annonce majeure EUR/USD imminente.
 
 ---
 
 ## 5. Gestion du risque
+Ces paramètres forment une configuration initiale prudente pour les tests. Ils ne constituent pas une protection contre les pertes.
 
-| Limite | Valeur par défaut | Action |
+| Limite | Valeur de départ | Effet |
 | :--- | :--- | :--- |
-| **Risque par trade** | $0{,}25\%$ du capital | Perte max au SL |
-| **Perte journalière max** | $1{,}0\%$ | Arrêt du bot pour la journée, annulation des pending orders |
-| **Pertes consécutives** | 2 maximum | Pause jusqu'à la session suivante |
-| **Positions simultanées** | 1 maximum par symbole | Aucun empilement d'ordres |
+| **Risque par trade** | $0{,}25\,\%$ du capital | Perte maximale si le SL est touché (hors slippage) |
+| **Perte journalière maximale** | $1\,\%$ | Au-delà, plus aucun nouveau trade ; ordres en attente annulés |
+| **Pertes consécutives** | 2 maximum | Pause du bot jusqu'au lendemain |
+| **Positions simultanées par symbole** | 1 maximum | Pas d'empilement sur le même actif |
 | **Ordres en attente** | 1 maximum | Un seul setup actif à la fois |
 
-### Calcul du volume :
-$$\text{risque\_argent} = \text{capital} \times 0{,}0025$$
-$$\text{perte\_1\_lot} = |\text{mt5.order\_calc\_profit}(\text{type}, \text{symbol}, 1{,}0, \text{entree}, \text{sl})|$$
-$$\text{lots} = \text{floor\_to\_step}(\text{risque\_argent} / \text{perte\_1\_lot})$$
+Si une limite journalière est atteinte, le bot cesse de créer de nouvelles opérations et annule les ordres en attente. Les positions ouvertes doivent toujours conserver leur stop-loss.
+
+### 5.1 Calcul du volume
+```python
+risque_argent = capital * 0.0025
+perte_1_lot = abs(mt5.order_calc_profit(type, symbole, 1.0, entree, sl))
+lots = risque_argent / perte_1_lot
+lots = math.floor(lots / volume_step) * volume_step  # Arrondi INFÉRIEUR au pas de lot
+# Vérifier : volume_min <= lots <= volume_max, marge disponible suffisante
+```
+
+**Exemple illustratif sur EURUSD avec un compte de 10 000 USD :**  
+Risque de $0{,}25\,\% = 25\text{ USD}$. Avec un SL à $0{,}00148$ de l'entrée, la perte pour 1 lot (100 000 unités) est d'environ 148 USD.  
+$\text{Lots} = 25 / 148 \approx 0{,}169 \to \text{arrondi à } 0{,}16\text{ lot}$, soit un risque réel d'environ 23,7 USD.
+
+> [!WARNING]
+> **Cas du petit compte**  
+> Avec un petit capital (exemple : l'équivalent de 100 000 FCFA), le risque à $0{,}25\,\%$ est très faible en valeur absolue. Si le volume minimum (0,01 lot) dépasse déjà ce risque pour la distance du SL, le bot doit refuser le trade.  
+> Il ne doit jamais augmenter le risque pour « satisfaire » le volume minimum. Les comptes cent (*cent accounts*) ou un capital plus important permettent de respecter cette règle plus souvent.
+
+### 5.2 Filtres supplémentaires
+Le bot ne trade pas si :
+- Le spread dépasse un seuil défini à partir de l'historique du broker. Exprime-le de préférence en fraction de R ou d'ATR plutôt qu'en pips fixes, pour qu'il reste valable d'un actif à l'autre ;
+- Une annonce économique majeure concernant les devises ou l'économie de l'actif tradé est prévue dans les 15 minutes avant ou après l'entrée (EUR et USD pour EURUSD, par exemple) ;
+- La connexion MT5 est perdue ou les cotations sont trop anciennes ;
+- Un ordre ou une position existe déjà pour cette stratégie ;
+- Les données historiques sont incomplètes ou mal synchronisées.
+
+### 5.3 Filtre de session
+Les sessions dépendent de l'actif. Pour les paires de devises, compare par exemple la session de Londres et le chevauchement Londres–New York ; pour un indice, l'ouverture de sa place boursière ; pour l'or, les périodes de forte activité. Les horaires doivent être définis explicitement dans la configuration, dans le fuseau horaire du broker, en gérant les changements d'heure saisonniers. Une erreur de fuseau décale tous les signaux et fausse les résultats.
+
+### 5.4 Gestion de la position ouverte
+Dans la version de départ, la position reste simple : SL et TP fixés à l'ouverture, pas de modification. Les variantes (breakeven à +1R, sortie partielle, trailing) sont des améliorations à tester séparément après validation de la version de base, pour ne pas mélanger les effets.
 
 ---
 
 ## 6. Machine à états de l'automatisation
-```mermaid
-stateDiagram-v2
-    [*] --> SCAN
-    SCAN --> SWEEP : Dépassement H ou L de C1
-    SWEEP --> CONFIRM : Clôture LTF réintégrant le range
-    SWEEP --> SCAN : Pas de réintégration (continuation)
-    CONFIRM --> FVG : MSS confirmé dans les 3 bougies
-    CONFIRM --> SCAN : Pas de MSS / délai dépassé
-    FVG --> VALIDATE : FVG valide dans l'impulsion
-    FVG --> SCAN : Pas de FVG / FVG comblé
-    VALIDATE --> PENDING : R:R >= 1.5 & filtres OK
-    VALIDATE --> SCAN : Ratio insuffisant / filtres KO
-    PENDING --> POSITION : Ordre exécuté
-    PENDING --> SCAN : Expiration (4 bougies) ou annulation
-    POSITION --> SCAN : Position clôturée (SL/TP)
-```
+Le bot ne doit pas analyser et envoyer des ordres sans mémoire de son état. Chaque transition est journalisée avec l'heure, le symbole, l'identifiant du setup et le motif de validation ou de rejet.
+
+| État | Condition de passage | État suivant |
+| :--- | :--- | :--- |
+| **SCAN** | Range CRT défini | **SWEEP** |
+| **SWEEP** | Dépassement de H/L puis réintégration en clôture LTF | **CONFIRM** |
+| **SWEEP** | Setup expiré (trop de bougies sans réintégration) | **SCAN** |
+| **CONFIRM** | MSS confirmé dans les 3 bougies | **FVG** |
+| **CONFIRM** | MSS absent ou invalide | **SCAN** |
+| **FVG** | FVG valide trouvé | **VALIDATE** |
+| **FVG** | Setup invalidé | **SCAN** |
+| **VALIDATE** | Risque, prix, R:R et contraintes broker valides | **PENDING** |
+| **VALIDATE** | Un filtre refuse le trade | **SCAN** |
+| **PENDING** | Ordre exécuté | **POSITION** |
+| **PENDING** | Expiration ou annulation | **SCAN** |
+| **POSITION** | Position clôturée (SL, TP ou manuel) | **SCAN** |
+
+### Reprise après redémarrage
+Le bot doit retrouver ses ordres et positions auprès de MT5 au démarrage (via un magic number dédié et un commentaire d'ordre), et ne pas dépendre uniquement de variables en mémoire. Sinon un crash pendant qu'une position est ouverte laisse un trade sans supervision.
 
 ---
 
 ## 7. Exécution sur MetaTrader 5 avec Python
-1. Récupération des contraintes via `mt5.symbol_info` (digits, volume min/max/step, stop levels).
-2. Normalisation stricte des décimales des prix.
-3. Envoi de l'ordre en `TRADE_ACTION_PENDING` (`ORDER_TYPE_BUY_LIMIT` ou `ORDER_TYPE_SELL_LIMIT`) avec `type_time = ORDER_TIME_SPECIFIED`.
-4. Contrôle préalable avec `mt5.order_check()`.
-5. Journalisation complète du ticket, retcode et commentaire.
+
+### 7.1 Séquence d'envoi d'un pending order
+1. Récupérer `symbol_info` : volume min/max/pas, digits, distance minimale des stops, distance de gel (freeze level).
+2. Normaliser entrée, SL et TP au nombre de décimales du symbole.
+3. Construire la requête : action `TRADE_ACTION_PENDING`, type `ORDER_TYPE_BUY_LIMIT` ou `ORDER_TYPE_SELL_LIMIT`, `type_time = ORDER_TIME_SPECIFIED` avec la date d'expiration, magic et commentaire dédiés.
+4. Appeler `mt5.order_check()` pour valider la requête (marge, stops, volume).
+5. Appeler `mt5.order_send()` puis contrôler le code retour : un ordre envoyé n'est pas automatiquement accepté.
+6. Journaliser le ticket, le retcode et le message du serveur.
+
+### 7.2 Points de vigilance
+- **Expiration** : MetaTrader 5 permet d'indiquer une expiration, à condition que le broker et le type d'ordre l'acceptent. Prévois un plan B : le bot annule lui-même l'ordre à l'échéance.
+- **Heures** : les horodatages de MT5 sont en heure serveur du broker. Convertis-les de façon cohérente (UTC) dans tout le projet.
+- **Filling mode** : certains brokers imposent un mode d'exécution particulier ; teste-le sur démo.
+- **Rejets et requotes** : le bot doit gérer les retcodes d'erreur sans boucle infinie ni renvoi aveugle.
+- **Déconnexion** : si la connexion est perdue avec une position ouverte, le SL côté serveur reste la protection principale.
 
 ---
 
-## 8. Paramètres de configuration recommandés
+## 8. Protocole de backtest Python
+Ne commence pas par optimiser les paramètres pour obtenir une belle courbe. Commence par vérifier que les règles sont cohérentes, puis qu'elles tiennent sur des données non utilisées pour les concevoir.
+
+### 8.1 Étape 1 : préparer les données
+- Récupérer les bougies du symbole choisi en M1, LTF et HTF auprès du broker MT5, avec spreads et, idéalement, les ticks historiques.
+- Couvrir 3 à 5 ans ou plus pour inclure plusieurs régimes de marché, si la qualité des données le permet.
+- Construire LTF et HTF en respectant les horaires du broker ; utiliser uniquement les bougies clôturées pour les signaux.
+- Conserver timestamps et prix Bid/Ask.
+- Ne jamais combler artificiellement les trous de cotation avec des données inventées.
+
+### 8.2 Étape 2 : séparer les périodes
+| Période | Part | Usage |
+| :--- | :--- | :--- |
+| **Développement** | $60\,\%$ | Vérifier les règles, détecter les erreurs de logique |
+| **Validation** | $20\,\%$ | Choisir les paramètres sans toucher à la période finale |
+| **Test final** | $20\,\%$ | Mesurer sur des données jamais utilisées pour optimiser |
+
+La séparation est chronologique, jamais aléatoire. Ensuite, effectue un walk-forward : optimiser sur une période passée, tester sur la période suivante, puis faire glisser la fenêtre.
+
+### 8.3 Étape 3 : simuler correctement les pending orders
+1. Le signal est détecté à la clôture de la bougie LTF.
+2. Le pending order ne peut être placé qu'après cette clôture (donc actif à partir de la bougie suivante).
+3. L'ordre n'est activé que si le prix atteint le niveau d'entrée pendant sa durée de validité (4 bougies).
+4. Si une bougie touche à la fois l'entrée et le SL ou le TP, l'OHLC ne permet pas toujours de connaître l'ordre des événements : utiliser les ticks si disponibles, sinon appliquer une hypothèse conservatrice (le SL est touché en premier).
+5. Déduire spread, commissions, slippage et frais de financement.
+6. Simuler les expirations, annulations et rejets d'ordres.
+*Sans ces précautions, un backtest montre des performances artificiellement bonnes.*
+
+### 8.4 Étape 4 : mesurer les résultats
+| Indicateur | Ce qu'il mesure |
+| :--- | :--- |
+| **Nombre de trades** | Quantité d'observations : trop peu de trades rend les conclusions fragiles |
+| **Win rate** | Pourcentage de trades gagnants |
+| **Profit factor** | Gains bruts divisés par pertes brutes |
+| **Expectancy** | Gain ou perte moyen par trade, après coûts |
+| **Drawdown maximal** | Plus forte baisse du capital depuis un sommet |
+| **R moyen par trade** | Résultat moyen en multiples du risque initial |
+| **Coût moyen par trade** | Effet du spread, des commissions et du slippage |
+| **Taux d'exécution des ordres** | Part des pending orders réellement exécutés avant expiration |
+
+Ne retiens pas une stratégie sur le seul taux de réussite : une stratégie qui gagne souvent peut perdre de l'argent si ses pertes sont nettement supérieures à ses gains. Avec un R:R de 1:2, il faut gagner plus d'environ 33 % des trades pour être à l'équilibre avant coûts ; les coûts relèvent ce seuil.
+
+### 8.5 Étape 5 : tester la robustesse
+- Les deux sessions séparément (Londres, Londres–New York).
+- Plusieurs niveaux de spread.
+- Des paramètres légèrement différents : multiplicateur d'ATR, `swing_lookback`, délai du MSS, durée d'expiration.
+- Les périodes haussières, baissières et latérales.
+- L'effet des annonces économiques.
+- Le comportement après plusieurs pertes successives.
+
+> [!TIP]
+> **Signal d'alerte : sur-optimisation**  
+> Une stratégie qui ne fonctionne qu'avec un paramètre extrêmement précis (par exemple une marge d'ATR de 0,097 mais pas 0,10) est probablement sur-optimisée. On cherche un plateau de paramètres qui marchent, pas un pic isolé.
+
+---
+
+## 9. Organisation du projet Python
+Sépare la stratégie, les calculs de risque et l'exécution. Ainsi, modifier la détection CRT ne risque pas de casser le module qui envoie les ordres.
+
+```
+crt_bot/
+├── config.py              # Paramètres et limites de risque
+├── main.py                # Boucle principale
+├── data/
+│   └── market_data.py     # Bougies et ticks MT5
+├── strategy/
+│   ├── crt.py             # Range et sweep
+│   ├── structure.py       # Swings et MSS
+│   └── fvg.py             # Détection du FVG
+├── risk/
+│   └── risk_manager.py    # SL, TP et volume
+├── execution/
+│   └── mt5_executor.py    # Pending orders et annulations
+├── backtest/
+│   ├── engine.py          # Simulation chronologique
+│   └── metrics.py         # Statistiques
+├── storage/
+│   └── trade_log.py       # Journal persistant
+└── tests/
+    ├── test_strategy.py
+    └── test_risk.py
+```
+
+### 9.1 Pseudo-code de la logique centrale
+Ce pseudo-code décrit le comportement attendu. Ce n'est pas encore un robot prêt à trader : les fonctions de détection et d'exécution doivent être implémentées et testées.
+
 ```python
-CRT_CONFIG = {
-    "htf": "H1",                   # Timeframe du range CRT
-    "ltf": "M15",                  # Timeframe d'entrée
-    "swing_lookback": 2,           # Bougies pour valider un swing
-    "mss_max_bars": 3,             # Délai max post-réintégration pour le MSS
-    "entry_mode": "fvg_midpoint",  # Entrée au milieu du FVG
-    "min_rr": 1.5,                 # Ratio R:R minimum
-    "expiration_bars": 4,          # Durée de vie du pending order (bougies LTF)
-    "risk_per_trade_pct": 0.25,    # 0.25% de risque par opération
-    "daily_loss_limit_pct": 1.0,   # Coupe-circuit journalier à 1%
-    "max_consecutive_losses": 2,   # Pause après 2 pertes consécutives
-}
+def on_new_closed_m15_bar():
+    # 1. Connexion, cotations, données
+    if not market_data_is_valid():
+        return
+ 
+    # 2. Réconcilier ordres et positions existants
+    reconcile_orders_and_positions()
+ 
+    # 3. Un seul trade par setup
+    if has_open_position_or_pending_order(SYMBOL):
+        return
+ 
+    # 4. Limites de risque et filtres
+    if daily_loss_limit_reached():
+        cancel_strategy_pending_orders()
+        return
+    if spread_too_high() or high_impact_news_blocked():
+        return
+ 
+    # 5. Détection sur bougies clôturées uniquement
+    crt = detect_reference_crt_range()
+    sweep = detect_liquidity_sweep(crt)
+    if not sweep:
+        return
+    mss = detect_confirmed_mss(sweep, max_bars=3)
+    if not mss:
+        return
+    fvg = detect_valid_fvg(mss)
+    if not fvg:
+        return
+ 
+    # 6. Entrée, SL, TP
+    setup = build_pending_order(sweep, mss, fvg)
+    if not setup_is_valid(setup) or setup.reward_risk_ratio < 1.5:
+        return
+ 
+    # 7. Volume basé sur le risque
+    volume = calculate_risk_based_volume(setup, risk_pct=0.25)
+    if volume <= 0:
+        return
+ 
+    # 8. Contrôle puis envoi
+    if not broker_constraints_valid(setup, volume):
+        return
+    submit_pending_order_with_expiration(setup, volume, expiration_bars=4)
 ```
 
 ---
 
-## 9. Glossaire
-- **CRT** : *Candle Range Theory* — Théorie exploitant l'amplitude (High/Low) d'une bougie de référence HTF.
-- **Sweep** : Balayage rapide de la liquidité suivi d'un rejet immédiat.
-- **MSS** : *Market Structure Shift* — Cassure structurelle marquant le retournement en unité inférieure.
-- **FVG** : *Fair Value Gap* — Déséquilibre de cotation sur 3 bougies consécutives offrant une zone de retour de prix à rabais.
+## 10. Paramètres de configuration
+Tous les paramètres suivants doivent vivre dans `config.py`, jamais en dur dans la logique. C'est ce qui permet de lancer les tests de robustesse.
+
+| Paramètre | Valeur de départ | Plage de test suggérée |
+| :--- | :--- | :--- |
+| `symbol` | au choix (ex. EURUSD) | un symbole à la fois au départ |
+| `htf` (range CRT) | H1 | H1, H4 |
+| `ltf` (entrée) | M15 | M5, M15 |
+| `max_spread_r_ratio` | 0,15 | 0,10 à 0,25 (spread max en fraction de R) |
+| `session_start` / `session_end` | définis par actif | selon l'actif (voir section 11) |
+| `swing_lookback` | 2 | 2, 3 |
+| `mss_max_bars` | 3 | 2, 3, 4 |
+| `entry_mode` | milieu du FVG | milieu, 50–70 % de la zone |
+| `atr_period` | 14 | 10, 14, 20 |
+| `sl_atr_mult` | 0,1 | 0,05 à 0,20 |
+| `min_rr` | 1,5 | 1,5, 2,0 |
+| `fallback_tp_r` | 2,0 | 2,0, 2,5 |
+| `expiration_bars` | 4 | 3, 4, 6 |
+| `risk_per_trade_pct` | 0,25 | 0,25, 0,5 (démo seulement) |
+| `daily_loss_limit_pct` | 1,0 | 1,0 |
+| `max_consecutive_losses` | 2 | 2, 3 |
+| `news_block_minutes` | 15 | 15, 30 |
+
+---
+
+## 11. Adapter la stratégie à un autre actif ou timeframe
+La logique (range CRT, sweep, réintégration, MSS, FVG, ordre LIMIT) reste identique. Ce qui change, ce sont les paramètres et les contraintes propres à chaque actif. Ne reprends jamais les valeurs d'un actif sur un autre sans les retester.
+
+### 11.1 Choisir la paire de timeframes HTF / LTF
+| Style | HTF (range CRT) | LTF (entrée) | À savoir |
+| :--- | :--- | :--- | :--- |
+| **Scalping** | H1 | M5 | Plus de signaux, mais plus sensible au spread et aux coûts |
+| **Intraday** (exemple du document) | H1 | M15 | Compromis de départ entre bruit et nombre de trades |
+| **Intraday calme** | H4 | M15 ou H1 | Moins de trades, moins de bruit, ordres plus larges |
+
+*Ce sont des points de départ à tester, pas des recommandations validées. Commence par une seule paire HTF/LTF, puis compare les autres par backtest. Évite de mélanger trop de timeframes au départ.*
+
+### 11.2 Particularités par famille d'actifs
+| Famille | Points d'attention | À recalibrer en priorité |
+| :--- | :--- | :--- |
+| **Paires de devises** (EURUSD, GBPUSD…) | Spread généralement serré en séance liquide ; forte influence des sessions Londres/New York ; annonces des deux devises concernées | Sessions, filtre de news par devise, marge de SL |
+| **Or** (XAUUSD) | Volatilité élevée ; mouvements brusques lors des annonces américaines ; spread souvent plus large en valeur absolue ; taille de contrat différente des paires de devises | Marge de SL (en ATR), seuil de spread, volume via `order_calc_profit` |
+| **Indices** (NAS100, US30…) | Horaires liés à l'ouverture de la place boursière ; gaps possibles à l'ouverture ; cotation en points ; annonces américaines marquantes | Sessions, gestion des gaps, expiration des ordres, distance minimale de stop |
+| **Autres** (cryptos, matières premières…) | Marché parfois ouvert en continu ou à horaires particuliers ; frais et spreads très variables selon le broker | Tous les paramètres, avec un backtest dédié |
+
+### 11.3 Ce qui doit rester paramétrable
+- **Symbole et précision** : digits, point, taille de contrat, volume min/max/pas, lus via `symbol_info` et jamais codés en dur.
+- **Unités** : raisonne en R et en ATR plutôt qu'en pips ou en points fixes, pour que les règles restent comparables d'un actif à l'autre.
+- **Spread maximal** : exprimé en fraction de R (ou d'ATR), par exemple via `max_spread_r_ratio`.
+- **Expiration** : exprimée en nombre de bougies LTF, donc différente en durée selon le timeframe (4 bougies = 60 min en M15, 20 min en M5).
+- **Sessions et filtre de news** : définis par actif, dans le fuseau horaire du broker.
+- **Risque par trade** : identique en pourcentage du capital ; seule la taille de position change, calculée à partir du SL et de la valeur du point.
+
+### 11.4 Checklist de changement d'actif
+| Contrôle | Fait |
+| :--- | :---: |
+| Paramètres du symbole lus dans MT5 (digits, taille de contrat, volume, stops minimaux) | ☐ |
+| Seuil de spread recalibré à partir de l'historique du broker pour cet actif | ☐ |
+| Sessions et fuseau horaire définis pour cet actif | ☐ |
+| Filtre de news adapté aux devises ou à l'économie de l'actif | ☐ |
+| Marge de SL et durée d'expiration retestées | ☐ |
+| Backtest complet refait sur les données de cet actif | ☐ |
+| Compte démo relancé pour cet actif avant tout passage en réel | ☐ |
+
+---
+
+## 12. Du backtest au réel : feuille de route
+1. **Tests unitaires** : valider séparément les calculs de range, sweep, MSS, FVG, SL et volume sur des cas construits à la main.
+2. **Contrôle visuel** : afficher les signaux détectés sur des graphiques historiques et vérifier qu'ils correspondent à ce qu'un trader identifierait.
+3. **Backtest historique** : mesurer les résultats nets de tous les coûts, sans fuite de données futures.
+4. **Test hors échantillon** : vérifier la cohérence sur la période jamais utilisée pour le développement.
+5. **Compte démo** : laisser tourner le bot plusieurs semaines et comparer les signaux attendus aux ordres réellement acceptés.
+6. **Petit compte réel**, seulement si les résultats le justifient : surveiller les écarts d'exécution, le slippage, les déconnexions et les pertes.
+
+### 12.1 Ordre de développement conseillé
+Commence par `crt.py`, `structure.py` et `fvg.py`, et valide leurs sorties sur des graphiques historiques avant d'autoriser `mt5_executor.py` à envoyer le moindre ordre, même en démo. Le prochain livrable utile est un backtesteur Python complet de cette stratégie (détection CRT + MSS + FVG, simulation des pending orders, rapport de performance).
+
+### 12.2 Checklist avant tout passage en réel
+| Contrôle | Fait |
+| :--- | :---: |
+| Les tests unitaires de la détection et du risque passent | ☐ |
+| Backtest net de coûts réalisé sur au moins 3 ans | ☐ |
+| Aucune fuite de données futures (bougies clôturées, swings confirmés) | ☐ |
+| Test hors échantillon cohérent avec la période de développement | ☐ |
+| Robustesse validée (spread, sessions, paramètres voisins) | ☐ |
+| Plusieurs semaines de démo sans comportement inattendu | ☐ |
+| Reprise après redémarrage testée | ☐ |
+| Limites journalières et arrêt d'urgence testés | ☐ |
+
+---
+
+## 13. Limites et risques
+- **Aucune garantie** : un avantage statistique historique peut disparaître ou n'avoir jamais existé.
+- **Subjectivité des concepts** : la traduction numérique du CRT, du MSS et du FVG est une interprétation parmi d'autres ; d'autres définitions donneront d'autres résultats.
+- **Qualité des données** : un backtest basé sur des bougies sans ticks ni spreads réels peut être trop optimiste.
+- **Écarts d'exécution** : slippage, requotes, spreads élargis lors des annonces peuvent dégrader nettement les résultats réels.
+- **Risque technique** : bug, coupure de connexion, erreur de fuseau horaire peuvent causer des pertes ; d'où les limites de risque et le SL systématique.
+- **Risque de perte en capital** : le trading sur marge comporte un risque élevé de perte. N'engage que de l'argent que tu peux te permettre de perdre.
+
+---
+
+## 14. Glossaire
+| Terme | Signification |
+| :--- | :--- |
+| **ATR** | Average True Range : mesure moyenne de la volatilité |
+| **CRT** | Candle Range Theory : utilisation du range d'une bougie de référence |
+| **FVG** | Fair Value Gap : déséquilibre laissé par 3 bougies consécutives |
+| **ICT / SMC** | Inner Circle Trader / Smart Money Concepts : cadre de lecture du prix basé sur la liquidité et la structure |
+| **Liquidité** | Zone où se concentrent des ordres stop (anciens hauts/bas) |
+| **MSS** | Market Structure Shift : cassure de la structure après un sweep |
+| **Pending order** | Ordre en attente exécuté si le prix atteint un niveau donné |
+| **R / R:R** | Unité de risque ; ratio risque/rendement |
+| **Sweep** | Balayage de la liquidité au-delà d'un extrême suivi d'un retour |
+| **Walk-forward** | Test glissant : optimiser sur le passé, tester sur la période suivante |
