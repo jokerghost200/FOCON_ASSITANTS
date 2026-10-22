@@ -1978,6 +1978,8 @@ class MainWindow(QMainWindow):
                 score = 0.0
                 if status == "OB_SIGNAL":
                     score += 100.0  # OB institutionnel retesté
+                elif status in ("PENDING_CRT", "MARKET_CRT"):
+                    score += 95.0   # Setup CRT institutionnel
                 elif status == "PENDING_OB":
                     score += 85.0
                 elif status == "SIGNAL":
