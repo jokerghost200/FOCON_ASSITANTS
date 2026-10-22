@@ -1,0 +1,20 @@
+CRT en trading : Candle Range Theory
+CRT signifie Candle Range Theory (théorie de l'amplitude de bougie). C'est une approche issue de la communauté SMC/ICT, qui repose sur une idée simple : une bougie d'une unité de temps supérieure définit un range (son high et son low), et le prix va chercher à balayer un côté de ce range avant de se diriger vers l'autre.
+Le modèle à 3 bougies
+1. Bougie 1 (C1), la bougie de range. Son high et son low sont les niveaux de liquidité de référence, par exemple une bougie H4, Daily ou Weekly.
+2. Bougie 2 (C2), la manipulation. Le prix dépasse le high ou le low de C1 (c'est le sweep de liquidité, qui piège les traders qui entrent sur la cassure), puis referme à l'intérieur du range de C1. Cette clôture à l'intérieur est la confirmation clé : sans elle, il s'agit peut-être d'une vraie cassure.
+3. Bougie 3 (C3), la distribution. Le prix part dans la direction opposée au sweep et vise l'autre extrémité du range de C1.
+Cela correspond à la logique AMD (Accumulation, Manipulation, Distribution) : C1 est l'accumulation, C2 la manipulation, C3 la distribution.
+Exemple
+• C1 (H4) a un high à 1.1000 et un low à 1.0950.
+• C2 descend à 1.0940, sous le low de C1, puis referme à 1.0965, donc dans le range.
+• Biais haussier : on cherche un achat avec pour objectif le high de C1 (1.1000), ou au minimum le milieu du range (50 %).
+Comment l'exploiter
+• Entrée : sur une unité de temps inférieure (M15, M5, M1), après le sweep, on attend une confirmation : changement de structure (MSS/CISD), FVG ou order block.
+• Stop loss : au-delà de la mèche du sweep.
+• Objectifs : le milieu du range de C1 (équilibre), puis son extrémité opposée.
+• Combinaisons classiques : Weekly → Daily, Daily → H1/H4, H4 → M15/M5.
+Limites à garder en tête
+• Un sweep ne garantit pas un retournement : si C2 clôture hors du range, c'est une continuation, et le setup est invalidé.
+• Il faut un contexte (biais de tendance sur l'unité supérieure, sessions, news), car le CRT seul génère de faux signaux.
+• C'est un modèle de lecture du marché, pas une méthode infaillible. Un backtest sur plusieurs mois et une gestion du risque stricte restent indispensables.

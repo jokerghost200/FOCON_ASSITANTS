@@ -7,6 +7,7 @@ from src.core.technical_indicators import TechnicalIndicators
 from src.core.boomerang_detector import BoomerangDetector
 from src.core.order_block_detector import OrderBlockDetector
 from src.core.market_context import MarketContextEngine
+from src.core.crt_detector import CRTDetector
 from src.trading.strategy_engine import StrategySelector
 from src.ai.local_quant_brain import LocalQuantBrain
 from src.ai.ai_router import AIRouter
@@ -60,6 +61,11 @@ class AIOrchestrator:
             tp_rr_mult=2.5,
         )
         self.strategy_selector = StrategySelector()
+        self.crt_detector = CRTDetector(
+            min_sweep_atr_mult=0.10,
+            min_range_atr_mult=0.50,
+            min_rr_tp1=1.5,
+        )
         self._symbol_cooldowns = {}
 
     def set_symbol_cooldown(self, symbol: str, duration_seconds: float = 1800.0, reason: str = "", direction: str = None):
@@ -409,7 +415,20 @@ class AIOrchestrator:
             tech_features = self.tech.extract_latest_features(df)
             amd_context = self.market_data.analyze_amd(df)
 
-        # 1b. Higher Timeframe (HTF) Data for Context
+        # Get broker constraints early to pass to detectors
+        symbol_info = self.mt5.get_symbol_info(symbol)
+        min_distance = 0.0001
+        spread_price = 0.0
+        if symbol_info:
+            point = float(symbol_info.get('point', 0.00001))
+            trade_stops_level = symbol_info.get('trade_stops_level', 0)
+            spread_pts = float(symbol_info.get('spread', 0))
+            spread_price = spread_pts * point
+            min_distance = max(trade_stops_level * point, spread_price) * 1.2
+            if min_distance == 0:
+                min_distance = point * 10
+
+        # 1b. Higher Timeframe (HTF) Data for Context & CRT
         htf = "H1"
         if timeframe.upper() == "M15": htf = "H1"
         elif timeframe.upper() in ["H1", "H4"]: htf = "D1"
@@ -417,13 +436,33 @@ class AIOrchestrator:
         htf_df = self.market_data.get_dataframe(symbol, htf, num_bars=700)
         htf_trend = "Unknown"
         htf_ema50 = "Unknown"
+        htf_atr = float(tech_features.get('atr_14') or 0.001)
         if htf_df is not None and not htf_df.empty:
             htf_df = self.tech.add_all_indicators(htf_df)
             htf_feat = self.tech.extract_latest_features(htf_df)
             htf_trend = htf_feat.get('trend', 'Unknown')
             htf_ema50 = htf_feat.get('ema_50', 'Unknown')
+            htf_atr = float(htf_feat.get('atr_14') or htf_atr)
 
-        # 1c. Boomerang Setup Detection
+        # 1c. Candle Range Theory (CRT) Setup Detection on HTF (H1, H4 ou D1)
+        crt_setup = None
+        crt_context = "Aucun setup CRT actif sur l'unité supérieure."
+        if htf_df is not None and len(htf_df) >= 3:
+            try:
+                crt_setup = self.crt_detector.detect(htf_df, atr=htf_atr, spread=spread_price)
+                if crt_setup:
+                    kz_tag = f" [Killzone {crt_setup.killzone_name}]" if crt_setup.in_killzone else ""
+                    crt_context = (
+                        f"SETUP CRT ({crt_setup.direction}) VALIDÉ SUR {htf}{kz_tag} :\n"
+                        f"- Range C1 : Bas={crt_setup.c1_low:.5f}, Haut={crt_setup.c1_high:.5f}, Équilibre 50%={crt_setup.c1_mid:.5f}\n"
+                        f"- Manipulation C2 : Sweep={crt_setup.sweep_price:.5f} (prof. {crt_setup.sweep_depth:.5f}), Clôture dans range={crt_setup.c2_close:.5f}\n"
+                        f"- Niveaux : SL={crt_setup.sl_raw:.5f}, TP1 (50% EQ)={crt_setup.tp1:.5f}, TP2 (Borne opposée)={crt_setup.tp2:.5f}"
+                    )
+                    logger.info(f"[CRT] {symbol}: {crt_context}")
+            except Exception as _ce:
+                logger.warning(f"CRT detector error for {symbol}: {_ce}")
+
+        # 1d. Boomerang Setup Detection
         try:
             boom = self.boomerang.detect(
                 df, symbol, timeframe,
@@ -441,7 +480,7 @@ class AIOrchestrator:
             boomerang_score    = 0
             boomerang_dir      = "NONE"
 
-        # 1d. Order Block (SMC) Setup Detection
+        # 1e. Order Block (SMC) Setup Detection
         try:
             valid_obs = self.ob_detector.detect(
                 df, symbol, timeframe,
@@ -490,18 +529,6 @@ class AIOrchestrator:
                 "summary": "Live news disabled in fast mode.",
                 "events": [],
             }
-        
-        # Get broker constraints to inject into AI prompt
-        symbol_info = self.mt5.get_symbol_info(symbol)
-        min_distance = 0.0001
-        if symbol_info:
-            trade_stops_level = symbol_info.get('trade_stops_level', 0)
-            point = symbol_info.get('point', 0.00001)
-            spread = symbol_info.get('spread', 0) * point
-            # Minimum distance is either stops_level or spread, plus a tiny margin
-            min_distance = max(trade_stops_level * point, spread) * 1.2
-            if min_distance == 0:
-                min_distance = point * 10
                 
         # 3. Depth of Market (Order Book)
         dom_data = self.market_data.get_market_depth(symbol)
@@ -511,14 +538,7 @@ class AIOrchestrator:
                           f"Bids Volume: {dom_data['bids_volume']} ({dom_data['buy_pressure']}% Buy Pressure)\n" \
                           f"Asks Volume: {dom_data['asks_volume']} ({dom_data['sell_pressure']}% Sell Pressure)"
 
-        # Calcule et injecte le spread réel dans le prompt AI
-        spread_price = 0.0
-        if symbol_info:
-            spread_pts   = float(symbol_info.get('spread', 0))
-            point        = float(symbol_info.get('point', 0.00001))
-            spread_price = spread_pts * point
-            
-        # Determine Market Regime and query Strategy Engine
+        # Determine Market Regime and query Strategy Engine (incluant CRT, Sweeps, Order Blocks)
         market_regime = MarketContextEngine.detect_market_regime(tech_features, htf_trend, amd_context)
         proposals = self.strategy_selector.select_and_evaluate(
             market_regime=market_regime,
@@ -528,7 +548,8 @@ class AIOrchestrator:
             price=close_p, 
             spread=spread_price, 
             min_distance=min_distance,
-            valid_obs=valid_obs if has_active_ob else None
+            valid_obs=valid_obs if has_active_ob else None,
+            crt_setup=crt_setup,
         )
         
         strategy_context = "Aucune stratégie spécifique activée."
@@ -617,6 +638,10 @@ class AIOrchestrator:
         ─── BOOMERANG SETUP ANALYSIS ───
         {boomerang_context}
         ────────────────────────────────
+
+        ─── CANDLE RANGE THEORY (CRT) SETUP ───
+        {crt_context}
+        ───────────────────────────────────────
         
         ─── MARKET REGIME & STRATEGY ENGINE ───
         Market Regime Detected: {market_regime}
@@ -639,9 +664,10 @@ class AIOrchestrator:
         Direction: {news_context.get('direction')}
         Summary: {news_context.get('summary')}
 
+        CRT pre-analysis: {crt_context.splitlines()[0] if crt_setup else 'Aucun setup'}.
         Boomerang pre-analysis: {boomerang_dir} (score {boomerang_score:.0f}/100, decision: {boomerang_decision}).
         Order Block pre-analysis: {top_ob_dir} (score {top_ob_score:.0f}/100, active: {has_active_ob}).
-        If either setup is confirmed, prioritize entering on the retest.
+        If any institutional setup (CRT, Order Block, Boomerang) is confirmed, prioritize entering on the retest.
         If NO setup is active and price is chasing market direction, reply "WAIT".
 
         Provide your trade recommendation.
@@ -694,6 +720,7 @@ class AIOrchestrator:
                 spread_price=spread_price,
                 min_distance=min_distance,
                 direction_filter=dir_filter_upper,
+                crt_setup=crt_setup,
             )
 
         # ─── PHASE 2: OVERRIDE RISK WITH STRATEGY ENGINE ───
@@ -706,6 +733,10 @@ class AIOrchestrator:
                 decision["sl"] = matching_prop["sl"]
                 decision["tp"] = matching_prop["tp"]
                 decision["reason"] += f" [Strategy: {matching_prop['strategy']}]"
+                if "tp1" in matching_prop:
+                    decision["tp1"] = matching_prop["tp1"]
+                if "tp2" in matching_prop:
+                    decision["tp2"] = matching_prop["tp2"]
                 
                 # ─── PHASE 3: MEMORY & PERFORMANCE ENGINE (EXPECTANCY) ───
                 if self.trade_memory:

@@ -38,6 +38,7 @@ class LocalQuantBrain:
         spread_price: float = 0.0,
         min_distance: float = 0.0001,
         direction_filter: str = "BOTH",
+        crt_setup: Any = None,
     ) -> Dict[str, Any]:
         """
         Génère une décision de trading quantitative complète et déterministe.
@@ -178,6 +179,18 @@ class LocalQuantBrain:
             elif ema50 < ema200:
                 bear_score += w_amd
 
+        # G) Candle Range Theory (CRT) Setup
+        if crt_setup:
+            crt_dir = getattr(crt_setup, 'direction', 'NONE')
+            kz_bonus = 5.0 if getattr(crt_setup, 'in_killzone', False) else 0.0
+            w_crt = 25.0 + kz_bonus
+            if crt_dir == "BUY":
+                bull_score += w_crt
+                reasons.append(f"CRT Bullish validé (Sweep C1 Low {crt_setup.c1_low:.5f}, close in range, EQ {crt_setup.c1_mid:.5f}, pds {w_crt:.0f})")
+            elif crt_dir == "SELL":
+                bear_score += w_crt
+                reasons.append(f"CRT Bearish validé (Sweep C1 High {crt_setup.c1_high:.5f}, close in range, EQ {crt_setup.c1_mid:.5f}, pds {w_crt:.0f})")
+
         # ─── 3. DÉCISION ET CALCUL DES NIVEAUX DE PRIX ────────────────────────
         df_policy = str(direction_filter or "BOTH").upper()
         if df_policy == "SELL_ONLY":
@@ -189,14 +202,18 @@ class LocalQuantBrain:
 
         if bull_score >= self.min_confidence and bull_score > bear_score:
             entry = close
-            # Stop loss placé sous l'Order Block ou sous le swing bas récent
-            if active_ob and active_ob.direction == "BUY" and active_ob.sl:
+            # Stop loss placé sous la mèche CRT, sous l'Order Block ou sous le swing bas récent
+            if crt_setup and getattr(crt_setup, 'direction', '') == "BUY":
+                sl = min(float(crt_setup.sl_raw) - (spread_price * 2 + min_distance), round(entry - min_sl_dist, 5))
+                tp = float(crt_setup.tp2)
+            elif active_ob and active_ob.direction == "BUY" and active_ob.sl:
                 sl = min(float(active_ob.sl), round(entry - min_sl_dist, 5))
+                sl_dist = abs(entry - sl)
+                tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
             else:
                 sl = round(entry - max(atr * 1.5, min_sl_dist), 5)
-
-            sl_dist = abs(entry - sl)
-            tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
+                sl_dist = abs(entry - sl)
+                tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
 
             return {
                 "action": "BUY",
@@ -209,14 +226,18 @@ class LocalQuantBrain:
 
         elif bear_score >= self.min_confidence and bear_score > bull_score:
             entry = close
-            # Stop loss placé au-dessus de l'Order Block ou au-dessus du swing haut récent
-            if active_ob and active_ob.direction == "SELL" and active_ob.sl:
+            # Stop loss placé au-dessus de la mèche CRT, au-dessus de l'Order Block ou au-dessus du swing haut
+            if crt_setup and getattr(crt_setup, 'direction', '') == "SELL":
+                sl = max(float(crt_setup.sl_raw) + (spread_price * 2 + min_distance), round(entry + min_sl_dist, 5))
+                tp = float(crt_setup.tp2)
+            elif active_ob and active_ob.direction == "SELL" and active_ob.sl:
                 sl = max(float(active_ob.sl), round(entry + min_sl_dist, 5))
+                sl_dist = abs(sl - entry)
+                tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
             else:
                 sl = round(entry + max(atr * 1.5, min_sl_dist), 5)
-
-            sl_dist = abs(sl - entry)
-            tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
+                sl_dist = abs(sl - entry)
+                tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
 
             return {
                 "action": "SELL",
