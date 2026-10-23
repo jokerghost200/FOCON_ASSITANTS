@@ -313,6 +313,14 @@ class ProTraderCopyDialog(QDialog):
                 "• Prise de liquidité (Sweep) session Londres\n• Cassure de structure H1 (BOS)\n• Entrée sur retest Fibo 50% - 61.8%\n• Stop Loss sur invalidation du sweep",
                 "#fbbf24"
             ),
+            (
+                "soros",
+                "🔴 George Soros",
+                "Global Macro · Réflexivité & Asymétrie",
+                "GBPUSD, EURUSD, USDJPY, Gold, US500",
+                "• Analyse des déséquilibres macroéconomiques\n• Détection de bulles réflexives & climax\n• Cassure de structure (MSS/BOS)\n• R:R asymétrique (2.5+) & invalidation stricte",
+                "#f87171"
+            ),
         ]
 
         row, col = 0, 0
@@ -636,6 +644,35 @@ class ProTraderCopyDialog(QDialog):
             self.params_lay.addWidget(sp_fmax, row, 1)
             self.param_widgets["fib_zone_max"] = sp_fmax
 
+        elif pid == "soros":
+            # Paramètres George Soros (Global Macro & Réflexivité)
+            self.params_lay.addWidget(QLabel("Distorsion Réflexive Min (x ATR) :"), row, 0)
+            sp_dev = QDoubleSpinBox()
+            sp_dev.setRange(1.0, 5.0); sp_dev.setSingleStep(0.2); sp_dev.setValue(float(cfg.get("deviation_atr_mult", 2.0)))
+            self.params_lay.addWidget(sp_dev, row, 1)
+            self.param_widgets["deviation_atr_mult"] = sp_dev
+
+            row += 1
+            self.params_lay.addWidget(QLabel("Ratio R:R minimum asymétrique :"), row, 0)
+            sp_rr = QDoubleSpinBox()
+            sp_rr.setRange(2.0, 6.0); sp_rr.setSingleStep(0.25); sp_rr.setValue(float(cfg.get("min_rr", 2.5)))
+            self.params_lay.addWidget(sp_rr, row, 1)
+            self.param_widgets["min_rr"] = sp_rr
+
+            row += 1
+            self.params_lay.addWidget(QLabel("RSI Seuil Sur-Achat (Bulle) :"), row, 0)
+            sp_rob = QDoubleSpinBox()
+            sp_rob.setRange(60.0, 90.0); sp_rob.setSingleStep(1.0); sp_rob.setValue(float(cfg.get("rsi_overbought", 68.0)))
+            self.params_lay.addWidget(sp_rob, row, 1)
+            self.param_widgets["rsi_overbought"] = sp_rob
+
+            row += 1
+            self.params_lay.addWidget(QLabel("RSI Seuil Sur-Vente (Panique) :"), row, 0)
+            sp_ros = QDoubleSpinBox()
+            sp_ros.setRange(10.0, 40.0); sp_ros.setSingleStep(1.0); sp_ros.setValue(float(cfg.get("rsi_oversold", 32.0)))
+            self.params_lay.addWidget(sp_ros, row, 1)
+            self.param_widgets["rsi_oversold"] = sp_ros
+
         # Activer ou désactiver les widgets selon le mode choisi
         is_custom = (self.selected_mode == "custom")
         for w in self.param_widgets.values():
@@ -768,6 +805,7 @@ class ProTraderCopyDialog(QDialog):
     def refresh_stats_table(self):
         """Remplit le tableau comparatif des performances de chaque trader."""
         profiles = self.manager.get_all_profiles_info()
+        self.stats_table.setRowCount(len(profiles))
         for row, p in enumerate(profiles):
             name_item = QTableWidgetItem(p["name"])
             name_item.setFont(QFont("Arial", 10, QFont.Bold))

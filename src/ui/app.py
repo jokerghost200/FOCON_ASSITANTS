@@ -993,8 +993,8 @@ class MainWindow(QMainWindow):
         else:
             self.pro_trader_btn.setText("👑 COPIE TRADERS PROS")
             self.pro_trader_btn.setToolTip(
-                "Activer et configurer la copie des 4 traders professionnels\n"
-                "(Corentin, Benjamin, Romain, Nada FX)"
+                "Activer et configurer la copie des traders professionnels\n"
+                "(Corentin, Benjamin, Romain, Nada FX, George Soros)"
             )
             self.pro_trader_btn.setStyleSheet("""
                 QPushButton {
@@ -1230,7 +1230,7 @@ class MainWindow(QMainWindow):
         self.backtest_btn.clicked.connect(self.open_backtest_dialog)
 
         self.pro_trader_btn = QPushButton("👑 COPIE TRADERS PROS")
-        self.pro_trader_btn.setToolTip("Activer et configurer la copie des 4 traders professionnels\n(Corentin, Benjamin, Romain, Nada FX)")
+        self.pro_trader_btn.setToolTip("Activer et configurer la copie des traders professionnels\n(Corentin, Benjamin, Romain, Nada FX, George Soros)")
         self.pro_trader_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff8f00, stop:1 #ff6f00);

@@ -3,7 +3,7 @@
 # Corentin Trading, Benjamin Mauger, Romain Bailleul, Nada FX
 
 pro_trader_profiles:
-  # Profil actif : null (désactivé) | "corentin" | "benjamin" | "romain" | "nada"
+  # Profil actif : null (désactivé) | "corentin" | "benjamin" | "romain" | "nada" | "soros"
   active_profile: null
 
   # Mode de fonctionnement :
@@ -98,4 +98,27 @@ pro_trader_profiles:
     fib_zone_min: 0.50
     fib_zone_max: 0.618
     min_rr: 2.0
+    risk_pct: 1.0
+
+  soros:
+    name: "George Soros"
+    style: "Global Macro & Réflexivité"
+    description: "Exploitation des distorsions macroéconomiques, bulles réflexives insoutenables, épuisement de tendance et retournements asymétriques à haut R:R."
+    symbols:
+      - GBPUSD
+      - GBPUSD.r
+      - GBPUSDm
+      - EURUSD
+      - USDJPY
+      - XAUUSD
+      - US500
+      - US30
+    macro_tf: "H1"
+    entry_tf: "M15"
+    ema_macro_period: 200
+    deviation_atr_mult: 2.0
+    rsi_period: 14
+    rsi_overbought: 68.0
+    rsi_oversold: 32.0
+    min_rr: 2.5
     risk_pct: 1.0

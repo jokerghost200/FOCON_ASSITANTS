@@ -17,6 +17,7 @@ from src.strategies.corentin_strategy import CorentinStrategy
 from src.strategies.benjamin_strategy import BenjaminStrategy
 from src.strategies.romain_strategy import RomainStrategy
 from src.strategies.nada_strategy import NadaStrategy
+from src.strategies.soros_strategy import SorosStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ DEFAULT_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 
 
 class StrategyProfileManager:
-    """Orchestrateur central des 4 stratégies de traders professionnels."""
+    """Orchestrateur central des stratégies de traders professionnels."""
 
     def __init__(self, config_path: Optional[Union[str, Path]] = None, log_dir: Optional[Union[str, Path]] = None):
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
@@ -50,6 +51,7 @@ class StrategyProfileManager:
             "benjamin": {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "signals_count": 0},
             "romain": {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "signals_count": 0},
             "nada": {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "signals_count": 0},
+            "soros": {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "signals_count": 0},
         }
         self._load_persisted_records()
 
@@ -74,12 +76,14 @@ class StrategyProfileManager:
         benjamin_cfg = pro_cfg.get("benjamin", {})
         romain_cfg = pro_cfg.get("romain", {})
         nada_cfg = pro_cfg.get("nada", {})
+        soros_cfg = pro_cfg.get("soros", {})
 
         self.strategies = {
             "corentin": CorentinStrategy(corentin_cfg),
             "benjamin": BenjaminStrategy(benjamin_cfg),
             "romain": RomainStrategy(romain_cfg),
             "nada": NadaStrategy(nada_cfg),
+            "soros": SorosStrategy(soros_cfg),
         }
         return self.config
 

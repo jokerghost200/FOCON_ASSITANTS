@@ -18,6 +18,7 @@ from src.strategies.corentin_strategy import CorentinStrategy
 from src.strategies.benjamin_strategy import BenjaminStrategy
 from src.strategies.romain_strategy import RomainStrategy
 from src.strategies.nada_strategy import NadaStrategy
+from src.strategies.soros_strategy import SorosStrategy
 from src.strategies.strategy_profile_manager import StrategyProfileManager
 
 
@@ -287,7 +288,138 @@ def test_nada_fx_london_sweep_and_retest():
     assert sig.rr >= 2.0
 
 
-# ─── 6. TESTS STRATEGY PROFILE MANAGER ───
+# ─── 6. TESTS GEORGE SOROS (GLOBAL MACRO & RÉFLEXIVITÉ) ───
+
+def test_soros_initialization_and_symbols():
+    """Vérifie l'initialisation et le filtrage des symboles cibles de George Soros."""
+    strat = SorosStrategy({
+        "symbols": ["GBPUSD", "EURUSD", "USDJPY", "XAUUSD", "US500", "US30"],
+        "min_rr": 2.5,
+    })
+    assert strat.profile_id == "soros"
+    assert strat.name == "George Soros"
+    assert strat.is_symbol_supported("GBPUSD") is True
+    assert strat.is_symbol_supported("GBPUSD.r") is True
+    assert strat.is_symbol_supported("GBPUSDm") is True
+    assert strat.is_symbol_supported("XAUUSD") is True
+    assert strat.is_symbol_supported("EURUSD") is True
+    assert strat.is_symbol_supported("NZDCAD") is False
+
+
+def test_soros_no_signal_in_balanced_market():
+    """Soros n'émet aucun signal si le marché est à l'équilibre (proche EMA 200, RSI neutre)."""
+    strat = SorosStrategy({
+        "symbols": ["GBPUSD"],
+        "deviation_atr_mult": 2.0,
+        "rsi_overbought": 68.0,
+        "rsi_oversold": 32.0,
+    })
+    # Marché plat / équilibré
+    df = make_sample_df(50, base_price=1.3000, trend="flat")
+    sig = strat.evaluate("GBPUSD", df)
+    assert sig is None
+
+
+def test_soros_bearish_reflexivity_breakdown_sell():
+    """
+    Soros détecte une bulle réflexive haussière (prix étiré loin au-dessus de l'EMA 200, RSI climax),
+    suivie d'une cassure de structure de marché (MSS baissier).
+    Vérifie l'invalidation stricte au-dessus du sommet et le ratio R:R asymétrique >= 2.5.
+    """
+    strat = SorosStrategy({
+        "symbols": ["GBPUSD"],
+        "deviation_atr_mult": 1.5,
+        "rsi_overbought": 65.0,
+        "min_rr": 2.5,
+    })
+
+    # Construire une accélération parabolique haussière culminant à 1.3500, puis rupture baissière
+    rows = []
+    dates = pd.date_range("2026-10-22 08:00:00", periods=45, freq="15min")
+    curr = 1.2800
+
+    # Phase 1 : Base macro autour de 1.2800 (30 barres)
+    for i in range(30):
+        curr += 0.0002
+        rows.append({"time": dates[i], "open": curr, "high": curr + 0.0005, "low": curr - 0.0003, "close": curr + 0.0002})
+
+    # Phase 2 : Envolée réflexive parabolique jusqu'à 1.3350 (climax)
+    for i in range(30, 40):
+        curr += 0.0050
+        rows.append({"time": dates[i], "open": curr, "high": curr + 0.0030, "low": curr - 0.0005, "close": curr + 0.0025})
+
+    # Sommet réflexif à 1.3400 (barre 40)
+    peak = 1.3400
+    rows.append({"time": dates[40], "open": curr, "high": peak, "low": curr - 0.0010, "close": curr + 0.0010})
+
+    # Phase 3 : Consolidation puis cassure de support (MSS baissier)
+    rows.append({"time": dates[41], "open": curr + 0.0005, "high": curr + 0.0015, "low": curr - 0.0020, "close": curr - 0.0010})
+    rows.append({"time": dates[42], "open": curr - 0.0010, "high": curr, "low": curr - 0.0040, "close": curr - 0.0030})
+    # Bougie de cassure violente sous le support récent
+    rows.append({"time": dates[43], "open": curr - 0.0030, "high": curr - 0.0020, "low": curr - 0.0080, "close": curr - 0.0075})
+    rows.append({"time": dates[44], "open": curr - 0.0075, "high": curr - 0.0065, "low": curr - 0.0120, "close": curr - 0.0110})
+
+    df = pd.DataFrame(rows)
+    news_ctx = {"market_impact": "HIGH", "event": "Central Bank Policy Invalidation"}
+
+    sig = strat.evaluate("GBPUSD", df, news_context=news_ctx)
+    assert sig is not None
+    assert sig.profile_id == "soros"
+    assert sig.trader == "George Soros"
+    assert sig.direction == "SELL"
+    assert sig.sl > peak  # Invalidation rigoureuse au-dessus du sommet
+    assert sig.tp < sig.entry
+    assert sig.rr >= 2.5
+    assert any("Réflexive" in c for c in sig.confluences)
+    assert any("MSS" in c for c in sig.confluences)
+
+
+def test_soros_bullish_panic_reversal_buy():
+    """
+    Soros détecte une panique réflexive baissière excessive (effondrement sous l'EMA 200, RSI survendu),
+    suivie d'un rejet et cassure de structure haussière (MSS haussier).
+    """
+    strat = SorosStrategy({
+        "symbols": ["EURUSD"],
+        "deviation_atr_mult": 1.5,
+        "rsi_oversold": 35.0,
+        "min_rr": 2.5,
+    })
+
+    rows = []
+    dates = pd.date_range("2026-10-22 08:00:00", periods=45, freq="15min")
+    curr = 1.1500
+
+    # Phase 1 : Base macro haute (30 barres)
+    for i in range(30):
+        curr -= 0.0001
+        rows.append({"time": dates[i], "open": curr, "high": curr + 0.0003, "low": curr - 0.0003, "close": curr})
+
+    # Phase 2 : Chute de panique jusqu'au creux (barre 39)
+    for i in range(30, 40):
+        curr -= 0.0040
+        rows.append({"time": dates[i], "open": curr, "high": curr + 0.0005, "low": curr - 0.0030, "close": curr - 0.0020})
+
+    trough = curr - 0.0050
+    rows.append({"time": dates[40], "open": curr, "high": curr + 0.0005, "low": trough, "close": curr - 0.0010})
+
+    # Phase 3 : Rejet du creux et cassure haussière
+    rows.append({"time": dates[41], "open": curr - 0.0010, "high": curr + 0.0030, "low": curr - 0.0015, "close": curr + 0.0025})
+    rows.append({"time": dates[42], "open": curr + 0.0025, "high": curr + 0.0060, "low": curr + 0.0020, "close": curr + 0.0055})
+    rows.append({"time": dates[43], "open": curr + 0.0055, "high": curr + 0.0090, "low": curr + 0.0050, "close": curr + 0.0085})
+    rows.append({"time": dates[44], "open": curr + 0.0085, "high": curr + 0.0120, "low": curr + 0.0080, "close": curr + 0.0115})
+
+    df = pd.DataFrame(rows)
+    sig = strat.evaluate("EURUSD", df)
+    assert sig is not None
+    assert sig.profile_id == "soros"
+    assert sig.direction == "BUY"
+    assert sig.sl < trough  # SL sous le creux d'invalidation
+    assert sig.tp > sig.entry
+    assert sig.rr >= 2.5
+
+
+# ─── 7. TESTS STRATEGY PROFILE MANAGER ───
 
 def test_profile_manager_lifecycle():
     """Vérifie le chargement, l'activation, le basculement de mode et la persistance."""
@@ -295,7 +427,7 @@ def test_profile_manager_lifecycle():
         tmp_cfg = Path(tmp_dir) / "trader_profiles.yaml"
         tmp_log = Path(tmp_dir) / "logs"
 
-        # Écriture d'une config de test
+        # Écriture d'une config de test incluant Soros
         cfg_content = {
             "pro_trader_profiles": {
                 "active_profile": None,
@@ -304,6 +436,7 @@ def test_profile_manager_lifecycle():
                 "benjamin": {"open_window_min": 15},
                 "romain": {"news_minutes": 30},
                 "nada": {"min_rr": 2.0},
+                "soros": {"min_rr": 2.5},
             }
         }
         import yaml
@@ -312,21 +445,29 @@ def test_profile_manager_lifecycle():
 
         mgr = StrategyProfileManager(config_path=tmp_cfg, log_dir=tmp_log)
         assert mgr.is_active() is False
+        assert "soros" in mgr.strategies
+
+        # Activer George Soros en mode Simulation
+        mgr.set_active_profile("soros", mode="simulation")
+        assert mgr.is_active() is True
+        assert mgr.get_active_profile_id() == "soros"
+        assert mgr.get_active_mode() == "simulation"
+        assert mgr.get_active_strategy().name == "George Soros"
 
         # Activer Nada FX en mode Copie Démo
         mgr.set_active_profile("nada", mode="copy")
-        assert mgr.is_active() is True
         assert mgr.get_active_profile_id() == "nada"
         assert mgr.get_active_mode() == "copy"
 
         # Enregistrement d'un résultat de trade
-        mgr.record_trade_outcome(ticket=999, profile_id="nada", symbol="XAUUSD", profit=125.50, is_win=True)
-        assert mgr.stats["nada"]["trades"] == 1
-        assert mgr.stats["nada"]["wins"] == 1
-        assert mgr.stats["nada"]["total_pnl"] == 125.50
+        mgr.record_trade_outcome(ticket=999, profile_id="soros", symbol="GBPUSD", profit=340.00, is_win=True)
+        assert mgr.stats["soros"]["trades"] == 1
+        assert mgr.stats["soros"]["wins"] == 1
+        assert mgr.stats["soros"]["total_pnl"] == 340.00
 
         # Vérifier la rehydratation après redémarrage
         mgr2 = StrategyProfileManager(config_path=tmp_cfg, log_dir=tmp_log)
         assert mgr2.get_active_profile_id() == "nada"
-        assert mgr2.stats["nada"]["trades"] == 1
-        assert mgr2.stats["nada"]["total_pnl"] == 125.50
+        assert mgr2.stats["soros"]["trades"] == 1
+        assert mgr2.stats["soros"]["total_pnl"] == 340.00
+
