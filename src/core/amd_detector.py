@@ -29,11 +29,48 @@ class AMDEngine:
 
     def detect_swing_points(self, df, window=5):
         """
-        Identifies recent Swing Highs and Swing Lows.
+        Identifie les Swing Highs et Swing Lows de manière strictement causale (SANS lookahead bias).
+        Un swing point à l'indice (i - right_bars) n'est confirmé qu'après la clôture
+        de la bougie i (reproduction fidèle du temps réel).
         """
         df = df.copy()
-        df['swing_high'] = df['high'][(df['high'] == df['high'].rolling(window, center=True).max())]
-        df['swing_low'] = df['low'][(df['low'] == df['low'].rolling(window, center=True).min())]
+        n = len(df)
+        df['swing_high'] = np.nan
+        df['swing_low'] = np.nan
+
+        right_bars = max(1, window // 2)
+        left_bars = max(1, window - 1 - right_bars)
+
+        if n < window:
+            return df
+
+        highs = df['high'].values
+        lows = df['low'].values
+
+        # La bougie candidate à (i - right_bars) est confirmée dès que la bougie i se clôture
+        for i in range(window - 1, n):
+            candidate_idx = i - right_bars
+            cand_h = highs[candidate_idx]
+            cand_l = lows[candidate_idx]
+
+            is_high = True
+            is_low = True
+            for offset in range(-left_bars, right_bars + 1):
+                if offset == 0:
+                    continue
+                check_idx = candidate_idx + offset
+                if highs[check_idx] >= cand_h:
+                    is_high = False
+                if lows[check_idx] <= cand_l:
+                    is_low = False
+                if not is_high and not is_low:
+                    break
+
+            if is_high:
+                df.iloc[candidate_idx, df.columns.get_loc('swing_high')] = cand_h
+            if is_low:
+                df.iloc[candidate_idx, df.columns.get_loc('swing_low')] = cand_l
+
         return df
 
     def detect_bos_mss(self, df):

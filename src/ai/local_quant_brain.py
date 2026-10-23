@@ -26,6 +26,65 @@ class LocalQuantBrain:
         self.min_rr = min_rr
         self.weights_engine = weights_engine
 
+    @staticmethod
+    def detect_market_regime(tech_features: Dict[str, Any], amd_context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Détermine le régime de marché déterministe actuel :
+        - TRENDING_BULLISH : Tendance haussière affirmée (flux acheteur)
+        - TRENDING_BEARISH : Tendance baissière affirmée (flux vendeur)
+        - VOLATILE_EXPANSION : Forte volatilité / expansion de range
+        - RANGE_CONSOLIDATION : Absence de tendance claire / consolidation
+        """
+        amd_context = amd_context or {}
+        close = float(tech_features.get("close") or 0.0)
+        ema50 = float(tech_features.get("ema_50") or close)
+        ema200 = float(tech_features.get("ema_200") or close)
+        rsi = float(tech_features.get("rsi_14") or 50.0)
+        adx = float(tech_features.get("adx") or 0.0)
+        trend = str(tech_features.get("trend") or "NEUTRAL").upper()
+        phase = str(amd_context.get("Phase", "")).upper()
+
+        if "EXPANSION" in phase or "DISTRIBUTION" in phase or adx > 35.0:
+            return "VOLATILE_EXPANSION"
+        if (ema50 > ema200 and close > ema50) or "BULL" in trend:
+            if adx >= 20.0 or abs(close - ema50) > 0.0005:
+                return "TRENDING_BULLISH"
+        if (ema50 < ema200 and close < ema50) or "BEAR" in trend:
+            if adx >= 20.0 or abs(close - ema50) > 0.0005:
+                return "TRENDING_BEARISH"
+        return "RANGE_CONSOLIDATION"
+
+    @staticmethod
+    def calibrate_probability(technical_score: float, market_regime: str = "RANGE_CONSOLIDATION") -> float:
+        """
+        Priorité 4 de l'audit quantitatif :
+        Un score de confluence technique (ex: 80/100) n'est PAS un taux de réussite (win rate).
+        Modèle logistique calibrant le score technique brut en probabilité statistique de gain hors-échantillon P(Win).
+        Plafonne le win rate à des niveaux réalistes (0.35 à 0.68) pour éviter tout sur-ajustement.
+        """
+        import math
+        s = max(0.0, min(100.0, float(technical_score)))
+        p_min = 0.35
+        p_max = 0.65
+        if "TRENDING" in market_regime:
+            p_max = 0.68  # Léger avantage statistique dans le sens du trend
+        elif market_regime == "VOLATILE_EXPANSION":
+            p_max = 0.60  # Risque de faux signaux accru en pic de volatilité
+
+        # Sigmoïde centrée sur 65.0 (seuil standard de déclenchement)
+        sigmoid = 1.0 / (1.0 + math.exp(-0.07 * (s - 65.0)))
+        calibrated_prob = p_min + (p_max - p_min) * sigmoid
+        return round(calibrated_prob, 4)
+
+    @staticmethod
+    def calculate_expected_value_r(win_prob: float, reward_risk_ratio: float) -> float:
+        """
+        Calcule l'espérance mathématique en unités R :
+        E(R) = P(Win) * RR - (1 - P(Win)) * 1.0
+        """
+        loss_prob = 1.0 - win_prob
+        return round((win_prob * reward_risk_ratio) - (loss_prob * 1.0), 3)
+
     def decide(
         self,
         symbol: str,
@@ -42,15 +101,8 @@ class LocalQuantBrain:
     ) -> Dict[str, Any]:
         """
         Génère une décision de trading quantitative complète et déterministe.
-        Retourne un dictionnaire compatible avec le format de décision de l'IA :
-        {
-            "action": "BUY" | "SELL" | "WAIT",
-            "confidence": int (0-100),
-            "entry": float,
-            "sl": float,
-            "tp": float,
-            "reason": str
-        }
+        Retourne un dictionnaire compatible avec le format de décision de l'IA enrichi
+        de la calibration statistique et de la journalisation d'invalidation.
         """
         amd_context = amd_context or {}
         boomerang_data = boomerang_data or {}
@@ -64,10 +116,16 @@ class LocalQuantBrain:
         macd_hist = float(tech_features.get("macd_hist") or 0.0)
         trend = str(tech_features.get("trend") or "NEUTRAL").upper()
 
+        market_regime = self.detect_market_regime(tech_features, amd_context)
+
         if close <= 0 or atr <= 0:
             return {
                 "action": "WAIT",
                 "confidence": 0,
+                "technical_score": 0.0,
+                "statistical_win_prob": 0.35,
+                "market_regime": market_regime,
+                "invalidation_reason": "Données techniques insuffisantes",
                 "entry": close,
                 "sl": close,
                 "tp": close,
@@ -78,23 +136,45 @@ class LocalQuantBrain:
         ema_dist_atr = (close - ema50) / atr
         if rsi >= 70 or ema_dist_atr > 2.5:
             # Surachat extrême ou cours trop étendu
+            reason_msg = f"Cerveau Local: Marché en surachat sévère (RSI={rsi:.1f}, +{ema_dist_atr:.1f} ATR). Attente de repli."
+            calibrated_p = self.calibrate_probability(0.0, market_regime)
             return {
                 "action": "WAIT",
                 "confidence": 85,
+                "technical_score": 0.0,
+                "statistical_win_prob": calibrated_p,
+                "market_regime": market_regime,
+                "invalidation_reason": "Anti-Chasing: Surachat extrême",
                 "entry": close,
                 "sl": 0.0,
                 "tp": 0.0,
-                "reason": f"Cerveau Local: Marché en surachat sévère (RSI={rsi:.1f}, +{ema_dist_atr:.1f} ATR). Attente de repli.",
+                "reason": reason_msg,
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "technical_score": 0.0, "statistical_win_prob": calibrated_p,
+                    "market_regime": market_regime, "invalidation_reason": "Anti-Chasing: Surachat extrême",
+                }
             }
         if rsi <= 30 or ema_dist_atr < -2.5:
             # Survente extrême ou cours trop étendu
+            reason_msg = f"Cerveau Local: Marché en survente sévère (RSI={rsi:.1f}, {ema_dist_atr:.1f} ATR). Attente de rebond."
+            calibrated_p = self.calibrate_probability(0.0, market_regime)
             return {
                 "action": "WAIT",
                 "confidence": 85,
+                "technical_score": 0.0,
+                "statistical_win_prob": calibrated_p,
+                "market_regime": market_regime,
+                "invalidation_reason": "Anti-Chasing: Survente extrême",
                 "entry": close,
                 "sl": 0.0,
                 "tp": 0.0,
-                "reason": f"Cerveau Local: Marché en survente sévère (RSI={rsi:.1f}, {ema_dist_atr:.1f} ATR). Attente de rebond.",
+                "reason": reason_msg,
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "technical_score": 0.0, "statistical_win_prob": calibrated_p,
+                    "market_regime": market_regime, "invalidation_reason": "Anti-Chasing: Survente extrême",
+                }
             }
 
         # ─── 2. ANALYSE DES CONFLUENCES INSTITUTIONNELLES & POIDS ADAPTATIFS ────
@@ -215,13 +295,31 @@ class LocalQuantBrain:
                 sl_dist = abs(entry - sl)
                 tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
 
+            tech_score = round(bull_score, 1)
+            win_prob = self.calibrate_probability(tech_score, market_regime)
+            sl_dist = abs(entry - sl)
+            tp_dist = abs(tp - entry)
+            rr_ratio = round(tp_dist / max(sl_dist, 1e-9), 2)
+            ev_r = self.calculate_expected_value_r(win_prob, rr_ratio)
+
             return {
                 "action": "BUY",
                 "confidence": min(95, int(bull_score)),
+                "technical_score": tech_score,
+                "statistical_win_prob": win_prob,
+                "expected_value_r": ev_r,
+                "market_regime": market_regime,
                 "entry": entry,
                 "sl": sl,
                 "tp": tp,
                 "reason": "Cerveau Quant Local : " + " + ".join(reasons),
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "BUY",
+                    "entry": entry, "sl": sl, "tp": tp, "rr": rr_ratio,
+                    "technical_score": tech_score, "statistical_win_prob": win_prob,
+                    "expected_value_r": ev_r, "market_regime": market_regime,
+                    "confluences": reasons, "invalidation_reason": None,
+                }
             }
 
         elif bear_score >= self.min_confidence and bear_score > bull_score:
@@ -239,22 +337,58 @@ class LocalQuantBrain:
                 sl_dist = abs(sl - entry)
                 tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
 
+            tech_score = round(bear_score, 1)
+            win_prob = self.calibrate_probability(tech_score, market_regime)
+            sl_dist = abs(sl - entry)
+            tp_dist = abs(entry - tp)
+            rr_ratio = round(tp_dist / max(sl_dist, 1e-9), 2)
+            ev_r = self.calculate_expected_value_r(win_prob, rr_ratio)
+
             return {
                 "action": "SELL",
                 "confidence": min(95, int(bear_score)),
+                "technical_score": tech_score,
+                "statistical_win_prob": win_prob,
+                "expected_value_r": ev_r,
+                "market_regime": market_regime,
                 "entry": entry,
                 "sl": sl,
                 "tp": tp,
                 "reason": "Cerveau Quant Local : " + " + ".join(reasons),
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "SELL",
+                    "entry": entry, "sl": sl, "tp": tp, "rr": rr_ratio,
+                    "technical_score": tech_score, "statistical_win_prob": win_prob,
+                    "expected_value_r": ev_r, "market_regime": market_regime,
+                    "confluences": reasons, "invalidation_reason": None,
+                }
             }
+
+        best_score = round(max(bull_score, bear_score), 1)
+        win_prob = self.calibrate_probability(best_score, market_regime)
+        inv_reason = (
+            f"Score de confluence insuffisant pour un avantage statistique avéré "
+            f"(Score max={best_score:.1f} < Seuil min={self.min_confidence:.1f}) en régime {market_regime}."
+        )
 
         return {
             "action": "WAIT",
             "confidence": 50,
+            "technical_score": best_score,
+            "statistical_win_prob": win_prob,
+            "market_regime": market_regime,
+            "invalidation_reason": inv_reason,
             "entry": close,
             "sl": 0.0,
             "tp": 0.0,
-            "reason": "Cerveau Quant Local: En attente d'une confluence claire (pas de setup SMC/Breakout suffisant).",
+            "reason": f"Cerveau Quant Local: {inv_reason}",
+            "journal_record": {
+                "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                "entry": close, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                "technical_score": best_score, "statistical_win_prob": win_prob,
+                "expected_value_r": 0.0, "market_regime": market_regime,
+                "confluences": reasons, "invalidation_reason": inv_reason,
+            }
         }
 
     def evaluate_position(self, pos: Dict[str, Any], tech_features: Dict[str, Any]) -> Dict[str, Any]:

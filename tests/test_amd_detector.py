@@ -49,6 +49,32 @@ class TestAMDEngine(unittest.TestCase):
         phase = self.engine.detect_amd_phase(df)
         self.assertIn(phase, ("Accumulation", "Consolidation"))
 
+    def test_detect_swing_points_zero_lookahead_bias(self):
+        """Vérifie que les swings ne sont confirmés qu'après clôture des barres de droite (zéro lookahead)."""
+        # Pic évident à l'indice 4 (valeur 1.30)
+        closes = [1.10, 1.12, 1.15, 1.20, 1.30, 1.22, 1.18, 1.15, 1.12, 1.10]
+        df = make_df(closes, spread=0.001)
+
+        # À la bougie 4 (au moment du pic), les barres futures n'existent pas encore
+        df_at_peak = df.iloc[:5].copy()
+        res_peak = self.engine.detect_swing_points(df_at_peak, window=5)
+        # Le pic ne doit PAS encore être confirmé à la bougie du pic
+        self.assertTrue(np.isnan(res_peak.iloc[4]['swing_high']))
+
+        # À la bougie 5 (seulement 1 barre de confirmation à droite), toujours pas confirmé
+        df_at_1_confirm = df.iloc[:6].copy()
+        res_1_confirm = self.engine.detect_swing_points(df_at_1_confirm, window=5)
+        self.assertTrue(np.isnan(res_1_confirm.iloc[4]['swing_high']))
+
+        # À la bougie 6 (2 barres de confirmation fermées à droite), le pic à l'indice 4 EST confirmé
+        df_at_2_confirm = df.iloc[:7].copy()
+        res_2_confirm = self.engine.detect_swing_points(df_at_2_confirm, window=5)
+        self.assertFalse(np.isnan(res_2_confirm.iloc[4]['swing_high']))
+        # Les deux dernières barres de n'importe quel historique ne peuvent jamais être confirmées à l'avance
+        full_res = self.engine.detect_swing_points(df, window=5)
+        self.assertTrue(np.isnan(full_res.iloc[-1]['swing_high']))
+        self.assertTrue(np.isnan(full_res.iloc[-2]['swing_high']))
+
     def test_analyze_returns_all_keys(self):
         closes = [1.10 + i * 0.005 for i in range(30)]
         df = make_df(closes)

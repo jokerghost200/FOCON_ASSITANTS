@@ -56,35 +56,43 @@ ACCOUNT_TIERS = {
 }
 
 RISK_PROFILES = {
+    "PRUDENT": {
+        "label": "🛡️ Prudent (Préservation de Capital - 0.25% / Max Jour 1.0%)",
+        "risk_percent": 0.25,
+        "daily_target_percent": 0.75,
+        "max_daily_loss_percent": 1.0,
+        "min_confidence": 75.0,
+        "min_reward_risk": 2.0,
+    },
     "CONSERVATIVE": {
-        "label": "Prudent (Conservateur)",
+        "label": "Prudent (Conservateur - 0.5%)",
         "risk_percent": 0.5,
         "daily_target_percent": 1.5,
-        "max_daily_loss_percent": 3.0,
+        "max_daily_loss_percent": 2.5,
         "min_confidence": 70.0,
         "min_reward_risk": 1.8,
     },
     "BALANCED": {
-        "label": "Équilibré (Standard)",
+        "label": "Équilibré (Standard - 1.0%)",
         "risk_percent": 1.0,
-        "daily_target_percent": 3.0,
-        "max_daily_loss_percent": 5.0,
+        "daily_target_percent": 2.5,
+        "max_daily_loss_percent": 4.0,
         "min_confidence": 60.0,
         "min_reward_risk": 1.5,
     },
     "AGGRESSIVE": {
-        "label": "Dynamique (Agressif)",
-        "risk_percent": 2.0,
-        "daily_target_percent": 5.0,
-        "max_daily_loss_percent": 8.0,
+        "label": "Dynamique (Agressif - 1.5%)",
+        "risk_percent": 1.5,
+        "daily_target_percent": 4.0,
+        "max_daily_loss_percent": 5.0,
         "min_confidence": 55.0,
         "min_reward_risk": 1.4,
     },
     "SNIPER": {
-        "label": "🎯 Sniper (Ultra-Sélectif - 2.5% / Confluence A+ / R:R 2.0+)",
-        "risk_percent": 2.5,
-        "daily_target_percent": 6.0,
-        "max_daily_loss_percent": 6.0,
+        "label": "🎯 Sniper (Ultra-Sélectif - 1.5% / Confluence A+ / R:R 2.0+)",
+        "risk_percent": 1.5,
+        "daily_target_percent": 4.0,
+        "max_daily_loss_percent": 4.0,
         "min_confidence": 75.0,
         "min_reward_risk": 2.0,
         "sniper_mode": True,
@@ -233,11 +241,6 @@ class RiskManager:
                 logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
             else:
                 final_lot = max(min_lot, min(calculated_lot, effective_max))
-
-            # Micro-capital hard safety cap: If auto tiers enabled, capital < $100 and no explicit fixed lot,
-            # enforce strict min_lot (0.01) to protect small accounts from over-leveraging.
-            if self.auto_tier_enabled and capital < 100.0 and not (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0):
-                final_lot = min_lot
             
             # Round again to fix floating point issues
             # Calculate decimal places accurately for any step (0.01, 0.05, 0.1, etc.)
@@ -434,34 +437,45 @@ class RiskManager:
             
         actual_risk_amount = lot * loss_per_lot
 
-        # --- PROTECTION PETITS COMPTES / LOT MINIMUM BROKER ---
+        # --- RÈGLE D'OR : LE CALCUL DU RISQUE EST INTRANSIGEANT ---
         is_fixed_lot = (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0) or bool(proposal.get('manual_lot_override'))
 
-        if not is_fixed_lot and capital > 0 and self.auto_tier_enabled:
+        if not is_fixed_lot and capital > 0:
             actual_risk_pct = (actual_risk_amount / capital) * 100.0
-            tier = self.get_account_tier(capital)
-            micro_cap = getattr(self, 'max_micro_risk_cap_percent', tier.get('max_risk_cap_percent', 4.0))
 
-            # Si le broker impose min_lot (ex: 0.01) et que la perte sur SL dépasse le plafond toléré
-            if lot == min_lot and actual_risk_pct > micro_cap and actual_risk_amount > 2.0:
-                return {
-                    "valid": False,
-                    "reason": (
-                        f"⚠️ [Tier {tier['tier_id']}] Risque excessif pour ce compte : le lot minimum broker "
-                        f"({min_lot}) engendrerait une perte de ${actual_risk_amount:.2f} "
-                        f"({actual_risk_pct:.1f}% du capital > plafond toléré {micro_cap:.1f}% sur capital de ${capital:.2f}). "
-                        f"Stop Loss trop éloigné pour ce capital."
+            # Cas 1 : Paliers automatiques actifs sur petits comptes (< $250)
+            if self.auto_tier_enabled and capital < 250.0:
+                tier = self.get_account_tier(capital)
+                micro_cap = getattr(self, 'max_micro_risk_cap_percent', tier.get('max_risk_cap_percent', 4.0))
+
+                # Si le broker impose min_lot (ex: 0.01) et que la perte sur SL dépasse le plafond strict toléré
+                if lot == min_lot and actual_risk_pct > micro_cap and actual_risk_amount > 2.0:
+                    return {
+                        "valid": False,
+                        "reason": (
+                            f"⚠️ [Tier {tier['tier_id']}] Risque excessif pour ce compte : le lot minimum broker "
+                            f"({min_lot}) engendrerait une perte de ${actual_risk_amount:.2f} "
+                            f"({actual_risk_pct:.1f}% du capital > plafond toléré {micro_cap:.1f}% sur capital de ${capital:.2f}). "
+                            f"Stop Loss trop éloigné pour ce capital. Trade refusé."
+                        )
+                    }
+                elif lot == min_lot and actual_risk_pct > (risk_percent * 1.25):
+                    logger.info(
+                        f"ℹ️ [Tier {tier['tier_id']}] Ajustement au lot minimum broker ({min_lot}) : "
+                        f"risque effectif de ${actual_risk_amount:.2f} ({actual_risk_pct:.1f}% du capital)."
                     )
-                }
-            elif lot == min_lot and actual_risk_pct > (risk_percent * 1.25):
-                logger.info(
-                    f"ℹ️ [Tier {tier['tier_id']}] Ajustement au lot minimum broker ({min_lot}) : "
-                    f"risque effectif de ${actual_risk_amount:.2f} ({actual_risk_pct:.1f}% du capital)."
-                )
-
-        if not is_fixed_lot and actual_risk_amount > allowed_risk_amount * 1.05 and lot > min_lot: # Allow tiny 5% rounding margin
-            # Only fail if the lot is bigger than min_lot and risk is still too high
-            return {"valid": False, "reason": f"Actual risk (${actual_risk_amount:.2f}) exceeds allowed risk (${allowed_risk_amount:.2f})"}
+            else:
+                # Cas 2 : Comptes standards / sans auto-tier : le lot min broker NE DOIT JAMAIS forcer un dépassement du risque
+                # Marge tolérée de 5% pour l'arrondi du step de volume uniquement
+                if actual_risk_amount > allowed_risk_amount * 1.05:
+                    return {
+                        "valid": False,
+                        "reason": (
+                            f"🚫 [Risque Intransigeant] Risque réel (${actual_risk_amount:.2f} avec lot min {lot}) "
+                            f"dépasse le budget maximal autorisé de ${allowed_risk_amount:.2f} ({risk_percent:.1f}%). "
+                            f"Trade refusé : ne jamais augmenter le lot pour forcer un ordre."
+                        )
+                    }
         # ---------------------------------------
         
         # --- NEW MARGIN CHECK ---

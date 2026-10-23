@@ -200,17 +200,51 @@ class TestRiskManager(unittest.TestCase):
     def test_apply_risk_profile_presets(self):
         """Vérifie que les profils prédéfinis ajustent correctement le risque et l'objectif journalier."""
         rm = RiskManager()
+        rm.apply_risk_profile("PRUDENT")
+        self.assertAlmostEqual(rm.default_risk_percent, 0.25)
+        self.assertAlmostEqual(rm.max_daily_loss_percent, 1.0)
+        self.assertAlmostEqual(rm.min_confidence, 75.0)
+
         rm.apply_risk_profile("CONSERVATIVE")
         self.assertAlmostEqual(rm.default_risk_percent, 0.5)
-        self.assertAlmostEqual(rm.max_daily_loss_percent, 3.0)
+        self.assertAlmostEqual(rm.max_daily_loss_percent, 2.5)
 
         rm.apply_risk_profile("BALANCED")
         self.assertAlmostEqual(rm.default_risk_percent, 1.0)
-        self.assertAlmostEqual(rm.max_daily_loss_percent, 5.0)
+        self.assertAlmostEqual(rm.max_daily_loss_percent, 4.0)
 
         rm.apply_risk_profile("AGGRESSIVE")
-        self.assertAlmostEqual(rm.default_risk_percent, 2.0)
-        self.assertAlmostEqual(rm.max_daily_loss_percent, 8.0)
+        self.assertAlmostEqual(rm.default_risk_percent, 1.5)
+        self.assertAlmostEqual(rm.max_daily_loss_percent, 5.0)
+
+    def test_intransigent_risk_rejects_when_min_lot_exceeds_budget(self):
+        """Priorité 1 de l'audit : Si le lot minimum imposé par le courtier dépasse le budget de perte alloué,
+        le trade DOIT être formellement rejeté. Ne jamais autoriser un dépassement de budget de perte."""
+        rm = RiskManager(
+            default_risk_percent=0.25,  # 0.25% de 1000$ = 2.50$ max autorisés
+            auto_tier_enabled=False     # Standard / Sans dérogation micro
+        )
+        account = {"balance": 1000.0, "margin_free": 1000.0}
+        # EURUSD : 1 pip = 10$ par lot standard, 0.10$ par microlot 0.01
+        # Avec un SL de 50 pips, perte minimale au lot min (0.01) = 5.00$
+        # Or le budget autorisé à 0.25% n'est que de 2.50$.
+        symbol = {
+            "name": "EURUSD", "volume_max": 100.0, "volume_min": 0.01,
+            "volume_step": 0.01, "trade_contract_size": 100000.0,
+            "trade_tick_size": 0.00001, "trade_tick_value": 1.0,
+            "trade_stops_level": 0, "point": 0.00001, "spread": 10,
+        }
+        proposal = {
+            "action": "BUY",
+            "entry": 1.1000,
+            "sl": 1.0950,  # 50 pips de SL -> perte de 5.00$ > budget de 2.50$
+            "tp": 1.1150,
+            "confidence": 85.0
+        }
+        res = rm.validate_proposal(proposal, account, symbol)
+        self.assertFalse(res["valid"])
+        self.assertIn("Risque Intransigeant", res["reason"])
+
 
     def test_get_effective_max_open_positions(self):
         """Vérifie le bridage dynamique des positions simultanées selon le capital."""
