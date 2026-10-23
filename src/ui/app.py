@@ -2639,7 +2639,13 @@ class MainWindow(QMainWindow):
             except Exception:
                 _lg.getLogger(__name__).exception("Erreur demarrage OBScanThread")
         else:
-            self.append_to_chat(f"[Autopilot] {symbol} - Erreur d'execution: {exec_result['reason']}")
+            err_reason = str(exec_result.get('reason', ''))
+            if "10018" in err_reason or "Market closed" in err_reason:
+                if hasattr(self.orchestrator.mt5, 'mark_market_closed') and symbol:
+                    self.orchestrator.mt5.mark_market_closed(symbol, duration_seconds=1800)
+                self.append_to_chat(f"⏸️ [Autopilot] {symbol} - Marché fermé chez le courtier (Code 10018). Ordre annulé automatiquement.")
+            else:
+                self.append_to_chat(f"[Autopilot] {symbol} - Erreur d'execution: {exec_result['reason']}")
 
     def handle_ob_signals(self, ob_results: list, initial_ticket: int = 0):
         """
@@ -3280,8 +3286,22 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Succès", msg_txt)
                 frame.deleteLater() # Remove from list if taken successfully
             else:
-                QMessageBox.critical(self, "Erreur d'exécution", exec_result['reason'])
-                take_btn.setEnabled(True)
+                err_reason = str(exec_result.get('reason', ''))
+                sym = signal.get('symbol', '')
+                if "10018" in err_reason or "Market closed" in err_reason:
+                    if hasattr(self.orchestrator.mt5, 'mark_market_closed') and sym:
+                        self.orchestrator.mt5.mark_market_closed(sym, duration_seconds=1800)
+                    QMessageBox.warning(
+                        self,
+                        "Marché fermé",
+                        f"Le marché pour {sym} est actuellement fermé chez votre courtier (Code 10018).\n\n"
+                        f"Cette opportunité a été automatiquement retirée de la liste."
+                    )
+                    self.append_to_chat(f"⏸️ [Marché Fermé] {sym} est actuellement fermé chez le courtier (Code 10018). Opportunité ignorée.")
+                    frame.deleteLater()
+                else:
+                    QMessageBox.critical(self, "Erreur d'exécution", exec_result['reason'])
+                    take_btn.setEnabled(True)
         else:
             take_btn.setEnabled(True)
 

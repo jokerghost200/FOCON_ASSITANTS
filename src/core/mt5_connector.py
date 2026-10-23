@@ -17,6 +17,7 @@ class MT5Connector:
         self.connected = False
         self.state_manager = StateManager()
         self._subscribed_books = set()
+        self._closed_markets_cache = {}  # Dict[str, float]: symbol -> expiration timestamp
 
     def check_connection(self) -> bool:
         """Ping MT5. If disconnected, try to reconnect automatically."""
@@ -182,27 +183,129 @@ class MT5Connector:
 
         return False
 
+    def mark_market_closed(self, symbol: str, duration_seconds: int = 1800):
+        """
+        Marque un symbole comme fermé chez le courtier (ex: rejet Code 10018 ou week-end).
+        Ce symbole sera exclu automatiquement des scans et des exécutions pendant duration_seconds.
+        """
+        import time
+        now = time.time()
+        self._closed_markets_cache[symbol] = now + duration_seconds
+        logger.warning(f"🚫 [Marché Fermé] {symbol} marqué fermé pour {duration_seconds // 60} min (Code 10018 / Session fermée).")
+
+    def is_crypto(self, symbol: str, path: str = '') -> bool:
+        """
+        Détecte si un symbole est une cryptomonnaie (seul marché ouvert 24/7 le week-end).
+        """
+        path_lower = path.lower() if path else ""
+        if 'crypto' in path_lower:
+            return True
+        if any(traditional in path_lower for traditional in ['forex', 'indices', 'metals', 'commodities', 'energy', 'shares', 'stocks']):
+            return False
+
+        sym_u = symbol.upper()
+        crypto_roots = [
+            "BTC", "ETH", "SOL", "ADA", "DOGE", "AVAX", "DOT", "LTC", "LNK",
+            "LINK", "XLM", "BCH", "BNB", "MATIC", "XRP", "SHIB", "NEAR", "UNI", "EOS", "TRX"
+        ]
+        for c in crypto_roots:
+            if sym_u.startswith(c) or sym_u.endswith(c):
+                return True
+        return False
+
+    def get_server_time(self) -> float:
+        """
+        Calcule ou estime l'heure courante du serveur MT5 (qui peut être décalée de 2h ou 3h par rapport à UTC/Local).
+        Recherche en priorité le tick le plus récent sur les symboles cryptos 24/7 actifs.
+        """
+        with MT5Connector._lock:
+            for ref_sym in ("BTCUSD", "ETHUSD", "SOLUSD", "BTCUSD.r", "ETHUSD.r", "BTCUSDm"):
+                try:
+                    t = mt5.symbol_info_tick(ref_sym)
+                    if t and t.time > 0:
+                        return float(t.time)
+                except Exception:
+                    pass
+
+            symbols = mt5.symbols_get()
+            max_tick_time = 0.0
+            if symbols:
+                for s in symbols[:30]:
+                    if s.visible:
+                        t = mt5.symbol_info_tick(s.name)
+                        if t and t.time > max_tick_time:
+                            max_tick_time = float(t.time)
+            if max_tick_time > 0:
+                return max_tick_time
+
+        import time
+        return time.time()
+
     def is_market_open(self, symbol: str) -> bool:
         """
-        Checks if the market for a given symbol is currently open for trading.
+        Vérifie de manière robuste et multi-niveaux si un marché est actuellement ouvert :
+        1. Cache dynamique : Si le broker a rejeté un ordre avec Code 10018 récemment, le marché est fermé.
+        2. Trade Mode : Si trade_mode != FULL (disabled ou close_only), le marché est fermé.
+        3. Calendrier Week-end : Du vendredi soir au dimanche soir, TOUT actif traditionnel
+           (Forex, Indices, Métaux, Énergies, Actions) est FERMÉ. Seules les cryptos cotent le week-end.
+        4. Fraîcheur du tick vs Heure Serveur MT5 : Si aucun tick n'a été reçu depuis plus de 15 minutes
+           par rapport à l'heure courante du serveur MT5, le marché est en pause ou fermé.
         """
+        import time
+        import datetime
+
+        # 1. Vérification du cache dynamique des marchés fermés
+        now_local = time.time()
+        if symbol in getattr(self, '_closed_markets_cache', {}):
+            expiry = self._closed_markets_cache[symbol]
+            if now_local < expiry:
+                return False
+            else:
+                try:
+                    del self._closed_markets_cache[symbol]
+                except KeyError:
+                    pass
+
         with MT5Connector._lock:
             info = mt5.symbol_info(symbol)
             if info is None:
                 return False
 
-            # Check if trade mode allows trading
-            # mt5.SYMBOL_TRADE_MODE_DISABLED means no trading
-            if getattr(info, 'trade_mode', 0) in [mt5.SYMBOL_TRADE_MODE_DISABLED, mt5.SYMBOL_TRADE_MODE_CLOSEONLY]:
+            # 2. Vérification du trade_mode
+            trade_mode = getattr(info, 'trade_mode', 0)
+            if trade_mode in (mt5.SYMBOL_TRADE_MODE_DISABLED, mt5.SYMBOL_TRADE_MODE_CLOSEONLY):
                 return False
 
-            # Check last tick time. If the last tick is older than 30 minutes,
-            # it's highly likely the market is closed (weekend or session break).
-            import time
+            # Détection Crypto vs Actif traditionnel
+            path = getattr(info, 'path', '') or ''
+            is_crypto_sym = self.is_crypto(symbol, path)
+
+            # 3. Vérification du Calendrier Week-end pour marchés non-crypto
+            if not is_crypto_sym:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                weekday = now_utc.weekday()  # 0=Lundi, 4=Vendredi, 5=Samedi, 6=Dimanche
+                hour_utc = now_utc.hour
+                minute_utc = now_utc.minute
+
+                # Vendredi soir après 21h45 UTC (fermeture New York / Forex)
+                if weekday == 4 and (hour_utc > 21 or (hour_utc == 21 and minute_utc >= 45)):
+                    return False
+                # Samedi toute la journée : marchés traditionnels fermés
+                elif weekday == 5:
+                    return False
+                # Dimanche avant 21h00 UTC (ouverture Sydney / Asie)
+                elif weekday == 6 and hour_utc < 21:
+                    return False
+
+            # 4. Vérification de la fraîcheur du tick par rapport au temps serveur MT5
             tick = mt5.symbol_info_tick(symbol)
-            if tick is not None:
-                current_time = time.time()
-                if (current_time - tick.time) > 1800:  # 30 minutes
+            if tick is None or getattr(tick, 'time', 0) == 0:
+                return False
+
+            server_time = self.get_server_time()
+            if server_time > 0 and tick.time > 0:
+                age_seconds = server_time - tick.time
+                if age_seconds > 900:  # 15 minutes sans tick
                     return False
 
             return True
@@ -468,6 +571,9 @@ class MT5Connector:
                 return {"success": False, "reason": f"MT5 order_send failed: {err}"}
 
         if result.retcode != mt5.TRADE_RETCODE_DONE:
+            # Code 10018 : Market closed
+            if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
+                self.mark_market_closed(symbol, duration_seconds=1800)
             logger.error(
                 f"place_pending_order rejected for {symbol}: "
                 f"{result.comment} (Code {result.retcode})"

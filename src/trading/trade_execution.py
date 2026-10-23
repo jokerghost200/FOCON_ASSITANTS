@@ -326,6 +326,10 @@ class TradeExecutionEngine:
                 return {"success": False, "reason": f"MT5 order_send failed. Error: {mt5.last_error()}"}
             
         if result.retcode != mt5.TRADE_RETCODE_DONE:
+            sym = request.get('symbol', '')
+            if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
+                if hasattr(self.mt5, 'mark_market_closed') and sym:
+                    self.mt5.mark_market_closed(sym, duration_seconds=1800)
             return {"success": False, "reason": f"Order execution failed: {result.comment} (Code {result.retcode})"}
             
         ticket = int(getattr(result, 'order', result.deal) or result.deal)
