@@ -48,68 +48,166 @@ class ProTraderCopyDialog(QDialog):
             self.resize(880, 680)
         self.setMinimumSize(660, 480)
 
-        # Style sombre & élégant
+        # Style sombre & haute visibilité
         self.setStyleSheet("""
             QDialog {
-                background-color: #12151e;
-                color: #e0e6ed;
+                background-color: #0b0e17;
+                color: #f1f5f9;
+            }
+            QTabWidget::pane {
+                background-color: #0f1422;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 6px;
+            }
+            QTabBar::tab {
+                background-color: #161d2d;
+                color: #94a3b8;
+                padding: 8px 18px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: bold;
+                font-size: 12px;
+                border: 1px solid #1e293b;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e293b;
+                color: #ffd54f;
+                border-bottom: 2px solid #ffd54f;
+            }
+            QTabBar::tab:hover {
+                background-color: #24324a;
+                color: #ffffff;
+            }
+            QScrollArea {
+                background-color: #0f1422;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #0f1422;
             }
             QGroupBox {
-                border: 1px solid #2d3748;
+                background-color: #131929;
+                border: 1px solid #232f48;
                 border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 12px;
+                margin-top: 14px;
+                padding: 16px 14px 12px 14px;
                 font-weight: bold;
-                color: #90caf9;
+                font-size: 13px;
+                color: #60a5fa;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 4px;
+                left: 14px;
+                padding: 2px 10px;
+                color: #93c5fd;
+                background-color: #1a233a;
+                border: 1px solid #283754;
+                border-radius: 4px;
             }
             QLabel {
-                color: #c8cfe0;
+                color: #f1f5f9;
+                font-size: 12px;
+                background: transparent;
             }
             QRadioButton {
-                color: #e2e8f0;
+                color: #f1f5f9;
                 font-size: 13px;
+                font-weight: 600;
                 spacing: 8px;
+                background: transparent;
             }
             QRadioButton::indicator {
-                width: 18px;
-                height: 18px;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                border: 2px solid #64748b;
+                background-color: #090d16;
             }
             QRadioButton::indicator:checked {
-                background-color: #ffd700;
-                border: 2px solid #ffffff;
-                border-radius: 9px;
+                background-color: #f59e0b;
+                border: 3px solid #ffffff;
             }
-            QRadioButton::indicator:unchecked {
-                background-color: #1a202c;
-                border: 2px solid #4a5568;
-                border-radius: 9px;
+            QRadioButton::indicator:hover {
+                border-color: #93c5fd;
+            }
+            QCheckBox {
+                color: #f1f5f9;
+                font-size: 12px;
+                font-weight: 500;
+                spacing: 8px;
+                background: transparent;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 2px solid #64748b;
+                background-color: #090d16;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #10b981;
+                border: 2px solid #34d399;
             }
             QSpinBox, QDoubleSpinBox {
-                background-color: #1a202c;
-                color: #ffd700;
-                border: 1px solid #4a5568;
-                border-radius: 4px;
-                padding: 4px;
+                background-color: #090d16;
+                color: #ffd54f;
+                border: 1px solid #3b82f6;
+                border-radius: 6px;
+                padding: 5px 10px;
                 font-weight: bold;
+                font-size: 13px;
+            }
+            QSpinBox:hover, QDoubleSpinBox:hover {
+                border: 1px solid #60a5fa;
+                background-color: #0d1320;
+            }
+            QSpinBox::up-button, QSpinBox::down-button,
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+                width: 18px;
+                background-color: #1a233a;
+                border: 1px solid #283754;
             }
             QTableWidget {
-                background-color: #161b26;
-                color: #e2e8f0;
-                border: 1px solid #2d3748;
+                background-color: #0d121e;
+                color: #f1f5f9;
+                border: 1px solid #1e293b;
                 border-radius: 6px;
-                gridline-color: #2d3748;
+                gridline-color: #1e293b;
+            }
+            QTableWidget::item {
+                background-color: #0d121e;
+                color: #f1f5f9;
+                padding: 8px;
+            }
+            QTableWidget::item:selected {
+                background-color: #1e293b;
+                color: #ffd54f;
             }
             QHeaderView::section {
-                background-color: #1e2636;
-                color: #90caf9;
+                background-color: #161e30;
+                color: #93c5fd;
                 font-weight: bold;
-                border: 1px solid #2d3748;
-                padding: 4px;
+                border: 1px solid #1e293b;
+                padding: 6px 10px;
+                font-size: 12px;
+            }
+            QScrollBar:vertical {
+                background: #0f1422;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #283754;
+                min-height: 24px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3b82f6;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
             }
         """)
 
@@ -158,7 +256,8 @@ class ProTraderCopyDialog(QDialog):
         self.status_badge = QLabel("INACTIF")
         self.status_badge.setFont(QFont("Arial", 11, QFont.Bold))
         self.status_badge.setAlignment(Qt.AlignCenter)
-        self.status_badge.setFixedSize(160, 36)
+        self.status_badge.setMinimumWidth(180)
+        self.status_badge.setMinimumHeight(44)
         self._update_status_badge()
         h_layout.addWidget(self.status_badge)
 
@@ -188,7 +287,7 @@ class ProTraderCopyDialog(QDialog):
                 "Order Flow · Imbalances M15",
                 "EURUSD (Futures & CFD)",
                 "• Analyse liquidité & imbalances M15\n• Fenêtre précise (16h00 ±30m)\n• Confirmation LTF M5/M3\n• Filtre strict anti-range",
-                "#1565c0"
+                "#60a5fa"
             ),
             (
                 "benjamin",
@@ -196,7 +295,7 @@ class ProTraderCopyDialog(QDialog):
                 "Scalping d'Ouverture · Clusters",
                 "US30, NASDAQ, Gold",
                 "• Exploitation de la volatilité d'ouverture\n• Grappes de 2 à 3 ordres limites étagés\n• TP courts & contrôle strict du spread\n• Risque dégressif par trade",
-                "#7b1fa2"
+                "#c084fc"
             ),
             (
                 "romain",
@@ -204,7 +303,7 @@ class ProTraderCopyDialog(QDialog):
                 "Price Action · Stats · Fibonacci",
                 "NASDAQ, S&P 500, Dow Jones",
                 "• Pullback sur prix d'ouverture (OPR)\n• Repli Fibonacci 61.8% Golden Pocket\n• Filtre d'annonces & panique VIX\n• SL ATR, Break Even 1R & trailing",
-                "#2e7d32"
+                "#4ade80"
             ),
             (
                 "nada",
@@ -212,7 +311,7 @@ class ProTraderCopyDialog(QDialog):
                 "BMC · Structure & Fibonacci 50-61.8%",
                 "Gold (XAUUSD), NASDAQ",
                 "• Prise de liquidité (Sweep) session Londres\n• Cassure de structure H1 (BOS)\n• Entrée sur retest Fibo 50% - 61.8%\n• Stop Loss sur invalidation du sweep",
-                "#c77700"
+                "#fbbf24"
             ),
         ]
 
@@ -297,30 +396,26 @@ class ProTraderCopyDialog(QDialog):
         tab_cfg_lay.addWidget(self.params_grp)
 
         # --- Onglet 1 : Sélection & Paramétrage (Déroulant / Réactif) ---
+        tab_config.setStyleSheet("background-color: #0f1422; color: #f1f5f9;")
         scroll_config = QScrollArea()
         scroll_config.setWidgetResizable(True)
         scroll_config.setFrameShape(QFrame.NoFrame)
         scroll_config.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_config.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_config.setStyleSheet("background: transparent;")
+        scroll_config.setStyleSheet("background-color: #0f1422; border: none;")
+        scroll_config.viewport().setStyleSheet("background-color: #0f1422;")
         scroll_config.setWidget(tab_config)
         tabs.addTab(scroll_config, "⚙️ Configuration de la Stratégie")
 
         # --- Onglet 2 : Journal des Performances & Comparatif (Déroulant / Réactif) ---
-        scroll_stats = QScrollArea()
-        scroll_stats.setWidgetResizable(True)
-        scroll_stats.setFrameShape(QFrame.NoFrame)
-        scroll_stats.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_stats.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_stats.setStyleSheet("background: transparent;")
-
         tab_stats = QWidget()
+        tab_stats.setStyleSheet("background-color: #0f1422; color: #f1f5f9;")
         tab_stats_lay = QVBoxLayout(tab_stats)
         tab_stats_lay.setSpacing(8)
 
         stats_hint = QLabel("📊 Suivi en temps réel des signaux générés et des trades clôturés par profil :")
         stats_hint.setFont(QFont("Arial", 10, QFont.Bold))
-        stats_hint.setStyleSheet("color: #90caf9;")
+        stats_hint.setStyleSheet("color: #93c5fd;")
         tab_stats_lay.addWidget(stats_hint)
 
         self.stats_table = QTableWidget(4, 7)
@@ -334,10 +429,30 @@ class ProTraderCopyDialog(QDialog):
         tab_stats_lay.addWidget(self.stats_table)
 
         self.refresh_stats_btn = QPushButton("🔄 Rafraîchir les Statistiques")
-        self.refresh_stats_btn.setStyleSheet("background-color: #2d3748; padding: 6px; font-weight: bold;")
+        self.refresh_stats_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #f1f5f9;
+                border: 1px solid #3b82f6;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+                color: #ffffff;
+            }
+        """)
         self.refresh_stats_btn.clicked.connect(self.refresh_stats_table)
         tab_stats_lay.addWidget(self.refresh_stats_btn)
 
+        scroll_stats = QScrollArea()
+        scroll_stats.setWidgetResizable(True)
+        scroll_stats.setFrameShape(QFrame.NoFrame)
+        scroll_stats.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_stats.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_stats.setStyleSheet("background-color: #0f1422; border: none;")
+        scroll_stats.viewport().setStyleSheet("background-color: #0f1422;")
         scroll_stats.setWidget(tab_stats)
         tabs.addTab(scroll_stats, "📈 Performance & Comparatif")
 
@@ -408,6 +523,10 @@ class ProTraderCopyDialog(QDialog):
 
         row = 0
         self.param_widgets = {}
+
+        self.params_lay.setColumnStretch(0, 0)
+        self.params_lay.setColumnStretch(1, 0)
+        self.params_lay.setColumnStretch(2, 1)
 
         if pid == "corentin":
             # Paramètres Corentin
@@ -520,6 +639,8 @@ class ProTraderCopyDialog(QDialog):
         # Activer ou désactiver les widgets selon le mode choisi
         is_custom = (self.selected_mode == "custom")
         for w in self.param_widgets.values():
+            if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                w.setFixedWidth(130)
             w.setEnabled(is_custom)
 
     def load_current_state(self):
@@ -650,26 +771,44 @@ class ProTraderCopyDialog(QDialog):
         for row, p in enumerate(profiles):
             name_item = QTableWidgetItem(p["name"])
             name_item.setFont(QFont("Arial", 10, QFont.Bold))
+            name_item.setForeground(QColor("#f1f5f9"))
 
             style_item = QTableWidgetItem(p["style"])
+            style_item.setForeground(QColor("#94a3b8"))
 
             statut = "ACTIF (" + (p["active_mode"].upper() if p["active_mode"] else "") + ")" if p["is_active"] else "Inactif"
             statut_item = QTableWidgetItem(statut)
+            statut_item.setTextAlignment(Qt.AlignCenter)
             if p["is_active"]:
-                statut_item.setForeground(QColor("#4caf50"))
+                statut_item.setForeground(QColor("#10b981"))
                 statut_item.setFont(QFont("Arial", 10, QFont.Bold))
+            else:
+                statut_item.setForeground(QColor("#64748b"))
 
             st = p["stats"]
             sig_item = QTableWidgetItem(str(st["signals_count"]))
+            sig_item.setForeground(QColor("#e2e8f0"))
+            sig_item.setTextAlignment(Qt.AlignCenter)
+
             trades_item = QTableWidgetItem(str(st["trades"]))
+            trades_item.setForeground(QColor("#e2e8f0"))
+            trades_item.setTextAlignment(Qt.AlignCenter)
+
             wr_item = QTableWidgetItem(f"{st['win_rate_pct']:.1f} %")
+            wr_item.setForeground(QColor("#60a5fa"))
+            wr_item.setFont(QFont("Arial", 10, QFont.Bold))
+            wr_item.setTextAlignment(Qt.AlignCenter)
 
             pnl = st["total_pnl"]
             pnl_item = QTableWidgetItem(f"{pnl:+.2f} $")
+            pnl_item.setFont(QFont("Arial", 10, QFont.Bold))
+            pnl_item.setTextAlignment(Qt.AlignCenter)
             if pnl > 0:
-                pnl_item.setForeground(QColor("#00e676"))
+                pnl_item.setForeground(QColor("#10b981"))
             elif pnl < 0:
-                pnl_item.setForeground(QColor("#ff5252"))
+                pnl_item.setForeground(QColor("#ef4444"))
+            else:
+                pnl_item.setForeground(QColor("#94a3b8"))
 
             self.stats_table.setItem(row, 0, name_item)
             self.stats_table.setItem(row, 1, style_item)

@@ -1073,15 +1073,75 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         # Apply dark theme
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(30, 30, 30))
+        palette.setColor(QPalette.Window, QColor(11, 14, 23))
         palette.setColor(QPalette.WindowText, Qt.white)
-        palette.setColor(QPalette.Base, QColor(45, 45, 45))
+        palette.setColor(QPalette.Base, QColor(13, 18, 30))
         palette.setColor(QPalette.Text, Qt.white)
-        palette.setColor(QPalette.Button, QColor(60, 60, 60))
+        palette.setColor(QPalette.Button, QColor(30, 41, 59))
         palette.setColor(QPalette.ButtonText, Qt.white)
         self.setPalette(palette)
-        
+
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #0b0e17;
+                color: #f1f5f9;
+            }
+            QWidget#central_widget {
+                background-color: #0b0e17;
+                color: #f1f5f9;
+            }
+            QTabWidget::pane {
+                background-color: #0d121e;
+                border: 1px solid #1e2638;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background-color: #151b29;
+                color: #94a3b8;
+                padding: 8px 18px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid #1e2638;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1e2638;
+                color: #38bdf8;
+                border-bottom: 2px solid #38bdf8;
+            }
+            QTabBar::tab:hover {
+                background-color: #24324a;
+                color: #ffffff;
+            }
+            QScrollArea {
+                background-color: #0d121e;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: #0d121e;
+            }
+            QScrollBar:vertical {
+                background: #0d121e;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #1e293b;
+                min-height: 24px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3b82f6;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
+
         central_widget = QWidget()
+        central_widget.setObjectName("central_widget")
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         
@@ -1538,18 +1598,24 @@ class MainWindow(QMainWindow):
         
         # --- Tab 1: Signal Panel (Scanner) ---
         self.scanner_tab = QWidget()
+        self.scanner_tab.setStyleSheet("background-color: #0d121e;")
         scanner_layout = QVBoxLayout(self.scanner_tab)
         
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setStyleSheet("background-color: #0d121e; border: none;")
+        self.scroll_area.viewport().setStyleSheet("background-color: #0d121e;")
         self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background-color: #0d121e;")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignTop)
         
         # Add default message
-        default_label = QLabel("Aucune analyse en cours.\nCliquez sur 'SCANNER LES MARCHÉS' pour analyser vos actifs.")
-        default_label.setFont(QFont("Arial", 12))
+        default_label = QLabel("Aucune analyse en cours.\nCliquez sur 'LANCER LE SCANNER' pour analyser vos actifs.")
+        default_label.setFont(QFont("Arial", 12, QFont.Bold))
         default_label.setAlignment(Qt.AlignCenter)
+        default_label.setStyleSheet("color: #94a3b8; padding: 40px; background: transparent;")
         self.scroll_layout.addWidget(default_label)
         
         self.scroll_area.setWidget(self.scroll_content)
@@ -1574,7 +1640,27 @@ class MainWindow(QMainWindow):
         self.positions_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.positions_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.positions_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.positions_table.setStyleSheet("QTableWidget { background-color: #2D2D2D; color: white; } QHeaderView::section { background-color: #3D3D3D; font-weight: bold; }")
+        self.positions_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0d121e;
+                color: #f1f5f9;
+                border: 1px solid #1e2638;
+                border-radius: 6px;
+                gridline-color: #1e2638;
+            }
+            QTableWidget::item {
+                background-color: #0d121e;
+                color: #f1f5f9;
+                padding: 6px;
+            }
+            QHeaderView::section {
+                background-color: #161e30;
+                color: #93c5fd;
+                font-weight: bold;
+                border: 1px solid #1e2638;
+                padding: 6px;
+            }
+        """)
         p_hdr = self.positions_table.horizontalHeader()
         p_hdr.setSectionResizeMode(QHeaderView.Interactive)
         p_hdr.setStretchLastSection(True)
@@ -1607,7 +1693,27 @@ class MainWindow(QMainWindow):
         self.pendings_table.setHorizontalHeaderLabels(['Ticket', 'Symbole', 'Sens', 'Nom (modifiable)', 'Entrée', 'Statut'])
         self.pendings_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pendings_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.pendings_table.setStyleSheet("QTableWidget { background-color: #1a2a4a; color: white; } QHeaderView::section { background-color: #24365e; font-weight: bold; }")
+        self.pendings_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0d121e;
+                color: #f1f5f9;
+                border: 1px solid #1e2638;
+                border-radius: 6px;
+                gridline-color: #1e2638;
+            }
+            QTableWidget::item {
+                background-color: #0d121e;
+                color: #f1f5f9;
+                padding: 6px;
+            }
+            QHeaderView::section {
+                background-color: #161e30;
+                color: #93c5fd;
+                font-weight: bold;
+                border: 1px solid #1e2638;
+                padding: 6px;
+            }
+        """)
         self.pendings_table.setToolTip("Double-cliquez sur un nom pour le modifier.")
         self.pendings_table.cellChanged.connect(self.on_pending_name_edited)
         p_hdr2 = self.pendings_table.horizontalHeader()
@@ -1627,12 +1733,42 @@ class MainWindow(QMainWindow):
         
         # Chat Panel
         chat_group = QGroupBox("💬 Assistant")
-        chat_group.setFont(QFont("Arial", 12, QFont.Bold))
+        chat_group.setFont(QFont("Arial", 11, QFont.Bold))
+        chat_group.setStyleSheet("""
+            QGroupBox {
+                background-color: #0d121e;
+                border: 1px solid #1e2638;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 14px;
+                color: #60a5fa;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 2px 8px;
+                color: #93c5fd;
+                background-color: #161e30;
+                border: 1px solid #283754;
+                border-radius: 4px;
+            }
+        """)
         chat_layout = QVBoxLayout(chat_group)
         
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
-        self.chat_display.setFont(QFont("Arial", 11))
+        self.chat_display.setFont(QFont("Arial", 10))
+        self.chat_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #070a10;
+                color: #f1f5f9;
+                border: 1px solid #1e2638;
+                border-radius: 6px;
+                padding: 10px;
+                font-size: 12px;
+            }
+        """)
         chat_layout.addWidget(self.chat_display)
         
         # Barre d'outils Vocale & Conseiller Stratégique
@@ -1720,10 +1856,39 @@ class MainWindow(QMainWindow):
         input_layout = QHBoxLayout()
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("Écris ton message ou clique sur 🎙️ Parler...")
-        self.chat_input.setStyleSheet("background-color: #2D2D2D; color: white; border: 1px solid #555; padding: 5px;")
+        self.chat_input.setFixedHeight(36)
+        self.chat_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #070a10;
+                color: #f1f5f9;
+                border: 1px solid #1e2638;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+                background-color: #0b0f19;
+            }
+        """)
         self.chat_input.returnPressed.connect(self.on_send_chat)
         
-        self.send_btn = QPushButton("➤")
+        self.send_btn = QPushButton("➤ Envoyer")
+        self.send_btn.setFixedHeight(36)
+        self.send_btn.setFont(QFont("Arial", 10, QFont.Bold))
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                font-weight: bold;
+                border-radius: 6px;
+                padding: 6px 16px;
+                border: 1px solid #3b82f6;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+        """)
         self.send_btn.clicked.connect(self.on_send_chat)
         
         input_layout.addWidget(self.chat_input)
