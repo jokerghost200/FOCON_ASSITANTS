@@ -259,6 +259,68 @@ class TestBugfixes(unittest.TestCase):
             self.assertLessEqual(val["proposal"]["lot"], 0.05)
             self.assertLess(val["proposal"]["lot"], 0.20)  # Ne doit JAMAIS allouer 0.20+ lots !
 
+    def test_order_execution_invalid_expiration_retries_with_gtc(self):
+        from unittest.mock import patch, MagicMock
+        from src.trading.trade_execution import TradeExecutionEngine
+        import MetaTrader5 as mt5
+
+        te = TradeExecutionEngine(mt5_connector=MagicMock())
+
+        # Mock order_check failure with code 10022 then success
+        err_res = MagicMock()
+        err_res.retcode = 10022
+        err_res.comment = "Invalid expiration"
+
+        ok_res = MagicMock()
+        ok_res.retcode = mt5.TRADE_RETCODE_DONE
+        ok_res.margin = 10.0
+        ok_res.margin_free = 90.0
+
+        with patch("MetaTrader5.order_check", side_effect=[err_res, ok_res]):
+            req = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": "LTCUSD",
+                "volume": 1.0,
+                "type": mt5.ORDER_TYPE_SELL_LIMIT,
+                "price": 57.49,
+                "sl": 59.11,
+                "tp": 54.25,
+                "type_time": mt5.ORDER_TIME_SPECIFIED,
+                "expiration": 1234567,
+            }
+            res = te.check_order(req)
+            self.assertTrue(res["valid"])
+            self.assertEqual(req["type_time"], mt5.ORDER_TIME_GTC)
+            self.assertNotIn("expiration", req)
+
+        # Mock order_send failure with code 10022 then success
+        err_send = MagicMock()
+        err_send.retcode = 10022
+        err_send.comment = "Invalid expiration"
+
+        ok_send = MagicMock()
+        ok_send.retcode = mt5.TRADE_RETCODE_DONE
+        ok_send.deal = 98765
+        ok_send.order = 98765
+        ok_send.volume = 1.0
+        ok_send.price = 57.49
+
+        with patch("MetaTrader5.order_send", side_effect=[err_send, ok_send]):
+            req = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": "LTCUSD",
+                "volume": 1.0,
+                "type": mt5.ORDER_TYPE_SELL_LIMIT,
+                "price": 57.49,
+                "sl": 59.11,
+                "tp": 54.25,
+                "type_time": mt5.ORDER_TIME_SPECIFIED,
+                "expiration": 1234567,
+            }
+            res = te.execute_order(req)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["ticket"], 98765)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -283,14 +283,42 @@ class TradeExecutionEngine:
                 f"FOCON_{decision.get('profile_id', 'PRO')[:7].upper()}" if decision.get('pro_trader')
                 else ("CRT Pending Limit" if is_pending else "AI Assistant Trade")
             ),
-            "type_time": mt5.ORDER_TIME_SPECIFIED if is_pending else mt5.ORDER_TIME_GTC,
+            "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
             "_snapshot": snapshot,
         }
         if is_pending:
-            import datetime
             exp_seconds = int(decision.get('expiration_seconds') or (decision.get('expiration_bars', 4) * 900))
-            request["expiration"] = int((datetime.datetime.now() + datetime.timedelta(seconds=exp_seconds)).timestamp())
+            
+            # Récupération de l'heure serveur MT5 pour éviter le décalage de fuseau horaire (GMT+1 vs GMT+3)
+            server_time = 0.0
+            if hasattr(self.mt5, 'get_server_time'):
+                try:
+                    server_time = float(self.mt5.get_server_time())
+                except Exception:
+                    server_time = 0.0
+            if server_time <= 0:
+                try:
+                    t = mt5.symbol_info_tick(symbol)
+                    if t and getattr(t, 'time', 0) > 0:
+                        server_time = float(t.time)
+                except Exception:
+                    pass
+            if server_time <= 0:
+                import time
+                server_time = time.time()
+
+            # Vérification si le broker autorise les ordres avec expiration spécifiée sur ce symbole
+            info = mt5.symbol_info(symbol)
+            exp_mode = getattr(info, 'expiration_mode', 15) if info else 15
+            can_specify_time = bool(exp_mode & getattr(mt5, 'SYMBOL_EXPIRATION_SPECIFIED', 4))
+
+            if can_specify_time:
+                request["type_time"] = mt5.ORDER_TIME_SPECIFIED
+                request["expiration"] = int(server_time + exp_seconds)
+            else:
+                request["type_time"] = mt5.ORDER_TIME_GTC
+                request.pop("expiration", None)
         
         return request
 
@@ -307,6 +335,19 @@ class TradeExecutionEngine:
                 return {"valid": False, "reason": f"MT5 order_check failed. Error: {mt5.last_error()}"}
             
         if result.retcode not in [0, mt5.TRADE_RETCODE_DONE]:
+            # Auto-fallback si le broker rejette l'expiration (Code 10022)
+            if result.retcode in (10022, getattr(mt5, 'TRADE_RETCODE_INVALID_EXPIRATION', 10022)) or "Invalid expiration" in str(result.comment):
+                logger.warning(f"⚠️ [OrderCheck] Expiration invalide (Code 10022) pour {mt5_req.get('symbol')}. Retry check en ORDER_TIME_GTC...")
+                retry_req = dict(mt5_req)
+                retry_req["type_time"] = mt5.ORDER_TIME_GTC
+                retry_req.pop("expiration", None)
+                with MT5Connector._lock:
+                    retry_result = mt5.order_check(retry_req)
+                if retry_result and retry_result.retcode in [0, mt5.TRADE_RETCODE_DONE]:
+                    request["type_time"] = mt5.ORDER_TIME_GTC
+                    request.pop("expiration", None)
+                    return {"valid": True, "margin": retry_result.margin, "margin_free": retry_result.margin_free}
+
             return {"valid": False, "reason": f"MT5 rejected order: {result.comment} (Code {result.retcode})"}
             
         return {"valid": True, "margin": result.margin, "margin_free": result.margin_free}
@@ -327,10 +368,23 @@ class TradeExecutionEngine:
             
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             sym = request.get('symbol', '')
-            if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
-                if hasattr(self.mt5, 'mark_market_closed') and sym:
-                    self.mt5.mark_market_closed(sym, duration_seconds=1800)
-            return {"success": False, "reason": f"Order execution failed: {result.comment} (Code {result.retcode})"}
+            # 1. Fallback automatique si le broker rejette l'expiration (Code 10022)
+            if result.retcode in (10022, getattr(mt5, 'TRADE_RETCODE_INVALID_EXPIRATION', 10022)) or "Invalid expiration" in str(result.comment):
+                logger.warning(f"⚠️ [OrderSend] Invalid expiration (10022) pour {sym}. Nouvel essai immédiat en fallback ORDER_TIME_GTC...")
+                retry_req = dict(mt5_req)
+                retry_req["type_time"] = mt5.ORDER_TIME_GTC
+                retry_req.pop("expiration", None)
+                with MT5Connector._lock:
+                    result = mt5.order_send(retry_req)
+
+            if result is None:
+                return {"success": False, "reason": f"MT5 order_send failed on retry. Error: {mt5.last_error()}"}
+
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
+                    if hasattr(self.mt5, 'mark_market_closed') and sym:
+                        self.mt5.mark_market_closed(sym, duration_seconds=1800)
+                return {"success": False, "reason": f"Order execution failed: {result.comment} (Code {result.retcode})"}
             
         ticket = int(getattr(result, 'order', result.deal) or result.deal)
         if self.trade_memory and request.get('_snapshot'):

@@ -16,6 +16,12 @@ class ReflectiveCritic:
     def __init__(self, ai_router=None):
         self.ai_router = ai_router
 
+    def analyze_trade(self, trade_data: Dict[str, Any], post_exit_candles: Optional[list] = None) -> Dict[str, Any]:
+        """Alias compatible FATI pour critique_trade."""
+        res = self.critique_trade(trade_data, use_ai=False)
+        res["summary"] = res.get("critique", "OK")
+        return res
+
     def critique_trade(self, trade_data: Dict[str, Any], use_ai: bool = True) -> Dict[str, Any]:
         """
         Analyse un trade clôturé et produit :

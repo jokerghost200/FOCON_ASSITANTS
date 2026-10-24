@@ -80,6 +80,24 @@ class AdaptiveWeightsEngine:
         """Retourne une copie des poids actifs actuels."""
         return dict(self.weights)
 
+    def record_trade_outcome(self, setup_type: str, is_win: bool, pnl: float = 0.0):
+        """Ajuste directement et prudemment le poids associé à un setup après clôture."""
+        key_map = {
+            "ORDER_BLOCK": "ob_weight",
+            "SMC_ORDER_BLOCK": "ob_weight",
+            "BOOMERANG": "boomerang_weight",
+            "TREND": "trend_ema_weight",
+            "TREND_EMA": "trend_ema_weight",
+            "RSI": "rsi_pullback_weight",
+            "AMD": "amd_expansion_weight",
+            "AMD_EXPANSION": "amd_expansion_weight",
+        }
+        target = key_map.get(setup_type.upper(), "ob_weight")
+        delta = self.learning_rate if is_win else -self.learning_rate
+        low, high = WEIGHT_BOUNDS.get(target, (0.0, 100.0))
+        self.weights[target] = max(low, min(high, round(self.weights.get(target, 30.0) + delta, 2)))
+        self._save()
+
     def recalibrate(self, closed_trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Recalibre les poids en analysant la performance empirique des composantes.
