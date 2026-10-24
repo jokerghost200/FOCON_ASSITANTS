@@ -570,18 +570,19 @@ class MT5Connector:
                 logger.error(f"place_pending_order failed for {symbol}, error = {err}")
                 return {"success": False, "reason": f"MT5 order_send failed: {err}"}
 
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        success_codes = (mt5.TRADE_RETCODE_DONE, getattr(mt5, 'TRADE_RETCODE_PLACED', 10008))
+        if result.retcode not in success_codes:
             # Code 10018 : Market closed
             if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
                 self.mark_market_closed(symbol, duration_seconds=1800)
             logger.error(
-                f"place_pending_order rejected for {symbol}: "
+                f"🚫 [ORDRE REFUSÉ] place_pending_order rejected for {symbol}: "
                 f"{result.comment} (Code {result.retcode})"
             )
             return {"success": False, "reason": f"{result.comment} (Code {result.retcode})"}
 
         ticket = int(result.order)
-        logger.info(f"✅ [PENDING] Ordre limite placé: {action} {volume} {symbol} @ {price} (SL={sl}, TP={tp}, ticket #{ticket})")
+        logger.info(f"📋 [ORDRE EN ATTENTE PLACÉ] {action} {volume} {symbol} @ {price} (SL={sl}, TP={tp}, ticket #{ticket})")
         return {"success": True, "ticket": ticket}
 
     def cancel_pending_order(self, ticket: int) -> bool:

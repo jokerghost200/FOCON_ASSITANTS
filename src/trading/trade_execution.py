@@ -407,6 +407,7 @@ class TradeExecutionEngine:
                 if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
                     if hasattr(self.mt5, 'mark_market_closed') and sym:
                         self.mt5.mark_market_closed(sym, duration_seconds=1800)
+                logger.error(f"🚫 [ORDRE REFUSÉ] {sym} | Rejet courtier MT5: {result.comment} (Code {result.retcode})")
                 return {"success": False, "reason": f"Order execution failed: {result.comment} (Code {result.retcode})"}
             
         ticket = int(getattr(result, 'order', 0) or getattr(result, 'deal', 0) or 0)
@@ -435,6 +436,12 @@ class TradeExecutionEngine:
         else:
             order_type_str = "SELL"
 
+        sym = request.get('symbol', '')
+        exec_price = float(result.price or request.get('price', 0.0))
+        vol = float(request.get('volume', 0.01))
+        sl_val = float(request.get('sl', 0.0))
+        tp_val = float(request.get('tp', 0.0))
+
         if self.trade_memory and request.get('_snapshot'):
             try:
                 snap = dict(request.get('_snapshot', {}))
@@ -442,19 +449,28 @@ class TradeExecutionEngine:
                 snap['is_pending'] = is_placed
                 self.trade_memory.record_entry(
                     ticket=ticket,
-                    symbol=request.get('symbol'),
+                    symbol=sym,
                     action=action_str,
-                    lot=float(request.get('volume', 0.01)),
-                    price=float(result.price or request.get('price', 0.0)),
-                    sl=float(request.get('sl', 0.0)),
-                    tp=float(request.get('tp', 0.0)),
+                    lot=vol,
+                    price=exec_price,
+                    sl=sl_val,
+                    tp=tp_val,
                     snapshot=snap,
                 )
             except Exception as _re:
                 logger.warning(f"Failed to record trade entry in memory: {_re}")
 
-        status_label = "Pending order placed" if is_placed else "Order executed"
-        logger.info(f"{status_label} successfully. Deal ID: {result.deal}, Ticket: {ticket}, Type: {order_type_str}")
+        if is_placed:
+            logger.info(
+                f"📋 [ORDRE EN ATTENTE PLACÉ] Ticket #{ticket} | {sym} {order_type_str} {vol} lot(s) @ {exec_price} | "
+                f"SL={sl_val}, TP={tp_val}"
+            )
+        else:
+            logger.info(
+                f"⚡ [ORDRE AU MARCHÉ EXÉCUTÉ] Deal #{result.deal} (Ticket #{ticket}) | {sym} {order_type_str} {vol} lot(s) @ {exec_price} | "
+                f"SL={sl_val}, TP={tp_val}"
+            )
+
         return {
             "success": True, 
             "deal_id": result.deal, 

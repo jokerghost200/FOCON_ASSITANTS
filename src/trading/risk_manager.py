@@ -543,6 +543,15 @@ class RiskManager:
                         f"dépasse l'intégralité du capital disponible (${capital:.2f}). Ordre bloqué pour protection."
                     )
                 }
+            if getattr(self, 'strict_risk_ceiling', False) and final_risk_amount > allowed_risk_amount * 1.25:
+                return {
+                    "valid": False,
+                    "reason": (
+                        f"🚫 [Lot fixe vs Budget] Risque avec lot fixe {lot} (${final_risk_amount:.2f}) "
+                        f"dépasse le plafond autorisé (${allowed_risk_amount:.2f} soit {risk_percent:.1f}%). "
+                        f"Désactivez le lot fixe (fixed_lot_size: 0.0) pour ajuster dynamiquement le volume."
+                    )
+                }
             logger.info(f"🎯 [Fixed Lot Override] Volume effectif : {lot} lot(s). Risque calculé : ${final_risk_amount:.2f}.")
 
         digits = int(symbol_info.get('digits', 5) or 5)

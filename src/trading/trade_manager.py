@@ -394,7 +394,12 @@ class TradeManager:
             if should_cancel:
                 try:
                     if self.mt5.cancel_pending_order(ticket):
-                        logger.info(f"🗑️ [CRT Pending] Ordre #{ticket} ({sym} {o_type}) annulé : {reason}")
+                        logger.info(f"🗑️ [ORDRE EXPIRÉ OU ANNULÉ] Ordre #{ticket} ({sym} {o_type}) annulé : {reason}")
+                        if self.trade_memory and ticket in self.trade_memory.trades:
+                            t_rec = self.trade_memory.trades[ticket]
+                            t_rec["status"] = "CANCELLED"
+                            t_rec["exit_reason"] = reason
+                            self.trade_memory._save()
                         cancelled.append({"ticket": ticket, "symbol": sym, "reason": reason})
                     else:
                         logger.warning(f"Échec annulation ordre #{ticket}")
@@ -419,6 +424,17 @@ class TradeManager:
 
         positions = self.mt5.get_open_positions()
         current_tickets = {int(p['ticket']) for p in (positions or [])}
+
+        # Détection des ordres en attente nouvellement déclenchés (devenus positions réelles sur MT5)
+        for p in (positions or []):
+            p_tkt = int(p.get('ticket', 0))
+            if self.trade_memory and p_tkt in self.trade_memory.trades:
+                t_mem = self.trade_memory.trades[p_tkt]
+                if t_mem.get('status') == 'PENDING':
+                    t_mem['status'] = 'OPEN'
+                    t_mem['entry_price'] = float(p.get('price_open', t_mem.get('entry_price', 0.0)))
+                    self.trade_memory._save()
+                    logger.info(f"🚀 [ORDRE EXÉCUTÉ] Ordre en attente #{p_tkt} ({p.get('symbol')}) déclenché en position active @ {p.get('price_open')} !")
 
         # ── 0. DÉTECTION DES TRADES FERMÉS SUR LE SERVEUR MT5 (SL ou TP touché) ──
         if self._known_open_tickets:

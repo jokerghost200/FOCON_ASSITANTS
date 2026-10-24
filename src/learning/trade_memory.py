@@ -114,6 +114,10 @@ class TradeMemoryEngine:
         import datetime
         now_str = datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
 
+        is_pending = bool(snapshot.get('is_pending')) if snapshot else False
+        initial_status = "PENDING" if is_pending else "OPEN"
+        order_type_str = str(snapshot.get('order_type', action)).upper() if snapshot else action.upper()
+
         record = TradeRecord(
             ticket=int(ticket),
             symbol=symbol,
@@ -128,12 +132,16 @@ class TradeMemoryEngine:
             max_profit_usd=0.0,
             max_drawdown_usd=0.0,
             last_profit_usd=0.0,
-            status="OPEN",
+            status=initial_status,
         )
         rec_dict = asdict(record)
         self.trades[int(ticket)] = rec_dict
         self._save()
-        logger.info(f"🧠 [Mémoire] Trade #{ticket} sur {symbol} ({action}) enregistré avec son contexte de marché.")
+
+        if is_pending:
+            logger.info(f"🧠 [Mémoire] Ordre en attente #{ticket} sur {symbol} ({order_type_str}) mémorisé en statut PENDING.")
+        else:
+            logger.info(f"🧠 [Mémoire] Position ouverte #{ticket} sur {symbol} ({action}) enregistrée avec son contexte de marché.")
         return rec_dict
 
     def update_excursion(self, ticket: int, current_profit_usd: float):
