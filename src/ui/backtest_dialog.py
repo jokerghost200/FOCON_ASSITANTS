@@ -38,6 +38,8 @@ class BacktestWorkerThread(QThread):
         risk_profile: str,
         risk_percent: float,
         direction_filter: str,
+        strategy_filter: str = "ALL",
+        fixed_lot_size: float = 0.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -49,6 +51,8 @@ class BacktestWorkerThread(QThread):
         self.risk_profile = risk_profile
         self.risk_percent = risk_percent
         self.direction_filter = direction_filter
+        self.strategy_filter = strategy_filter
+        self.fixed_lot_size = fixed_lot_size
         self._is_stopped = False
 
     def run(self):
@@ -65,6 +69,8 @@ class BacktestWorkerThread(QThread):
                 risk_profile=self.risk_profile,
                 risk_percent=self.risk_percent,
                 direction_filter=self.direction_filter,
+                strategy_filter=self.strategy_filter,
+                fixed_lot_size=self.fixed_lot_size,
                 progress_cb=_cb,
                 stop_event=self,
             )
@@ -272,6 +278,26 @@ class BacktestDialog(QDialog):
         self.dir_combo.addItem("📉 Baisse seule (SELL_ONLY)", "SELL_ONLY")
         params_grid.addWidget(self.dir_combo, 7, 1)
 
+        # Stratégie à tester
+        params_grid.addWidget(QLabel("Stratégie :"), 8, 0)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItem("🔥 Toutes (Synergie complète)", "ALL")
+        self.strategy_combo.addItem("🎯 Candle Range Theory (CRT Limits)", "CRT")
+        self.strategy_combo.addItem("🧱 Order Blocks SMC & FVG", "ORDER_BLOCKS")
+        self.strategy_combo.addItem("🪃 Boomerang (Rebond EMA + ZigZag)", "BOOMERANG")
+        params_grid.addWidget(self.strategy_combo, 8, 1)
+
+        # Volume Fixe optionnel
+        params_grid.addWidget(QLabel("Volume Fixe (0 = AutoPilot) :"), 9, 0)
+        self.fixed_lot_spin = QDoubleSpinBox()
+        self.fixed_lot_spin.setRange(0.0, 100.0)
+        self.fixed_lot_spin.setSingleStep(0.01)
+        self.fixed_lot_spin.setDecimals(2)
+        init_fl = float(getattr(self.risk_manager, "fixed_lot_size", 0.0) or 0.0)
+        self.fixed_lot_spin.setValue(init_fl)
+        self.fixed_lot_spin.setToolTip("Volume fixe (ex: 0.2 ou 1.0). Si 0.0, le robot calcule le volume dynamiquement selon le % de risque.")
+        params_grid.addWidget(self.fixed_lot_spin, 9, 1)
+
         config_layout.addWidget(params_frame)
 
         # Bouton d'action Démarrer
@@ -404,11 +430,11 @@ class BacktestDialog(QDialog):
         tab_trades = QWidget()
         lay_trades = QVBoxLayout(tab_trades)
         self.trades_table = QTableWidget()
-        self.trades_table.setColumnCount(11)
+        self.trades_table.setColumnCount(12)
         self.trades_table.setHorizontalHeaderLabels([
-            "Ticket", "Sens", "Lot", "Entrée", "SL", "TP", "Sortie", "PnL ($)", "Gain (%)", "Raison Sortie", "Date/Heure"
+            "Ticket", "Stratégie", "Sens", "Lot", "Entrée", "SL", "TP", "Sortie", "PnL ($)", "Gain (%)", "Raison Sortie", "Date/Heure"
         ])
-        self.trades_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
+        self.trades_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
         self.trades_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.trades_table.setStyleSheet("""
             QTableWidget {
@@ -537,6 +563,9 @@ class BacktestDialog(QDialog):
             QMessageBox.warning(self, "Attention", "Veuillez sélectionner un symbole valide.")
             return
 
+        strategy = str(self.strategy_combo.currentData() or "ALL")
+        fixed_lot = float(self.fixed_lot_spin.value())
+
         self.btn_run.setEnabled(False)
         self.progress_bar.setValue(5)
         self.status_lbl.setText("Démarrage de la simulation...")
@@ -550,6 +579,8 @@ class BacktestDialog(QDialog):
             risk_profile=prof,
             risk_percent=risk_pct,
             direction_filter=direction,
+            strategy_filter=strategy,
+            fixed_lot_size=fixed_lot,
             parent=self,
         )
         self.worker.progress.connect(self.on_worker_progress)
@@ -598,8 +629,10 @@ class BacktestDialog(QDialog):
         self.kpi_dd.lbl_s.setText(f"-{dd_usd:.2f} $")
 
         blocked_micro = res.get("blocked_by_micro_protection", 0)
-        self.kpi_safety.lbl_m.setText(f"{blocked_micro} Bloqués")
-        self.kpi_safety.lbl_s.setText("Trades toxiques évités")
+        blocked_regime = res.get("blocked_by_regime", 0)
+        total_blocked = blocked_micro + blocked_regime
+        self.kpi_safety.lbl_m.setText(f"{total_blocked} Filtrés")
+        self.kpi_safety.lbl_s.setText(f"{blocked_micro} micro / {blocked_regime} illiquides")
 
         # Mise à jour de l'onglet Conclusion
         self.conclusion_text.setPlainText(res.get("conclusion", ""))
@@ -613,26 +646,39 @@ class BacktestDialog(QDialog):
 
             self.trades_table.setItem(r, 0, QTableWidgetItem(str(t.get("ticket", ""))))
 
+            strat_tag = str(t.get("strategy", "FUSION"))
+            strat_item = QTableWidgetItem(strat_tag)
+            strat_item.setTextAlignment(Qt.AlignCenter)
+            if "CRT" in strat_tag:
+                strat_item.setForeground(QColor("#ffb74d"))
+            elif "ORDER" in strat_tag:
+                strat_item.setForeground(QColor("#4fc3f7"))
+            elif "BOOM" in strat_tag:
+                strat_item.setForeground(QColor("#ba68c8"))
+            else:
+                strat_item.setForeground(QColor("#80cbc4"))
+            self.trades_table.setItem(r, 1, strat_item)
+
             act_item = QTableWidgetItem(str(t.get("action", "")))
             act_item.setForeground(QColor("#00e676") if t.get("action") == "BUY" else QColor("#ff5252"))
             act_item.setTextAlignment(Qt.AlignCenter)
-            self.trades_table.setItem(r, 1, act_item)
+            self.trades_table.setItem(r, 2, act_item)
 
-            self.trades_table.setItem(r, 2, QTableWidgetItem(f"{t.get('lot', 0.01):.2f}"))
-            self.trades_table.setItem(r, 3, QTableWidgetItem(f"{t.get('entry', 0.0):.5f}"))
-            self.trades_table.setItem(r, 4, QTableWidgetItem(f"{t.get('sl', 0.0):.5f}"))
-            self.trades_table.setItem(r, 5, QTableWidgetItem(f"{t.get('tp', 0.0):.5f}"))
-            self.trades_table.setItem(r, 6, QTableWidgetItem(f"{t.get('exit_price', 0.0):.5f}"))
+            self.trades_table.setItem(r, 3, QTableWidgetItem(f"{t.get('lot', 0.01):.2f}"))
+            self.trades_table.setItem(r, 4, QTableWidgetItem(f"{t.get('entry', 0.0):.5f}"))
+            self.trades_table.setItem(r, 5, QTableWidgetItem(f"{t.get('sl', 0.0):.5f}"))
+            self.trades_table.setItem(r, 6, QTableWidgetItem(f"{t.get('tp', 0.0):.5f}"))
+            self.trades_table.setItem(r, 7, QTableWidgetItem(f"{t.get('exit_price', 0.0):.5f}"))
 
             pnl_item = QTableWidgetItem(f"{pnl:+.2f} $")
             pnl_item.setForeground(col_pnl)
             pnl_item.setTextAlignment(Qt.AlignCenter)
-            self.trades_table.setItem(r, 7, pnl_item)
+            self.trades_table.setItem(r, 8, pnl_item)
 
             pct_item = QTableWidgetItem(f"{t.get('profit_pct', 0.0):+.1f}%")
             pct_item.setForeground(col_pnl)
             pct_item.setTextAlignment(Qt.AlignCenter)
-            self.trades_table.setItem(r, 8, pct_item)
+            self.trades_table.setItem(r, 9, pct_item)
 
             reason_item = QTableWidgetItem(str(t.get("exit_reason", "")))
             if t.get("exit_reason") == "TAKE_PROFIT":
@@ -641,9 +687,9 @@ class BacktestDialog(QDialog):
                 reason_item.setForeground(QColor("#80d8ff"))
             elif t.get("exit_reason") == "STOP_LOSS":
                 reason_item.setForeground(QColor("#ff5252"))
-            self.trades_table.setItem(r, 9, reason_item)
+            self.trades_table.setItem(r, 10, reason_item)
 
-            self.trades_table.setItem(r, 10, QTableWidgetItem(str(t.get("close_time", ""))))
+            self.trades_table.setItem(r, 11, QTableWidgetItem(str(t.get("close_time", ""))))
 
         # Mise à jour de la courbe d'évolution
         eq_curve = res.get("equity_curve", [])

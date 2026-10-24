@@ -1,14 +1,20 @@
 """
 Backtest Engine (Moteur de Simulation sur Bougies Réelles MT5)
 =============================================================
-Permet de tester virtuellement les stratégies du robot (SMC Order Blocks, Boomerang,
-Filtres Anti-FOMO, Break-Even, Trailing) sur l'historique réel des cours MT5.
+Permet de tester virtuellement les stratégies du robot sur l'historique réel des cours MT5 :
+- Smart Money Concepts (Order Blocks institutionnels)
+- Boomerang (Rebond EMA + alignement ZigZag)
+- Candle Range Theory (CRT - Modèle 3 bougies & Pending Limits FVG)
+- Cycles AMD (Accumulation, Manipulation, Distribution)
+- Détecteur de Régime de Marché (Filtrage Choppy / Illiquide)
+- Gestion de risque complète : Dynamique (% de risque) ou Lot Fixe configuré
 
 Caractéristiques :
 - Données de bougies réelles MT5 (M5, M15, H1, H4, etc.)
 - Prise en compte exacte du spread et des spécifications du courtier (tick_size, tick_value)
+- Simulation réaliste des ordres en attente (BUY_LIMIT / SELL_LIMIT) avec expiration
 - Détection du Palier de Capital (Micro $50, Standard $1000, Pro $10k+)
-- Protection Micro-Compte (comptabilise les trades toxiques évités)
+- Protection Micro-Compte et vérification de marge
 - Gestion réaliste du trade (Break-Even automatique, Trailing Stop, TP/SL)
 - Analyse approfondie et conclusion diagnostique autonome du robot
 """
@@ -23,6 +29,9 @@ from src.core.mt5_connector import MT5Connector
 from src.core.technical_indicators import TechnicalIndicators
 from src.core.order_block_detector import OrderBlockDetector
 from src.core.boomerang_detector import BoomerangDetector
+from src.core.crt_detector import CRTDetector, CRTSetup
+from src.core.amd_detector import AMDEngine
+from src.core.market_regime import MarketRegimeDetector, MarketRegimeType
 from src.ai.local_quant_brain import LocalQuantBrain
 from src.trading.risk_manager import RiskManager
 
@@ -53,6 +62,13 @@ class BacktestEngine:
             rejection_wick_min=0.3,
             min_rr=1.5,
         )
+        self.crt_detector = CRTDetector(
+            min_sweep_atr_mult=0.10,
+            min_range_atr_mult=0.50,
+            min_rr_tp1=1.5,
+        )
+        self.amd = AMDEngine(lookback_period=20)
+        self.market_regime = MarketRegimeDetector(adx_trending_threshold=22.0)
         self.local_brain = LocalQuantBrain(min_confidence=60.0, min_rr=1.5, weights_engine=weights_engine)
 
     def run_backtest(
@@ -64,11 +80,15 @@ class BacktestEngine:
         risk_profile: str = "BALANCED",
         risk_percent: Optional[float] = None,
         direction_filter: str = "BOTH",
+        strategy_filter: str = "ALL",
+        fixed_lot_size: Optional[float] = None,
         progress_cb: Optional[Callable[[float, str], None]] = None,
         stop_event=None,
     ) -> Dict[str, Any]:
         """
         Exécute le backtest virtuel bougie par bougie sur les données historiques réelles MT5.
+        Supporte le filtrage de stratégie ('ALL', 'CRT', 'ORDER_BLOCKS', 'BOOMERANG')
+        et le volume fixe ('fixed_lot_size').
         """
         def _report(progress: float, text: str):
             if progress_cb:
@@ -101,12 +121,19 @@ class BacktestEngine:
         df = df[["open", "high", "low", "close", "tick_volume", "spread"]]
         df.rename(columns={"tick_volume": "volume"}, inplace=True)
 
-        _report(0.15, "Calcul des indicateurs institutionnels et SMC...")
+        _report(0.12, "Calcul des indicateurs institutionnels et SMC...")
 
         # 2. Configuration du gestionnaire de risque pour ce capital
         self.risk.apply_risk_profile(risk_profile)
         if risk_percent is not None and risk_percent > 0:
             self.risk.default_risk_percent = float(risk_percent)
+
+        if fixed_lot_size is not None and fixed_lot_size > 0.0:
+            self.risk.fixed_lot_size = float(fixed_lot_size)
+        elif fixed_lot_size == 0.0:
+            self.risk.fixed_lot_size = 0.0
+
+        effective_fixed_lot = getattr(self.risk, "fixed_lot_size", 0.0)
 
         tier_info = RiskManager.get_account_tier(initial_capital)
         eff_max_open_pos = self.risk.get_effective_max_open_positions(initial_capital, base_max_pos=2)
@@ -121,7 +148,7 @@ class BacktestEngine:
         # 3. Précalcul vectoriel des indicateurs
         df = self.tech.add_all_indicators(df)
 
-        _report(0.25, f"Simulation en cours sur {len(df)} bougies réelles...")
+        _report(0.20, f"Simulation en cours sur {len(df)} bougies réelles...")
 
         current_balance = float(initial_capital)
         peak_balance = current_balance
@@ -129,16 +156,22 @@ class BacktestEngine:
         max_drawdown_pct = 0.0
 
         open_positions: List[Dict[str, Any]] = []
+        pending_orders: List[Dict[str, Any]] = []
         closed_trades: List[Dict[str, Any]] = []
         equity_curve: List[Dict[str, Any]] = [
             {"time": str(df.index[0]), "balance": current_balance, "equity": current_balance}
         ]
 
+        # Compteurs statistiques
         blocked_by_micro_protection = 0
         blocked_by_spread = 0
         blocked_by_confidence = 0
         blocked_by_rr = 0
+        blocked_by_regime = 0
         total_signals_generated = 0
+        pending_placed_count = 0
+        pending_filled_count = 0
+        pending_expired_count = 0
         next_ticket = 1001
 
         warmup = 50
@@ -150,7 +183,7 @@ class BacktestEngine:
                 break
 
             if idx % 25 == 0:
-                pct = 0.25 + 0.65 * ((idx - warmup) / max(1, total_steps))
+                pct = 0.20 + 0.70 * ((idx - warmup) / max(1, total_steps))
                 _report(pct, f"Simulation bougie {idx}/{len(df)} | Solde: {current_balance:.2f} $...")
 
             row = df.iloc[idx]
@@ -159,7 +192,46 @@ class BacktestEngine:
             spread_pts = float(row.get("spread", 0) or symbol_info.get("spread", 10))
             spread_price = spread_pts * point
 
-            # ── A. Gestion des positions ouvertes existantes ──
+            # ── A. Vérification et exécution des Ordres en Attente (Pending Limits) ──
+            for p_order in pending_orders[:]:
+                order_type = p_order["order_type"]
+                entry_target = p_order["entry"]
+                filled = False
+
+                # Expiration atteinte
+                if (idx - p_order["placed_bar_idx"]) > p_order["expiration_bars"]:
+                    pending_orders.remove(p_order)
+                    pending_expired_count += 1
+                    continue
+
+                # Vérification déclenchement (Fill)
+                if order_type == "BUY_LIMIT":
+                    if l <= entry_target:
+                        filled = True
+                        exec_entry = entry_target
+                elif order_type == "SELL_LIMIT":
+                    if h >= entry_target:
+                        filled = True
+                        exec_entry = entry_target
+
+                if filled:
+                    pending_orders.remove(p_order)
+                    pending_filled_count += 1
+                    open_positions.append({
+                        "ticket": p_order["ticket"],
+                        "open_time": bar_time,
+                        "action": p_order["action"],
+                        "entry": exec_entry,
+                        "sl": p_order["sl"],
+                        "tp": p_order["tp"],
+                        "lot": p_order["lot"],
+                        "be_locked": False,
+                        "balance_at_open": current_balance,
+                        "setup_reason": p_order["setup_reason"],
+                        "strategy": p_order["strategy"],
+                    })
+
+            # ── B. Gestion des positions ouvertes existantes ──
             for pos in open_positions[:]:
                 pos_type = pos["action"]
                 entry = pos["entry"]
@@ -176,7 +248,6 @@ class BacktestEngine:
                     # Progression vers le TP pour le Break-Even
                     tp_dist = tp - entry
                     if tp_dist > 0 and (h - entry) >= (0.45 * tp_dist) and not pos["be_locked"]:
-                        # Avancer le SL à l'entrée + spread de sécurité
                         pos["sl"] = round(entry + max(5 * point, spread_price), 5)
                         pos["be_locked"] = True
 
@@ -211,14 +282,9 @@ class BacktestEngine:
 
                 if exited:
                     # Calcul du PnL brut
-                    if pos_type == "BUY":
-                        pts = exit_price - entry
-                    else:
-                        pts = entry - exit_price
-
+                    pts = (exit_price - entry) if pos_type == "BUY" else (entry - exit_price)
                     ticks = pts / max(tick_size, 1e-9)
                     raw_pnl = ticks * tick_value * vol
-                    # Déduction du spread payé à l'entrée
                     spread_cost = (spread_price / max(tick_size, 1e-9)) * tick_value * vol
                     net_pnl = round(raw_pnl - spread_cost, 2)
 
@@ -249,6 +315,7 @@ class BacktestEngine:
                         "profit_pct": round((net_pnl / pos["balance_at_open"]) * 100.0, 2),
                         "exit_reason": exit_reason,
                         "balance_after": current_balance,
+                        "strategy": pos.get("strategy", "FUSION"),
                     })
 
                     open_positions.remove(pos)
@@ -258,53 +325,196 @@ class BacktestEngine:
                         "equity": current_balance,
                     })
 
-            # ── B. Recherche de nouveaux signaux d'entrée ──
-            if len(open_positions) < eff_max_open_pos and current_balance > 5.0:
+            # ── C. Recherche de nouveaux signaux d'entrée ──
+            if (len(open_positions) + len(pending_orders)) < eff_max_open_pos and current_balance > 5.0:
                 sub_df = df.iloc[max(0, idx - 110) : idx + 1]
                 tech_feat = self.tech.extract_latest_features(sub_df)
-                
-                # Détection Order Blocks et Boomerang
-                obs = self.ob_detector.detect(sub_df, symbol, timeframe, direction_filter=direction_filter)
-                boom = self.boomerang.detect(sub_df, symbol, timeframe)
+                atr_val = float(tech_feat.get("atr_14") or point * 10)
 
-                # Décision quantitative locale déterministe
-                decision = self.local_brain.decide(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    tech_features=tech_feat,
-                    boomerang_data={"decision": boom.decision, "direction": boom.direction, "score": boom.score},
-                    order_blocks=obs,
-                    spread_price=spread_price,
-                    min_distance=max(point * 10, spread_price * 1.5),
-                    direction_filter=direction_filter,
-                )
+                # 1. Analyse AMD & Régime de Marché
+                amd_context = {
+                    "Phase": self.amd.detect_amd_phase(sub_df),
+                    "FVG": self.amd.detect_fvg(sub_df),
+                    "Liquidity_Grab": self.amd.detect_liquidity_grab(sub_df),
+                    "BOS_MSS": self.amd.detect_bos_mss(sub_df),
+                }
 
-                action = decision.get("action", "WAIT")
-                if action in ("BUY", "SELL"):
+                spread_ratio = (spread_price / atr_val) if atr_val > 0 else 0.0
+                regime_diag = self.market_regime.detect_regime(tech_feat, amd_context, spread_ratio)
+
+                # Filtre de régime illiquide / haché : s'abstenir pour protéger le capital
+                if regime_diag.get("regime") == MarketRegimeType.CHOPPY_ILLIQUID:
+                    blocked_by_regime += 1
+                    continue
+
+                decision: Optional[Dict[str, Any]] = None
+                strategy_tag = "FUSION"
+
+                # Construction du sous-ensemble HTF (1h) pour analyse CRT
+                try:
+                    htf_df = sub_df.resample('1h').agg({
+                        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                    }).dropna()
+                except Exception:
+                    htf_df = sub_df
+
+                # ── Cas 1 : Mode Dédié CRT (Candle Range Theory) ──
+                if strategy_filter == "CRT":
+                    crt_setup = None
+                    if len(htf_df) >= 3:
+                        crt_setup = self.crt_detector.detect_smc_pending(
+                            df_htf=htf_df,
+                            df_ltf=sub_df,
+                            atr_ltf=atr_val,
+                            spread=spread_price,
+                            min_rr=1.5,
+                            expiration_bars=4,
+                        )
+                        if not crt_setup:
+                            crt_setup = self.crt_detector.detect(htf_df, atr=atr_val, spread=spread_price)
+
+                    if crt_setup:
+                        req_dir = str(crt_setup.direction).upper()
+                        if direction_filter == "BOTH" or direction_filter.startswith(req_dir):
+                            is_pend = getattr(crt_setup, 'order_type', 'DEAL') in ("BUY_LIMIT", "SELL_LIMIT")
+                            decision = {
+                                "action": req_dir,
+                                "entry": float(crt_setup.entry_price or c),
+                                "sl": float(crt_setup.sl or crt_setup.sl_raw or (c - atr_val)),
+                                "tp": float(crt_setup.tp or crt_setup.tp2 or (c + atr_val * 2)),
+                                "confidence": 85 if is_pend else 75,
+                                "is_pending": is_pend,
+                                "order_type": getattr(crt_setup, 'order_type', 'DEAL'),
+                                "expiration_bars": getattr(crt_setup, 'expiration_bars', 4),
+                                "reason": f"CRT Setup ({crt_setup.direction})",
+                            }
+                            strategy_tag = "CRT"
+
+                # ── Cas 2 : Mode Dédié Order Blocks SMC ──
+                elif strategy_filter == "ORDER_BLOCKS":
+                    obs = self.ob_detector.detect(sub_df, symbol, timeframe, direction_filter=direction_filter)
+                    if obs:
+                        best_ob = obs[0]
+                        if best_ob.score >= 65 and best_ob.sl and best_ob.tp:
+                            decision = {
+                                "action": best_ob.direction,
+                                "entry": c,
+                                "sl": float(best_ob.sl),
+                                "tp": float(best_ob.tp),
+                                "confidence": int(best_ob.score),
+                                "is_pending": False,
+                                "order_type": "DEAL",
+                                "reason": f"Order Block {best_ob.direction} (Score {best_ob.score})",
+                            }
+                            strategy_tag = "ORDER_BLOCK"
+
+                # ── Cas 3 : Mode Dédié Boomerang (Rebond EMA + ZigZag) ──
+                elif strategy_filter == "BOOMERANG":
+                    boom = self.boomerang.detect(sub_df, symbol, timeframe)
+                    if boom.decision in ("BUY", "SELL"):
+                        req_dir = boom.direction
+                        if direction_filter == "BOTH" or direction_filter.startswith(req_dir):
+                            decision = {
+                                "action": req_dir,
+                                "entry": c,
+                                "sl": float(boom.sl),
+                                "tp": float(boom.tp),
+                                "confidence": int(boom.score),
+                                "is_pending": False,
+                                "order_type": "DEAL",
+                                "reason": f"Boomerang Rebound ({req_dir}, Score {boom.score})",
+                            }
+                            strategy_tag = "BOOMERANG"
+
+                # ── Cas 4 : Mode 'ALL' (Synergie Complète via Cerveau Quantitatif Local) ──
+                else:
+                    obs = self.ob_detector.detect(sub_df, symbol, timeframe, direction_filter=direction_filter)
+                    boom = self.boomerang.detect(sub_df, symbol, timeframe)
+                    crt_setup = None
+                    if len(htf_df) >= 3:
+                        crt_setup = self.crt_detector.detect_smc_pending(
+                            df_htf=htf_df,
+                            df_ltf=sub_df,
+                            atr_ltf=atr_val,
+                            spread=spread_price,
+                            min_rr=1.5,
+                            expiration_bars=4,
+                        )
+                        if not crt_setup:
+                            crt_setup = self.crt_detector.detect(htf_df, atr=atr_val, spread=spread_price)
+
+                    decision = self.local_brain.decide(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        tech_features=tech_feat,
+                        amd_context=amd_context,
+                        boomerang_data={"decision": boom.decision, "direction": boom.direction, "score": boom.score},
+                        order_blocks=obs,
+                        spread_price=spread_price,
+                        min_distance=max(point * 10, spread_price * 1.5),
+                        direction_filter=direction_filter,
+                        crt_setup=crt_setup,
+                    )
+
+                    if crt_setup and getattr(crt_setup, 'order_type', '') in ("BUY_LIMIT", "SELL_LIMIT") and crt_setup.direction == decision.get("action"):
+                        decision["is_pending"] = True
+                        decision["order_type"] = crt_setup.order_type
+                        decision["entry"] = float(crt_setup.entry_price or decision["entry"])
+                        decision["expiration_bars"] = getattr(crt_setup, 'expiration_bars', 4)
+                        strategy_tag = "CRT"
+                    elif "Order Block" in decision.get("reason", ""):
+                        strategy_tag = "ORDER_BLOCK"
+                    elif "Boomerang" in decision.get("reason", ""):
+                        strategy_tag = "BOOMERANG"
+                    else:
+                        strategy_tag = "FUSION"
+
+                if decision and decision.get("action") in ("BUY", "SELL"):
                     total_signals_generated += 1
                     acc_info = {"balance": current_balance, "margin_free": current_balance}
                     validation = self.risk.validate_proposal(decision, acc_info, symbol_info)
 
                     if validation["valid"]:
                         prop = validation["proposal"]
-                        trade_entry = c  # Exécution au cours de clôture de la bougie de signal
+                        trade_entry = float(prop.get("entry", c))
                         trade_sl = float(prop.get("sl"))
                         trade_tp = float(prop.get("tp"))
                         trade_lot = float(prop.get("lot"))
+                        is_pending = bool(decision.get("is_pending"))
+                        order_type = str(decision.get("order_type", "DEAL"))
 
-                        open_positions.append({
-                            "ticket": next_ticket,
-                            "open_time": bar_time,
-                            "action": action,
-                            "entry": trade_entry,
-                            "sl": trade_sl,
-                            "tp": trade_tp,
-                            "lot": trade_lot,
-                            "be_locked": False,
-                            "balance_at_open": current_balance,
-                            "setup_reason": decision.get("reason", ""),
-                        })
-                        next_ticket += 1
+                        if is_pending and order_type in ("BUY_LIMIT", "SELL_LIMIT"):
+                            pending_orders.append({
+                                "ticket": next_ticket,
+                                "placed_bar_idx": idx,
+                                "placed_time": bar_time,
+                                "action": decision["action"],
+                                "order_type": order_type,
+                                "entry": trade_entry,
+                                "sl": trade_sl,
+                                "tp": trade_tp,
+                                "lot": trade_lot,
+                                "expiration_bars": int(decision.get("expiration_bars", 4)),
+                                "strategy": strategy_tag,
+                                "setup_reason": decision.get("reason", ""),
+                            })
+                            pending_placed_count += 1
+                            next_ticket += 1
+                        else:
+                            open_positions.append({
+                                "ticket": next_ticket,
+                                "open_time": bar_time,
+                                "action": decision["action"],
+                                "entry": c,
+                                "sl": trade_sl,
+                                "tp": trade_tp,
+                                "lot": trade_lot,
+                                "be_locked": False,
+                                "balance_at_open": current_balance,
+                                "setup_reason": decision.get("reason", ""),
+                                "strategy": strategy_tag,
+                            })
+                            next_ticket += 1
                     else:
                         reason_msg = validation.get("reason", "")
                         if "lot minimum broker" in reason_msg or "Protection Micro-Compte" in reason_msg or "Tier MICRO" in reason_msg or "Risque excessif" in reason_msg:
@@ -350,6 +560,7 @@ class BacktestEngine:
                     "profit_pct": round((net_pnl / pos["balance_at_open"]) * 100.0, 2),
                     "exit_reason": "FIN_BACKTEST",
                     "balance_after": current_balance,
+                    "strategy": pos.get("strategy", "FUSION"),
                 })
 
         _report(0.95, "Calcul des métriques et synthèse diagnostique du robot...")
@@ -376,6 +587,20 @@ class BacktestEngine:
         exits_sl = len([t for t in closed_trades if t["exit_reason"] == "STOP_LOSS"])
         exits_be = len([t for t in closed_trades if t["exit_reason"] == "BREAK_EVEN"])
 
+        # Analyse par stratégie
+        trades_by_strategy: Dict[str, Dict[str, Any]] = {}
+        for st in ("CRT", "ORDER_BLOCK", "BOOMERANG", "FUSION"):
+            sub_t = [t for t in closed_trades if t.get("strategy") == st]
+            if sub_t:
+                s_wins = [t for t in sub_t if t["profit_usd"] > 0]
+                s_pnl = sum(t["profit_usd"] for t in sub_t)
+                trades_by_strategy[st] = {
+                    "count": len(sub_t),
+                    "wins": len(s_wins),
+                    "win_rate": round(len(s_wins) / len(sub_t) * 100.0, 1),
+                    "net_pnl": round(s_pnl, 2),
+                }
+
         # 7. Génération du Rapport / Conclusion du Bot
         conclusion_text = self._generate_ai_conclusion(
             symbol=symbol,
@@ -397,7 +622,14 @@ class BacktestEngine:
             blocked_by_spread=blocked_by_spread,
             blocked_by_confidence=blocked_by_confidence,
             blocked_by_rr=blocked_by_rr,
+            blocked_by_regime=blocked_by_regime,
             total_signals_generated=total_signals_generated,
+            strategy_filter=strategy_filter,
+            effective_fixed_lot=effective_fixed_lot,
+            pending_placed=pending_placed_count,
+            pending_filled=pending_filled_count,
+            pending_expired=pending_expired_count,
+            trades_by_strategy=trades_by_strategy,
             avg_win=avg_win,
             avg_loss=avg_loss,
         )
@@ -433,7 +665,14 @@ class BacktestEngine:
             "blocked_by_spread": blocked_by_spread,
             "blocked_by_confidence": blocked_by_confidence,
             "blocked_by_rr": blocked_by_rr,
+            "blocked_by_regime": blocked_by_regime,
             "total_signals_generated": total_signals_generated,
+            "pending_orders_placed": pending_placed_count,
+            "pending_orders_filled": pending_filled_count,
+            "pending_orders_expired": pending_expired_count,
+            "strategy_filter": strategy_filter,
+            "fixed_lot_size": effective_fixed_lot,
+            "trades_by_strategy": trades_by_strategy,
             "trades": closed_trades,
             "equity_curve": equity_curve,
             "conclusion": conclusion_text,
@@ -460,7 +699,14 @@ class BacktestEngine:
         blocked_by_spread: int = 0,
         blocked_by_confidence: int = 0,
         blocked_by_rr: int = 0,
+        blocked_by_regime: int = 0,
         total_signals_generated: int = 0,
+        strategy_filter: str = "ALL",
+        effective_fixed_lot: float = 0.0,
+        pending_placed: int = 0,
+        pending_filled: int = 0,
+        pending_expired: int = 0,
+        trades_by_strategy: dict = None,
         avg_win: float = 0.0,
         avg_loss: float = 0.0,
     ) -> str:
@@ -468,6 +714,7 @@ class BacktestEngine:
         Rédige un débriefing diagnostique structuré et approfondi du backtest.
         """
         tier_name = tier_info.get("name", "Standard")
+        trades_by_strategy = trades_by_strategy or {}
         lines = []
 
         lines.append(f"══════════════════════════════════════════════════════════════════════")
@@ -476,6 +723,9 @@ class BacktestEngine:
         lines.append("")
 
         # 1. Bilan Financier
+        lot_mode_str = f"Lot Fixe ({effective_fixed_lot:.2f})" if effective_fixed_lot > 0 else "Dynamique (% Risque)"
+        lines.append(f"⚙️ Configuration : Stratégie = {strategy_filter} | Mode Volume = {lot_mode_str}")
+
         if net_profit_usd > 0:
             lines.append(f"🟢 BILAN GLOBAL : RENTABLE (+{net_profit_usd:+.2f} $ | {net_return_pct:+.1f}%)")
             lines.append(f"Le capital est passé de {initial_capital:.2f} $ à {final_balance:.2f} $ sur {num_bars} bougies.")
@@ -489,10 +739,17 @@ class BacktestEngine:
 
         lines.append("")
         lines.append("──────────────────────────────────────────────────────────────────────")
-        lines.append("1. COMPORTEMENT SPÉCIFIQUE AU CAPITAL TESTÉ :")
+        lines.append("1. COMPORTEMENT DU CAPITAL & DES ORDRES :")
         lines.append(f"   • Palier détecté : {tier_name} (Capital initial : {initial_capital:.2f} $)")
-        
-        if initial_capital < 250:
+        lines.append(f"   • Mode de dimensionnement : {lot_mode_str}")
+
+        if pending_placed > 0:
+            lines.append(f"   • Ordres en Attente (Pending Limits) : {pending_placed} placés | {pending_filled} exécutés | {pending_expired} expirés")
+
+        if blocked_by_regime > 0:
+            lines.append(f"   🛡️ FILTRE DE RÉGIME : {blocked_by_regime} période(s) évitée(s) car le marché était haché / illiquide (CHOPPY_ILLIQUID).")
+
+        if initial_capital < 250 and effective_fixed_lot <= 0:
             lines.append("   • Comportement Micro-Compte :")
             if blocked_by_micro_protection > 0:
                 lines.append(
@@ -504,19 +761,6 @@ class BacktestEngine:
                 )
             elif total_trades > 0:
                 lines.append("     ✅ Tous les trades exécutés respectaient scrupuleusement le plafond de risque micro-compte.")
-            else:
-                lines.append("     ℹ️ Aucune prise de position requise sur cette période.")
-
-            if total_trades > 0:
-                lines.append(f"     • Gain moyen / trade gagnant : +{avg_win:.2f} $ | Perte moyenne : -{avg_loss:.2f} $")
-            else:
-                lines.append(f"     • 0 position exécutée sur cette période.")
-        else:
-            lines.append(f"   • Gestion Standard/Croissance : Position sizing optimal sans contrainte de lot minimum.")
-            if total_trades > 0:
-                lines.append(f"   • Gain moyen / trade gagnant : +{avg_win:.2f} $ | Perte moyenne : -{avg_loss:.2f} $")
-            else:
-                lines.append(f"   • 0 position exécutée sur cette période.")
 
         lines.append("")
         lines.append("──────────────────────────────────────────────────────────────────────")
@@ -524,10 +768,15 @@ class BacktestEngine:
         if total_trades > 0:
             lines.append(f"   • Taux de Réussite : {win_rate:.1f}% ({total_trades} positions prises au total)")
             lines.append(f"   • Profit Factor    : {profit_factor:.2f}")
-            lines.append(f"   • Drawdown Maximum : -{max_drawdown_pct:.1f}% (Excellente tenue du risque si < 10%)")
+            lines.append(f"   • Drawdown Maximum : -{max_drawdown_pct:.1f}%")
             lines.append(f"   • Sorties TP direct : {exits_tp} fois (Gains max encaissés)")
-            lines.append(f"   • Sorties Break-Even: {exits_be} fois (Trades sauvés à 0$ de perte après impulsion)")
+            lines.append(f"   • Sorties Break-Even: {exits_be} fois (Trades sécurisés à 0$ après impulsion)")
             lines.append(f"   • Sorties SL direct : {exits_sl} fois")
+
+            if trades_by_strategy:
+                lines.append("   • Répartition par Stratégie :")
+                for s_name, s_data in trades_by_strategy.items():
+                    lines.append(f"     - [{s_name}] : {s_data['count']} trade(s), WinRate {s_data['win_rate']}%, PnL: {s_data['net_pnl']:+.2f} $")
         else:
             lines.append(f"   • Taux de Réussite : 0.0% (0 position prise sur {total_signals_generated} opportunités détectées)")
             lines.append(f"   • Drawdown Maximum : 0.0% (Aucun risque encouru)")
@@ -545,9 +794,6 @@ class BacktestEngine:
                 f"   💡 Le Break-Even automatique a permis d'éliminer le risque sur {exits_be} trade(s) "
                 f"qui se retournaient contre le marché, préservant ainsi les profits accumulés."
             )
-
-        if blocked_by_spread > 0 and total_trades > 0:
-            lines.append(f"   ⚠️ {blocked_by_spread} trade(s) évité(s) en raison d'un spread courtier trop pénalisant vs SL.")
 
         lines.append("")
         lines.append("──────────────────────────────────────────────────────────────────────")
@@ -572,14 +818,14 @@ class BacktestEngine:
                 lines.append(f"   ⚠️ CAUSE PRINCIPALE : Frais de spread trop élevés sur {symbol} ({blocked_by_spread} signaux rejetés).")
                 lines.append("   👉 Recommandation : Privilégiez des heures de plus grande liquidité ou un courtier avec des spreads plus serrés.")
             else:
-                lines.append(f"   ℹ️ CAUSE PRINCIPALE : Aucun setup Order Block / Boomerang n'a été détecté sur ces {num_bars} bougies.")
-                lines.append("   👉 Recommandation : Augmentez le nombre de bougies de test (ex: 500 ou 1000 bougies) pour analyser un cycle de marché plus large.")
+                lines.append(f"   ℹ️ CAUSE PRINCIPALE : Aucun setup valide n'a été détecté sur ces {num_bars} bougies pour la stratégie '{strategy_filter}'.")
+                lines.append("   👉 Recommandation : Augmentez le nombre de bougies de test ou passez en mode 'Toutes les stratégies' pour combiner CRT, Order Blocks et Boomerang.")
         elif win_rate >= 60.0 and profit_factor >= 1.5:
             lines.append("   🌟 Configuration VALIDÉE : La stratégie présente un avantage statistique clair sur cette période.")
             lines.append(f"   👉 Recommandation : Vous pouvez déployer l'Autopilot sur {symbol} ({timeframe}) avec ce niveau de risque.")
         elif profit_factor >= 1.0:
             lines.append("   ⚠️ Configuration MOYENNE : Stratégie profitable mais avec une marge de sécurité étroite.")
-            lines.append("   👉 Recommandation : Essayez d'augmenter le Timeframe (ex: M15 au lieu de M5) pour des Order Blocks plus fiables.")
+            lines.append("   👉 Recommandation : Essayez d'augmenter le Timeframe (ex: M15 au lieu de M5) pour des confluences plus fiables.")
         else:
             lines.append("   🛑 Configuration DÉCONSEILLÉE : Cette période de marché a été défavorable.")
             lines.append("   👉 Recommandation : Privilégiez un filtre de direction stricte (BUY_ONLY ou SELL_ONLY selon la tendance H4/D1) ou activez un R:R minimum supérieur.")

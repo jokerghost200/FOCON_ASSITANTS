@@ -99,6 +99,36 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertIn("FOREX", conclusion)
         self.assertIn("BTCUSD", conclusion)
 
+    def test_backtest_with_fixed_lot_size(self):
+        """Vérifie que le mode lot fixe est bien respecté dans le backtest."""
+        res = self.engine.run_backtest(
+            symbol="EURUSD",
+            timeframe="M15",
+            num_bars=120,
+            initial_capital=500.0,
+            fixed_lot_size=0.20,
+            strategy_filter="ALL",
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["fixed_lot_size"], 0.20)
+        self.assertIn("Lot Fixe (0.20)", res["conclusion"])
+        for trade in res.get("trades", []):
+            self.assertEqual(trade["lot"], 0.20)
+
+    def test_backtest_strategy_filter_modes(self):
+        """Vérifie que les modes de filtrage de stratégie ('CRT', 'ORDER_BLOCKS', 'BOOMERANG') s'exécutent sans erreur."""
+        for strat in ("CRT", "ORDER_BLOCKS", "BOOMERANG"):
+            res = self.engine.run_backtest(
+                symbol="EURUSD",
+                timeframe="M15",
+                num_bars=120,
+                initial_capital=200.0,
+                strategy_filter=strat,
+            )
+            self.assertTrue(res["success"])
+            self.assertEqual(res["strategy_filter"], strat)
+            self.assertIn(strat, res["conclusion"])
+
 
 if __name__ == "__main__":
     unittest.main()
