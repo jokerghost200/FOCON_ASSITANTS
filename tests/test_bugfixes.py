@@ -449,6 +449,38 @@ class TestBugfixes(unittest.TestCase):
         self.assertFalse(res["valid"])
         self.assertIn("Risque Intransigeant", res["reason"])
 
+    def test_margin_capping_preserves_min_lot_when_affordable(self):
+        """Vérifie que la marge libre suffisante permet d'ouvrir min_lot (0.01) sans être écrasée à 0.00."""
+        from unittest.mock import patch
+        from src.trading.risk_manager import RiskManager
+
+        rm = RiskManager(fixed_lot_size=0.01)
+        account = {"balance": 60.0, "margin_free": 60.0}
+        symbol = {
+            "name": "BTCUSD", "volume_max": 100.0, "volume_min": 0.01,
+            "volume_step": 0.01, "trade_contract_size": 1.0,
+            "trade_tick_size": 0.01, "trade_tick_value": 0.01,
+            "trade_stops_level": 0, "point": 0.01, "spread": 50,
+        }
+        proposal = {
+            "action": "BUY",
+            "entry": 80000.0,
+            "sl": 79500.0,
+            "tp": 81500.0,
+            "confidence": 85.0
+        }
+        # Cas 1: 1 lot requiert 3500$ (donc 0.01 lot requiert 35$). 60$ > 35$ => doit être accepté à 0.01 !
+        with patch("MetaTrader5.order_calc_margin", return_value=3500.0):
+            res1 = rm.validate_proposal(proposal, account, symbol)
+            self.assertTrue(res1["valid"])
+            self.assertEqual(res1["proposal"]["lot"], 0.01)
+
+        # Cas 2: 1 lot requiert 9000$ (donc 0.01 lot requiert 90$). 60$ < 90$ => rejet propre sans crash
+        with patch("MetaTrader5.order_calc_margin", return_value=9000.0):
+            res2 = rm.validate_proposal(proposal, account, symbol)
+            self.assertFalse(res2["valid"])
+            self.assertIn("Marge libre insuffisante", res2["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

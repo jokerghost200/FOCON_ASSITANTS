@@ -517,7 +517,14 @@ class BacktestEngine:
                             next_ticket += 1
                     else:
                         reason_msg = validation.get("reason", "")
-                        if "lot minimum broker" in reason_msg or "Protection Micro-Compte" in reason_msg or "Tier MICRO" in reason_msg or "Risque excessif" in reason_msg:
+                        if (
+                            "lot minimum broker" in reason_msg
+                            or "Protection Micro-Compte" in reason_msg
+                            or "Tier MICRO" in reason_msg
+                            or "Risque excessif" in reason_msg
+                            or "Marge libre insuffisante" in reason_msg
+                            or "marge courtier" in reason_msg
+                        ):
                             blocked_by_micro_protection += 1
                         elif "Spread" in reason_msg:
                             blocked_by_spread += 1
@@ -833,3 +840,8 @@ class BacktestEngine:
         lines.append("══════════════════════════════════════════════════════════════════════")
 
         return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    from backtester import main
+    main()

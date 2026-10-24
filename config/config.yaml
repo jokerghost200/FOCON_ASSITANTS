@@ -73,7 +73,7 @@ risk_management:
   spread_buffer_enabled: true
   max_spread_sl_ratio: 0.25
   spread_buffer_max_cap: 0.4
-  risk_profile: SNIPER
+  risk_profile: BALANCED
   auto_tier_enabled: false
   max_micro_risk_cap_percent: 4.0
   daily_profit_target_percent: 5.0

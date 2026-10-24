@@ -499,7 +499,19 @@ class RiskManager:
                 else:
                     safe_margin_ratio = 0.25 if capital < 250.0 else 0.40
 
+                margin_for_min_lot = margin_required_1_lot * min_lot
                 max_lot_margin = (free_margin * safe_margin_ratio) / margin_required_1_lot
+
+                # Si la marge libre globale ne peut même pas couvrir 100% du lot minimum du courtier
+                if free_margin < margin_for_min_lot:
+                    return {
+                        "valid": False,
+                        "reason": (
+                            f"Marge libre insuffisante (${free_margin:.2f}) : le lot minimum ({min_lot}) "
+                            f"requiert ~${margin_for_min_lot:.2f} de marge courtier sur {symbol}."
+                        )
+                    }
+
                 if lot > max_lot_margin:
                     if is_fixed_lot:
                         logger.warning(
@@ -523,8 +535,19 @@ class RiskManager:
                     if self.auto_tier_enabled and not is_fixed_lot and capital < 100.0:
                         lot = min(lot, 0.02)
                     
+                    # Si le plafonnement de sécurité a réduit le lot en-dessous du lot minimum,
+                    # mais que le compte a bien la marge pour payer ce lot minimum, on préserve min_lot
                     if lot < min_lot:
-                        return {"valid": False, "reason": f"Marge libre insuffisante (${free_margin:.2f}) pour le lot minimum ({min_lot})."}
+                        if free_margin >= margin_for_min_lot:
+                            lot = min_lot
+                        else:
+                            return {
+                                "valid": False,
+                                "reason": (
+                                    f"Marge libre insuffisante (${free_margin:.2f}) : le lot minimum ({min_lot}) "
+                                    f"requiert ~${margin_for_min_lot:.2f} de marge courtier sur {symbol}."
+                                )
+                            }
                     
                     lot_step_str = f"{lot_step:.8f}".rstrip('0')
                     decimals = len(lot_step_str.split('.')[1]) if '.' in lot_step_str else 0
