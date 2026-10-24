@@ -7,7 +7,7 @@ FATI Walk-Forward Validator (Validation Chronologique Hors-Échantillon)
 - Calcul du Walk-Forward Efficiency Ratio (WFE Ratio)
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 from src.learning.performance_analyzer import PerformanceAnalyzer
 
