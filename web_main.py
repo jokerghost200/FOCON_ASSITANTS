@@ -1,6 +1,7 @@
 import sys
 import yaml
 import os
+import subprocess
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
@@ -8,6 +9,22 @@ from dotenv import load_dotenv
 # Racine du projet (web_main.py reste seul dehors, a cote de main.py).
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
+
+# Si flask n'est pas présent dans l'environnement Python courant (ex: commande globale 'py'),
+# mais présent dans le venv du projet, relancer automatiquement avec venv/Scripts/python.exe
+try:
+    import flask
+except ImportError:
+    venv_py = BASE_DIR / "venv" / "Scripts" / "python.exe"
+    if venv_py.exists() and sys.executable.lower() != str(venv_py).lower():
+        sys.exit(subprocess.call([str(venv_py)] + sys.argv))
+    else:
+        print("\n❌ ERREUR : Le module 'flask' n'est pas installé dans cet environnement Python.")
+        print("   Pour l'installer :")
+        print("   pip install flask")
+        print("   Ou lancez l'application avec le venv du projet :")
+        print(r"   .\venv\Scripts\python.exe web_main.py")
+        sys.exit(1)
 
 from src.core.mt5_connector import MT5Connector
 from src.core.market_data import MarketDataEngine
