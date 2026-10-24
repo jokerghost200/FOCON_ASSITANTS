@@ -96,12 +96,16 @@ class TradeExecutionEngine:
             )
             return None
             
+        declared_type = str(decision.get('order_type', '')).upper()
         is_pending = bool(
             decision.get('is_pending')
-            or decision.get('order_type') in ('BUY_LIMIT', 'SELL_LIMIT', 'LIMIT')
+            or any(k in declared_type for k in ('LIMIT', 'STOP'))
         )
         if is_pending:
-            order_type = mt5.ORDER_TYPE_BUY_LIMIT if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL_LIMIT
+            if 'STOP' in declared_type:
+                order_type = mt5.ORDER_TYPE_BUY_STOP if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL_STOP
+            else:
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL_LIMIT
         else:
             order_type = mt5.ORDER_TYPE_BUY if action.upper() == 'BUY' else mt5.ORDER_TYPE_SELL
         
@@ -133,17 +137,29 @@ class TradeExecutionEngine:
                 logger.error(f"Signal rejected for {symbol}: invalid pending entry price.")
                 return None
 
-            # Vérification des règles de placement d'ordre LIMIT (Section 4.2 du Guide Universel)
-            if action.upper() == 'BUY' and target_entry >= ask_price:
+            # Vérification rigoureuse des 4 types d'ordres en attente vs cours actuel
+            if order_type == mt5.ORDER_TYPE_BUY_LIMIT and target_entry >= ask_price:
                 logger.error(
                     f"Pending BUY_LIMIT rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
                     f"must be strictly below Ask ({ask_price:.{digits}f})."
                 )
                 return None
-            elif action.upper() == 'SELL' and target_entry <= bid_price:
+            elif order_type == mt5.ORDER_TYPE_SELL_LIMIT and target_entry <= bid_price:
                 logger.error(
                     f"Pending SELL_LIMIT rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
                     f"must be strictly above Bid ({bid_price:.{digits}f})."
+                )
+                return None
+            elif order_type == mt5.ORDER_TYPE_BUY_STOP and target_entry <= ask_price:
+                logger.error(
+                    f"Pending BUY_STOP rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
+                    f"must be strictly above Ask ({ask_price:.{digits}f})."
+                )
+                return None
+            elif order_type == mt5.ORDER_TYPE_SELL_STOP and target_entry >= bid_price:
+                logger.error(
+                    f"Pending SELL_STOP rejected for {symbol}: target entry ({target_entry:.{digits}f}) "
+                    f"must be strictly below Bid ({bid_price:.{digits}f})."
                 )
                 return None
 
@@ -334,7 +350,8 @@ class TradeExecutionEngine:
             if result is None:
                 return {"valid": False, "reason": f"MT5 order_check failed. Error: {mt5.last_error()}"}
             
-        if result.retcode not in [0, mt5.TRADE_RETCODE_DONE]:
+        success_codes = [0, getattr(mt5, 'TRADE_RETCODE_DONE', 10009), getattr(mt5, 'TRADE_RETCODE_PLACED', 10008)]
+        if result.retcode not in success_codes:
             # Auto-fallback si le broker rejette l'expiration (Code 10022)
             if result.retcode in (10022, getattr(mt5, 'TRADE_RETCODE_INVALID_EXPIRATION', 10022)) or "Invalid expiration" in str(result.comment):
                 logger.warning(f"⚠️ [OrderCheck] Expiration invalide (Code 10022) pour {mt5_req.get('symbol')}. Retry check en ORDER_TIME_GTC...")
@@ -343,7 +360,7 @@ class TradeExecutionEngine:
                 retry_req.pop("expiration", None)
                 with MT5Connector._lock:
                     retry_result = mt5.order_check(retry_req)
-                if retry_result and retry_result.retcode in [0, mt5.TRADE_RETCODE_DONE]:
+                if retry_result and retry_result.retcode in success_codes:
                     request["type_time"] = mt5.ORDER_TIME_GTC
                     request.pop("expiration", None)
                     return {"valid": True, "margin": retry_result.margin, "margin_free": retry_result.margin_free}
@@ -355,18 +372,24 @@ class TradeExecutionEngine:
     def execute_order(self, request: dict) -> dict:
         """
         Sends the order to MT5.
+        Recognizes both immediate executions (TRADE_RETCODE_DONE) and placed pending orders (TRADE_RETCODE_PLACED).
         """
         import MetaTrader5 as mt5
         logger.info(f"Executing order: {request}")
         
         # Clean request copy without internal metadata
         mt5_req = {k: v for k, v in request.items() if not k.startswith('_')}
+        success_codes = (
+            getattr(mt5, 'TRADE_RETCODE_DONE', 10009),
+            getattr(mt5, 'TRADE_RETCODE_PLACED', 10008),
+        )
+
         with MT5Connector._lock:
             result = mt5.order_send(mt5_req)
             if result is None:
                 return {"success": False, "reason": f"MT5 order_send failed. Error: {mt5.last_error()}"}
             
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result.retcode not in success_codes:
             sym = request.get('symbol', '')
             # 1. Fallback automatique si le broker rejette l'expiration (Code 10022)
             if result.retcode in (10022, getattr(mt5, 'TRADE_RETCODE_INVALID_EXPIRATION', 10022)) or "Invalid expiration" in str(result.comment):
@@ -380,16 +403,43 @@ class TradeExecutionEngine:
             if result is None:
                 return {"success": False, "reason": f"MT5 order_send failed on retry. Error: {mt5.last_error()}"}
 
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
+            if result.retcode not in success_codes:
                 if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):
                     if hasattr(self.mt5, 'mark_market_closed') and sym:
                         self.mt5.mark_market_closed(sym, duration_seconds=1800)
                 return {"success": False, "reason": f"Order execution failed: {result.comment} (Code {result.retcode})"}
             
-        ticket = int(getattr(result, 'order', result.deal) or result.deal)
+        ticket = int(getattr(result, 'order', 0) or getattr(result, 'deal', 0) or 0)
+        is_placed = bool(result.retcode == getattr(mt5, 'TRADE_RETCODE_PLACED', 10008))
+        
+        # Identifier rigoureusement la direction BUY/SELL indépendamment du mode d'ordre (MARKET, LIMIT, STOP)
+        buy_types = (
+            getattr(mt5, 'ORDER_TYPE_BUY', 0),
+            getattr(mt5, 'ORDER_TYPE_BUY_LIMIT', 2),
+            getattr(mt5, 'ORDER_TYPE_BUY_STOP', 4),
+        )
+        req_type = request.get('type')
+        action_str = "BUY" if req_type in buy_types else "SELL"
+
+        # Qualifier le type précis d'ordre pour la mémoire et les logs
+        if req_type == getattr(mt5, 'ORDER_TYPE_BUY_LIMIT', 2):
+            order_type_str = "BUY_LIMIT"
+        elif req_type == getattr(mt5, 'ORDER_TYPE_SELL_LIMIT', 3):
+            order_type_str = "SELL_LIMIT"
+        elif req_type == getattr(mt5, 'ORDER_TYPE_BUY_STOP', 4):
+            order_type_str = "BUY_STOP"
+        elif req_type == getattr(mt5, 'ORDER_TYPE_SELL_STOP', 5):
+            order_type_str = "SELL_STOP"
+        elif req_type == getattr(mt5, 'ORDER_TYPE_BUY', 0):
+            order_type_str = "BUY"
+        else:
+            order_type_str = "SELL"
+
         if self.trade_memory and request.get('_snapshot'):
             try:
-                action_str = "BUY" if request.get('type') == mt5.ORDER_TYPE_BUY else "SELL"
+                snap = dict(request.get('_snapshot', {}))
+                snap['order_type'] = order_type_str
+                snap['is_pending'] = is_placed
                 self.trade_memory.record_entry(
                     ticket=ticket,
                     symbol=request.get('symbol'),
@@ -398,10 +448,19 @@ class TradeExecutionEngine:
                     price=float(result.price or request.get('price', 0.0)),
                     sl=float(request.get('sl', 0.0)),
                     tp=float(request.get('tp', 0.0)),
-                    snapshot=request.get('_snapshot', {}),
+                    snapshot=snap,
                 )
             except Exception as _re:
                 logger.warning(f"Failed to record trade entry in memory: {_re}")
 
-        logger.info(f"Order executed successfully. Deal ID: {result.deal}, Ticket: {ticket}")
-        return {"success": True, "deal_id": result.deal, "ticket": ticket, "volume": result.volume, "price": result.price}
+        status_label = "Pending order placed" if is_placed else "Order executed"
+        logger.info(f"{status_label} successfully. Deal ID: {result.deal}, Ticket: {ticket}, Type: {order_type_str}")
+        return {
+            "success": True, 
+            "deal_id": result.deal, 
+            "ticket": ticket, 
+            "volume": result.volume, 
+            "price": result.price,
+            "is_pending": is_placed,
+            "order_type": order_type_str
+        }

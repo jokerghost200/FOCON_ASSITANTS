@@ -321,6 +321,134 @@ class TestBugfixes(unittest.TestCase):
             self.assertTrue(res["success"])
             self.assertEqual(res["ticket"], 98765)
 
+    def test_pending_order_types_and_price_validation(self):
+        """Vérifie la distinction et la validation des prix pour les 4 types d'ordres en attente."""
+        from src.trading.trade_execution import TradeExecutionEngine
+        from unittest.mock import MagicMock
+        import MetaTrader5 as mt5
+
+        mock_mt5 = MagicMock()
+        mock_mt5.get_symbol_info.return_value = {
+            "name": "EURUSD", "ask": 1.1000, "bid": 1.0998, "digits": 5, "spread": 2,
+            "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01,
+            "trade_contract_size": 100000.0, "trade_tick_size": 0.00001, "trade_tick_value": 1.0,
+        }
+        mock_mt5.get_server_time.return_value = 1700000000.0
+        te = TradeExecutionEngine(mt5_connector=mock_mt5, min_confidence=60.0)
+
+        # 1. BUY_LIMIT : doit être strictement sous le Ask (1.1000)
+        # Rejeté si entry >= ask (1.1005)
+        bad_buy_limit = {"symbol": "EURUSD", "decision": {"action": "BUY", "confidence": 80, "entry": 1.1005, "sl": 1.0950, "tp": 1.1100, "order_type": "BUY_LIMIT"}}
+        self.assertIsNone(te.prepare_order_request(bad_buy_limit))
+        # Accepté si entry < ask (1.0990)
+        good_buy_limit = {"symbol": "EURUSD", "decision": {"action": "BUY", "confidence": 80, "entry": 1.0990, "sl": 1.0950, "tp": 1.1100, "order_type": "BUY_LIMIT"}}
+        req_bl = te.prepare_order_request(good_buy_limit)
+        self.assertIsNotNone(req_bl)
+        self.assertEqual(req_bl["type"], mt5.ORDER_TYPE_BUY_LIMIT)
+        self.assertEqual(req_bl["price"], 1.0990)
+
+        # 2. SELL_LIMIT : doit être strictement au-dessus du Bid (1.0998)
+        # Rejeté si entry <= bid (1.0995)
+        bad_sell_limit = {"symbol": "EURUSD", "decision": {"action": "SELL", "confidence": 80, "entry": 1.0995, "sl": 1.1050, "tp": 1.0900, "order_type": "SELL_LIMIT"}}
+        self.assertIsNone(te.prepare_order_request(bad_sell_limit))
+        # Accepté si entry > bid (1.1010)
+        good_sell_limit = {"symbol": "EURUSD", "decision": {"action": "SELL", "confidence": 80, "entry": 1.1010, "sl": 1.1050, "tp": 1.0900, "order_type": "SELL_LIMIT"}}
+        req_sl = te.prepare_order_request(good_sell_limit)
+        self.assertIsNotNone(req_sl)
+        self.assertEqual(req_sl["type"], mt5.ORDER_TYPE_SELL_LIMIT)
+        self.assertEqual(req_sl["price"], 1.1010)
+
+        # 3. BUY_STOP : doit être strictement au-dessus du Ask (1.1000)
+        # Rejeté si entry <= ask (1.0990)
+        bad_buy_stop = {"symbol": "EURUSD", "decision": {"action": "BUY", "confidence": 80, "entry": 1.0990, "sl": 1.0950, "tp": 1.1100, "order_type": "BUY_STOP"}}
+        self.assertIsNone(te.prepare_order_request(bad_buy_stop))
+        # Accepté si entry > ask (1.1020)
+        good_buy_stop = {"symbol": "EURUSD", "decision": {"action": "BUY", "confidence": 80, "entry": 1.1020, "sl": 1.0980, "tp": 1.1100, "order_type": "BUY_STOP"}}
+        req_bs = te.prepare_order_request(good_buy_stop)
+        self.assertIsNotNone(req_bs)
+        self.assertEqual(req_bs["type"], mt5.ORDER_TYPE_BUY_STOP)
+        self.assertEqual(req_bs["price"], 1.1020)
+
+        # 4. SELL_STOP : doit être strictement sous le Bid (1.0998)
+        # Rejeté si entry >= bid (1.1010)
+        bad_sell_stop = {"symbol": "EURUSD", "decision": {"action": "SELL", "confidence": 80, "entry": 1.1010, "sl": 1.1050, "tp": 1.0900, "order_type": "SELL_STOP"}}
+        self.assertIsNone(te.prepare_order_request(bad_sell_stop))
+        # Accepté si entry < bid (1.0980)
+        good_sell_stop = {"symbol": "EURUSD", "decision": {"action": "SELL", "confidence": 80, "entry": 1.0980, "sl": 1.1020, "tp": 1.0900, "order_type": "SELL_STOP"}}
+        req_ss = te.prepare_order_request(good_sell_stop)
+        self.assertIsNotNone(req_ss)
+        self.assertEqual(req_ss["type"], mt5.ORDER_TYPE_SELL_STOP)
+        self.assertEqual(req_ss["price"], 1.0980)
+
+    def test_execute_order_retcode_placed_and_memory_direction(self):
+        """Vérifie que RETCODE_PLACED (10008) est reconnu comme succès et que BUY_LIMIT est enregistré en action BUY."""
+        from src.trading.trade_execution import TradeExecutionEngine
+        from unittest.mock import MagicMock, patch
+        import MetaTrader5 as mt5
+
+        mock_tm = MagicMock()
+        mock_mt5 = MagicMock()
+        te = TradeExecutionEngine(mt5_connector=mock_mt5, trade_memory=mock_tm)
+
+        placed_res = MagicMock()
+        placed_res.retcode = getattr(mt5, 'TRADE_RETCODE_PLACED', 10008)
+        placed_res.order = 554433
+        placed_res.deal = 0
+        placed_res.volume = 0.5
+        placed_res.price = 1.0980
+
+        with patch("MetaTrader5.order_send", return_value=placed_res):
+            req = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": "EURUSD",
+                "volume": 0.5,
+                "type": mt5.ORDER_TYPE_BUY_LIMIT,
+                "price": 1.0980,
+                "sl": 1.0940,
+                "tp": 1.1060,
+                "_snapshot": {"strategy": "CRT_LIMIT"},
+            }
+            res = te.execute_order(req)
+            self.assertTrue(res["success"])
+            self.assertTrue(res["is_pending"])
+            self.assertEqual(res["order_type"], "BUY_LIMIT")
+            self.assertEqual(res["ticket"], 554433)
+
+            # Vérifier l'appel à record_entry
+            mock_tm.record_entry.assert_called_once()
+            call_kwargs = mock_tm.record_entry.call_args[1]
+            self.assertEqual(call_kwargs["action"], "BUY")
+            self.assertEqual(call_kwargs["snapshot"]["order_type"], "BUY_LIMIT")
+            self.assertTrue(call_kwargs["snapshot"]["is_pending"])
+
+    def test_strict_risk_ceiling_rejects_excess_min_lot(self):
+        """Vérifie le respect intransigeant du plafond de risque avec strict_risk_ceiling."""
+        from src.trading.risk_manager import RiskManager
+
+        rm = RiskManager(
+            default_risk_percent=0.25,
+            auto_tier_enabled=True,
+            strict_risk_ceiling=True,
+        )
+        account = {"balance": 1000.0, "margin_free": 1000.0}
+        # Budget = 2.50$. Avec SL 50 pips et lot min 0.01, perte = 5.00$
+        symbol = {
+            "name": "EURUSD", "volume_max": 100.0, "volume_min": 0.01,
+            "volume_step": 0.01, "trade_contract_size": 100000.0,
+            "trade_tick_size": 0.00001, "trade_tick_value": 1.0,
+            "trade_stops_level": 0, "point": 0.00001, "spread": 10,
+        }
+        proposal = {
+            "action": "BUY",
+            "entry": 1.1000,
+            "sl": 1.0950,
+            "tp": 1.1150,
+            "confidence": 85.0
+        }
+        res = rm.validate_proposal(proposal, account, symbol)
+        self.assertFalse(res["valid"])
+        self.assertIn("Risque Intransigeant", res["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

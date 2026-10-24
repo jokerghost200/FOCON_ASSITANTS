@@ -73,12 +73,13 @@ risk_management:
   spread_buffer_enabled: true
   max_spread_sl_ratio: 0.25
   spread_buffer_max_cap: 0.4
-  risk_profile: AGGRESSIVE
+  risk_profile: SNIPER
   auto_tier_enabled: false
   max_micro_risk_cap_percent: 4.0
   daily_profit_target_percent: 5.0
   fixed_lot_size: 1.0
   manual_max_positions_override: true
+  strict_risk_ceiling: true
 ai_models:
   openrouter_model: google/gemma-4-26b-a4b-it:free
   gemini_model: gemini-3.8-flash

@@ -117,6 +117,7 @@ class RiskManager:
         max_micro_risk_cap_percent: float = 4.0,
         daily_profit_target_percent: float = None,
         fixed_lot_size: float = 0.0,
+        strict_risk_ceiling: bool = False,
     ):
         self.risk_profile = str(risk_profile or "BALANCED").upper()
         cfg = RISK_PROFILES.get(self.risk_profile, RISK_PROFILES["BALANCED"])
@@ -132,6 +133,7 @@ class RiskManager:
         self.max_micro_risk_cap_percent = float(max_micro_risk_cap_percent)
         self.daily_profit_target_percent = float(daily_profit_target_percent if daily_profit_target_percent is not None else cfg["daily_target_percent"])
         self.fixed_lot_size = float(fixed_lot_size)
+        self.strict_risk_ceiling = bool(strict_risk_ceiling)
 
     @staticmethod
     def get_account_tier(balance: float) -> dict:
@@ -443,8 +445,8 @@ class RiskManager:
         if not is_fixed_lot and capital > 0:
             actual_risk_pct = (actual_risk_amount / capital) * 100.0
 
-            # Cas 1 : Paliers automatiques actifs sur petits comptes (< $250)
-            if self.auto_tier_enabled and capital < 250.0:
+            # Cas 1 : Paliers automatiques actifs sur petits comptes (< $250) ET strict_risk_ceiling non imposé
+            if self.auto_tier_enabled and capital < 250.0 and not getattr(self, 'strict_risk_ceiling', False):
                 tier = self.get_account_tier(capital)
                 micro_cap = getattr(self, 'max_micro_risk_cap_percent', tier.get('max_risk_cap_percent', 4.0))
 
@@ -465,7 +467,7 @@ class RiskManager:
                         f"risque effectif de ${actual_risk_amount:.2f} ({actual_risk_pct:.1f}% du capital)."
                     )
             else:
-                # Cas 2 : Comptes standards / sans auto-tier : le lot min broker NE DOIT JAMAIS forcer un dépassement du risque
+                # Cas 2 : Comptes standards / sans auto-tier / mode strict : le lot min broker NE DOIT JAMAIS forcer un dépassement du risque
                 # Marge tolérée de 5% pour l'arrondi du step de volume uniquement
                 if actual_risk_amount > allowed_risk_amount * 1.05:
                     return {
@@ -473,7 +475,7 @@ class RiskManager:
                         "reason": (
                             f"🚫 [Risque Intransigeant] Risque réel (${actual_risk_amount:.2f} avec lot min {lot}) "
                             f"dépasse le budget maximal autorisé de ${allowed_risk_amount:.2f} ({risk_percent:.1f}%). "
-                            f"Trade refusé : ne jamais augmenter le lot pour forcer un ordre."
+                            f"Trade refusé : interdiction d'augmenter le risque pour satisfaire le minimum du broker ({min_lot})."
                         )
                     }
         # ---------------------------------------

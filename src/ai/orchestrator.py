@@ -1358,9 +1358,13 @@ class AIOrchestrator:
                 )
 
                 # Build a decision and validate with risk manager
+                order_type_str = "BUY_LIMIT" if best_ob.direction.upper() == "BUY" else "SELL_LIMIT"
                 decision = {
                     "action": best_ob.direction,
                     "confidence": int(best_ob.score),
+                    "is_pending": True,
+                    "order_type": order_type_str,
+                    "expiration_bars": 12,
                     "entry": best_ob.entry,
                     "sl": best_ob.sl,
                     "tp": best_ob.tp,
