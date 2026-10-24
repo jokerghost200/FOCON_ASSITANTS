@@ -32,6 +32,7 @@
     <div class="header-actions">
       <button id="btnScan" class="btn btn-primary" title="Lancer une analyse complète de marché">🔍 SCANNER</button>
       <button id="btnAuto" class="btn btn-warning" title="Basculer le mode Autopilot">🤖 AUTOPILOT : OFF</button>
+      <button id="btnNavBacktest" class="btn btn-secondary" title="Accéder au simulateur de Backtesting">🧪 Backtest</button>
       <button id="btnStop" class="btn btn-danger" title="Arrêt d'urgence">⛔ STOP</button>
       <button id="btnPos" class="btn btn-secondary" title="Rafraîchir les positions">📊 Positions</button>
     </div>
@@ -40,6 +41,149 @@
   <main class="app-container">
     <!-- COLONNE GAUCHE : MARCHÉS, SIGNAUX, POSITIONS, CONFIG -->
     <div class="col-main">
+      <!-- Section Laboratoire de Backtesting Institutionnel -->
+      <section class="card backtest-card" id="backtestSection">
+        <div class="card-header">
+          <div class="header-title-group">
+            <h2>🧪 Laboratoire de Backtest Institutionnel</h2>
+            <span class="card-subtitle">Simulation bougie par bougie sur cours réels MT5 · SMC, CRT, Boomerang, AMD</span>
+          </div>
+          <span class="brand-badge" style="background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff;">IA QUANT MOTEUR</span>
+        </div>
+
+        <div class="backtest-form-grid">
+          <div class="form-group">
+            <label for="btSymbol">Symbole MT5</label>
+            <input id="btSymbol" type="text" value="EURUSD" placeholder="ex: EURUSD, BTCUSD, XAUUSD">
+          </div>
+          <div class="form-group">
+            <label for="btTf">Unité de Temps</label>
+            <select id="btTf">
+              <option value="M5">M5 (Court Terme)</option>
+              <option value="M15" selected>M15 (Standard Pro)</option>
+              <option value="H1">H1 (Swing / Structure)</option>
+              <option value="H4">H4 (Tendance Lourde)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="btBars">Bougies d'Historique</label>
+            <input id="btBars" type="number" value="600" min="100" max="5000" step="50">
+          </div>
+          <div class="form-group">
+            <label for="btCapital">Capital Virtuel ($)</label>
+            <input id="btCapital" type="number" value="100.0" min="10" step="50">
+          </div>
+          <div class="form-group">
+            <label for="btStrategy">Stratégie Testée</label>
+            <select id="btStrategy">
+              <option value="ALL" selected>🌟 Toutes les stratégies (Fusion)</option>
+              <option value="CRT">🕯️ Candle Range Theory (CRT & Pending Limits)</option>
+              <option value="ORDER_BLOCKS">🏦 Smart Money Concepts (Order Blocks)</option>
+              <option value="BOOMERANG">🪃 Boomerang (Rebond EMA + ZigZag)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="btProfile">Profil de Risque</label>
+            <select id="btProfile">
+              <option value="BALANCED" selected>Équilibré (1.0%)</option>
+              <option value="AGGRESSIVE">Agressif (1.5%)</option>
+              <option value="CONSERVATIVE">Conservateur (0.5%)</option>
+              <option value="DYNAMIC">Dynamique / Volatilité</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="btFixedLot">Volume Fixe (Lot)</label>
+            <input id="btFixedLot" type="number" value="0.0" min="0.0" max="10.0" step="0.01" placeholder="0 = AutoPilot Dynamique">
+          </div>
+          <div class="form-group">
+            <label for="btDirection">Filtre de Direction</label>
+            <select id="btDirection">
+              <option value="BOTH" selected>Achat & Vente (BOTH)</option>
+              <option value="BUY_ONLY">Achats Uniquement (BUY)</option>
+              <option value="SELL_ONLY">Ventes Uniquement (SELL)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="backtest-actions" style="margin-top: 14px;">
+          <button id="btnRunBacktest" class="btn btn-primary" style="background: linear-gradient(135deg, #2563eb, #7c3aed); border: none; font-weight: 700; padding: 10px 24px;">🚀 LANCER LA SIMULATION</button>
+        </div>
+
+        <!-- Progress Bar -->
+        <div id="btProgressWrap" class="bt-progress-wrapper" hidden style="margin-top: 16px;">
+          <div class="bt-progress-header" style="display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px;">
+            <span id="btProgressMsg" style="color: var(--text-secondary);">Initialisation du moteur MT5...</span>
+            <span id="btProgressPct" style="font-weight: 700; color: var(--accent-cyan);">0%</span>
+          </div>
+          <div class="bt-progress-track" style="background: var(--bg-secondary); border-radius: 999px; height: 8px; overflow: hidden; border: 1px solid var(--border-color);">
+            <div id="btProgressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #3b82f6, #06b6d4); transition: width 0.3s ease;"></div>
+          </div>
+        </div>
+
+        <!-- Dashboard des Résultats -->
+        <div id="btResultsWrap" class="bt-results-container" hidden style="margin-top: 20px;">
+          <div class="bt-metrics-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 16px;">
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Capital Final</span>
+              <span id="btMetricBalance" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Profit Net</span>
+              <span id="btMetricPnl" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Win Rate</span>
+              <span id="btMetricWr" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Profit Factor</span>
+              <span id="btMetricPf" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Max Drawdown</span>
+              <span id="btMetricDd" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+            <div class="bt-metric-card" style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-color); text-align: center;">
+              <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 4px;">Trades BE & Limits</span>
+              <span id="btMetricBe" style="font-size: 16px; font-weight: 700;">—</span>
+            </div>
+          </div>
+
+          <!-- Diagnostic Terminal -->
+          <div class="bt-terminal-card" style="background: #05070a; border: 1px solid #1f293d; border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
+            <div style="font-size: 11px; font-weight: 700; color: #38bdf8; letter-spacing: 0.5px; margin-bottom: 8px;">
+              🧠 CONCLUSION DIAGNOSTIQUE & RECOMMANDATIONS DU ROBOT
+            </div>
+            <pre id="btReportPre" style="font-family: var(--font-mono); font-size: 12px; color: #cbd5e1; white-space: pre-wrap; line-height: 1.6; max-height: 350px; overflow-y: auto; margin: 0;"></pre>
+          </div>
+
+          <!-- Table des Trades -->
+          <div class="card-header" style="margin-top: 14px; padding: 0 0 10px 0;">
+            <h3 style="font-size: 15px; font-weight: 600;">📜 Historique Détaillé des Trades</h3>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Date Sortie</th>
+                  <th>Stratégie</th>
+                  <th>Action</th>
+                  <th>Lot</th>
+                  <th>Entrée</th>
+                  <th>Sortie</th>
+                  <th>PnL ($)</th>
+                  <th>Raison</th>
+                </tr>
+              </thead>
+              <tbody id="btTradesBody">
+                <tr><td colspan="9" class="empty-state">Aucun trade exécuté.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- Section Copie Traders Professionnels -->
       <section class="card pro-trader-card">
         <div class="card-header">
@@ -134,6 +278,20 @@
           <div class="form-group">
             <label for="cfgPos">Positions Simultanées Max</label>
             <input id="cfgPos" type="number" step="1" min="1" max="20">
+          </div>
+          <div class="form-group">
+            <label for="cfgFixedLot">Volume Fixe Forcé (Lot)</label>
+            <input id="cfgFixedLot" type="number" step="0.01" min="0" placeholder="0 = AutoPilot Dynamique">
+          </div>
+          <div class="form-group">
+            <label for="cfgProfile">Profil de Risque</label>
+            <select id="cfgProfile">
+              <option value="BALANCED">Équilibré (1.0%)</option>
+              <option value="AGGRESSIVE">Agressif (1.5%)</option>
+              <option value="CONSERVATIVE">Conservateur (0.5%)</option>
+              <option value="DYNAMIC">Dynamique / Volatilité</option>
+              <option value="SNIPER">Sniper Ultra-Sélectif</option>
+            </select>
           </div>
         </div>
 

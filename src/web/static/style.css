@@ -660,3 +660,35 @@ input:focus, select:focus {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── LABORATOIRE DE BACKTESTING ─── */
+.backtest-card {
+  border-left: 3px solid #3b82f6;
+  position: relative;
+}
+
+.backtest-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.btn-glow {
+  box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.btn-glow:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
+}
+
+.bt-terminal-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.bt-terminal-body::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}

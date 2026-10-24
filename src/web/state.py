@@ -62,6 +62,15 @@ class WebState:
         self.config_advisor = ConfigAdvisor(chat_engine.router)
         self.advisor_lock = threading.Lock()
         self.pending_config_proposals = {}
+        self.backtest_lock = threading.Lock()
+        self.backtest_thread = None
+        self.backtest_status = {
+            "running": False,
+            "progress": 0.0,
+            "message": "",
+            "results": None,
+            "error": None,
+        }
 
     def start_scan(self, symbols=None, timeframe=None):
         import threading as _th
@@ -364,4 +373,83 @@ class WebState:
                 time.sleep(2)
         except Exception:
             logger.exception("_autopilot_execute web a echoue")
+
+    def start_backtest(
+        self,
+        symbol: str = "EURUSD",
+        timeframe: str = "M15",
+        num_bars: int = 600,
+        initial_capital: float = 100.0,
+        risk_profile: str = "BALANCED",
+        strategy_filter: str = "ALL",
+        fixed_lot_size: float = 0.0,
+        direction_filter: str = "BOTH",
+    ):
+        """Lance une simulation de backtesting en tâche de fond pour l'interface web."""
+        with self.backtest_lock:
+            if self.backtest_status.get("running"):
+                return {"ok": False, "reason": "Un backtest est déjà en cours d'exécution."}
+
+            self.backtest_status = {
+                "running": True,
+                "progress": 0.0,
+                "message": f"Démarrage de la simulation sur {symbol} ({timeframe})...",
+                "results": None,
+                "error": None,
+            }
+
+        def _worker():
+            try:
+                from src.trading.backtester import BacktestEngine
+
+                def _progress_callback(pct, msg):
+                    self.backtest_status["progress"] = round(float(pct) * 100, 1)
+                    self.backtest_status["message"] = str(msg)
+
+                engine = BacktestEngine(
+                    mt5_connector=self.orchestrator.mt5,
+                    risk_manager=self.orchestrator.risk_manager,
+                    weights_engine=self.weights_engine,
+                )
+
+                raw_results = engine.run_backtest(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    num_bars=int(num_bars),
+                    initial_capital=float(initial_capital),
+                    risk_profile=str(risk_profile),
+                    strategy_filter=str(strategy_filter),
+                    fixed_lot_size=float(fixed_lot_size),
+                    direction_filter=str(direction_filter),
+                    progress_cb=_progress_callback,
+                )
+
+                if "error" in raw_results:
+                    self.backtest_status["error"] = raw_results["error"]
+                    self.backtest_status["message"] = f"Erreur : {raw_results['error']}"
+                else:
+                    self.backtest_status["results"] = _sanitize(raw_results)
+                    self.backtest_status["message"] = "Simulation terminée avec succès."
+                    self.backtest_status["progress"] = 100.0
+            except Exception as e:
+                logger.exception("Erreur lors de la simulation web")
+                self.backtest_status["error"] = str(e)
+                self.backtest_status["message"] = f"Échec simulation : {e}"
+            finally:
+                self.backtest_status["running"] = False
+
+        self.backtest_thread = threading.Thread(target=_worker, daemon=True)
+        self.backtest_thread.start()
+        return {"ok": True, "message": "Simulation lancée en arrière-plan."}
+
+    def get_backtest_status(self):
+        """Retourne l'état courant et les résultats de la simulation."""
+        return {
+            "ok": True,
+            "running": bool(self.backtest_status.get("running")),
+            "progress": float(self.backtest_status.get("progress", 0.0)),
+            "message": str(self.backtest_status.get("message", "")),
+            "results": self.backtest_status.get("results"),
+            "error": self.backtest_status.get("error"),
+        }
 

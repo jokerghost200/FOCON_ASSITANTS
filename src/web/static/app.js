@@ -166,6 +166,8 @@
     $("cfgLoss").value = rm.max_daily_loss_percent ?? 5;
     $("cfgLot").value = rm.max_lot_size ?? 1;
     $("cfgPos").value = rm.max_open_positions ?? 3;
+    if ($("cfgFixedLot")) $("cfgFixedLot").value = rm.fixed_lot_size ?? 0;
+    if ($("cfgProfile") && rm.risk_profile) $("cfgProfile").value = rm.risk_profile;
     $("cfgMode").value = (tr.automation_mode || "assist").toLowerCase();
     const allowed = tr.allowed_market_types || [];
     document.querySelectorAll(".mtype").forEach((cb) => { cb.checked = allowed.includes(cb.value); });
@@ -180,6 +182,8 @@
         max_daily_loss_percent: parseFloat($("cfgLoss").value),
         max_lot_size: parseFloat($("cfgLot").value),
         max_open_positions: parseInt($("cfgPos").value, 10),
+        fixed_lot_size: parseFloat($("cfgFixedLot").value) || 0.0,
+        risk_profile: $("cfgProfile").value,
       },
       trading: {
         automation_mode: $("cfgMode").value,
@@ -372,11 +376,140 @@
   $("btnAdvisor").onclick = () => askAdvisor();
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
 
+  function setupBacktest() {
+    const btnNav = $("btnNavBacktest");
+    if (btnNav) {
+      btnNav.onclick = () => {
+        const sec = $("backtestSection");
+        if (sec) sec.scrollIntoView({ behavior: "smooth" });
+      };
+    }
+
+    const btnRun = $("btnRunBacktest");
+    if (!btnRun) return;
+
+    let pollTimer = null;
+
+    async function pollBacktest() {
+      const res = await api("/api/backtest/status");
+      if (!res.ok) return;
+
+      const pct = Math.min(100, Math.max(0, res.progress || 0));
+      $("btProgressBar").style.width = pct + "%";
+      $("btProgressPct").textContent = Math.round(pct) + "%";
+      if (res.message) $("btProgressMsg").textContent = res.message;
+
+      if (!res.running) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        btnRun.disabled = false;
+        btnRun.textContent = "🚀 LANCER LA SIMULATION";
+
+        if (res.error) {
+          $("btProgressMsg").textContent = "❌ " + res.error;
+          alert("Erreur Backtest : " + res.error);
+          return;
+        }
+
+        const out = res.results || {};
+        const stats = out.stats || {};
+        $("btResultsWrap").hidden = false;
+
+        const bal = (stats.final_balance ?? 0).toFixed(2);
+        $("btMetricBalance").textContent = `${bal} $`;
+
+        const pnl = stats.net_profit_usd ?? 0;
+        const pnlPct = stats.net_profit_pct ?? 0;
+        const pnlColor = pnl >= 0 ? "var(--accent-green)" : "var(--accent-red)";
+        $("btMetricPnl").innerHTML = `<span style="color: ${pnlColor}">${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} $ (${pnlPct.toFixed(1)}%)</span>`;
+
+        $("btMetricWr").textContent = `${(stats.win_rate ?? 0).toFixed(1)} % (${stats.winning_trades ?? 0}/${stats.total_trades ?? 0})`;
+        $("btMetricPf").textContent = (stats.profit_factor ?? 0).toFixed(2);
+        $("btMetricDd").textContent = `${(stats.max_drawdown_pct ?? 0).toFixed(2)} % (${(stats.max_drawdown_usd ?? 0).toFixed(2)} $)`;
+        $("btMetricBe").textContent = `BE: ${stats.break_even_trades ?? 0} | Lim: ${stats.pending_orders_filled ?? 0}/${stats.pending_orders_placed ?? 0}`;
+
+        $("btReportPre").textContent = out.report_text || "Aucun rapport généré.";
+
+        const tb = $("btTradesBody");
+        tb.innerHTML = "";
+        const trades = out.trades || [];
+        if (!trades.length) {
+          tb.innerHTML = '<tr><td colspan="9" class="empty-state">Aucun trade exécuté durant cette période de test.</td></tr>';
+        } else {
+          trades.slice(-50).reverse().forEach((t) => {
+            const tr = document.createElement("tr");
+            const tpnl = t.profit_usd ?? 0;
+            const pcol = tpnl > 0 ? "color: var(--accent-green); font-weight: 600;" : (tpnl < 0 ? "color: var(--accent-red); font-weight: 600;" : "");
+            tr.innerHTML = `
+              <td>${esc(t.ticket)}</td>
+              <td>${esc(String(t.close_time || "").slice(0, 16))}</td>
+              <td><span class="pro-tag" style="font-size: 10px; padding: 2px 6px;">${esc(t.strategy || "FUSION")}</span></td>
+              <td><b>${esc(t.action)}</b></td>
+              <td>${esc(t.lot)}</td>
+              <td>${esc(t.entry)}</td>
+              <td>${esc(t.exit_price)}</td>
+              <td style="${pcol}">${tpnl >= 0 ? "+" : ""}${tpnl.toFixed(2)} $</td>
+              <td><span style="font-size: 11px; color: var(--text-muted);">${esc(t.exit_reason)}</span></td>
+            `;
+            tb.appendChild(tr);
+          });
+        }
+      }
+    }
+
+    btnRun.onclick = async () => {
+      const symbol = $("btSymbol").value.trim().toUpperCase() || "EURUSD";
+      const timeframe = $("btTf").value;
+      const bars = parseInt($("btBars").value, 10) || 600;
+      const capital = parseFloat($("btCapital").value) || 100.0;
+      const strategy = $("btStrategy").value;
+      const profile = $("btProfile").value;
+      const fixedLot = parseFloat($("btFixedLot").value) || 0.0;
+      const direction = $("btDirection").value;
+
+      btnRun.disabled = true;
+      btnRun.textContent = "⏳ Simulation en cours...";
+      $("btProgressWrap").hidden = false;
+      $("btResultsWrap").hidden = true;
+      $("btProgressBar").style.width = "5%";
+      $("btProgressPct").textContent = "5%";
+      $("btProgressMsg").textContent = `Démarrage de la simulation sur ${symbol} (${timeframe})...`;
+
+      const resp = await api("/api/backtest/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: symbol,
+          timeframe: timeframe,
+          bars: bars,
+          capital: capital,
+          strategy: strategy,
+          profile: profile,
+          fixed_lot: fixedLot,
+          direction: direction,
+        }),
+      });
+
+      if (!resp.ok) {
+        btnRun.disabled = false;
+        btnRun.textContent = "🚀 LANCER LA SIMULATION";
+        $("btProgressWrap").hidden = true;
+        alert("Impossible de lancer le backtest : " + (resp.reason || "Erreur"));
+        return;
+      }
+
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(pollBacktest, 800);
+    };
+  }
+
   setupVoice();
   setupProTraders();
+  setupBacktest();
   loadConfig(); refreshHealth(); refreshAccount(); refreshPositions(); refreshAuto(); refreshProTraders();
   setInterval(refreshPositions, 10000);
   setInterval(refreshHealth, 15000);
   setInterval(refreshAuto, 5000);
   setInterval(refreshProTraders, 10000);
 })();
+

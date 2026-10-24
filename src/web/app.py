@@ -41,8 +41,15 @@ def create_app(state: WebState) -> Flask:
             if isinstance(rm, dict):
                 state.config.setdefault("risk_management", {}).update({
                     k: v for k, v in rm.items()
-                    if k in ("default_risk_percent", "max_daily_loss_percent", "max_lot_size", "max_open_positions")
+                    if k in ("default_risk_percent", "max_daily_loss_percent", "max_lot_size", "max_open_positions", "fixed_lot_size", "risk_profile")
                 })
+                try:
+                    if "fixed_lot_size" in rm:
+                        state.orchestrator.risk_manager.fixed_lot_size = float(rm["fixed_lot_size"])
+                    if "risk_profile" in rm:
+                        state.orchestrator.risk_manager.apply_risk_profile(str(rm["risk_profile"]))
+                except Exception:
+                    pass
             tr = data.get("trading")
             if isinstance(tr, dict):
                 tcfg = state.config.setdefault("trading", {})
@@ -203,5 +210,34 @@ def create_app(state: WebState) -> Flask:
         except Exception as e:
             logger.exception("activate_pro_trader failed")
             return jsonify({"ok": False, "reason": str(e)}), 500
+
+    @app.post("/api/backtest/run")
+    def run_backtest():
+        data = request.get_json(force=True, silent=True) or {}
+        symbol = str(data.get("symbol", "EURUSD")).strip().upper()
+        timeframe = str(data.get("timeframe", "M15")).strip().upper()
+        bars = int(data.get("bars", 600))
+        capital = float(data.get("capital", 100.0))
+        strategy = str(data.get("strategy", "ALL")).strip().upper()
+        profile = str(data.get("profile", "BALANCED")).strip().upper()
+        fixed_lot = float(data.get("fixed_lot", 0.0))
+        direction = str(data.get("direction", "BOTH")).strip().upper()
+
+        res = state.start_backtest(
+            symbol=symbol,
+            timeframe=timeframe,
+            num_bars=bars,
+            initial_capital=capital,
+            risk_profile=profile,
+            strategy_filter=strategy,
+            fixed_lot_size=fixed_lot,
+            direction_filter=direction,
+        )
+        code = 200 if res.get("ok") else 409
+        return jsonify(res), code
+
+    @app.get("/api/backtest/status")
+    def backtest_status():
+        return jsonify(state.get_backtest_status())
 
     return app
