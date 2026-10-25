@@ -928,3 +928,195 @@ def test_matrice_complete_passerelle_execution_modes_et_contextes():
                         mock_send.assert_called_once()
 
 
+# ─── 9. TESTS COMPTE & COURTIER FAIL-CLOSED (SÉCURITÉ INVIOLABLE) ───
+
+def test_trade_execution_fail_closed_compte_indisponible_ou_corrompu():
+    """
+    Vérifie formellement que si le compte MT5 est inaccessible (get_account_info -> None, 0 ou corrompu),
+    aucun capital fictif (ex. 100 000$) n'est inventé : l'ordre est REJETÉ et mt5.order_send JAMAIS appelé.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+
+    mock_connector = MagicMock()
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+
+    valid_econ = {"status": "OK", "high_impact_window": False, "event_risk": "LOW", "recommendation": "NORMAL"}
+    signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY", "confidence": 80.0, "entry": 1.0855, "sl": 1.0800, "tp": 1.0950, "lot": 0.05,
+            "economic_context": valid_econ,
+        },
+        "economic_context": valid_econ,
+    }
+    raw_req = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.05, "price": 1.0855, "sl": 1.0800, "tp": 1.0950, "type": 0,
+        "_economic_context": valid_econ,
+    }
+
+    # Cas 1 : get_account_info renvoie None (coupure MT5)
+    mock_connector.get_account_info.return_value = None
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        assert "non vérifiable" in res["reason"] or "indisponibles" in res["reason"]
+        mock_send.assert_not_called()
+
+    # Cas 2 : get_account_info renvoie balance <= 0
+    mock_connector.get_account_info.return_value = {"balance": 0.0, "equity": 0.0}
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        mock_send.assert_not_called()
+
+    # Cas 3 : get_account_info renvoie des données corrompues (non float)
+    mock_connector.get_account_info.return_value = {"balance": "CORRUPTED_STRING"}
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        mock_send.assert_not_called()
+
+
+def test_trade_execution_fail_closed_positions_ouvertes_indisponibles():
+    """
+    Vérifie que si la récupération des positions ouvertes échoue (None ou exception),
+    l'ordre est immédiatement refusé pour éviter de violer les limites d'exposition.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+
+    valid_econ = {"status": "OK", "high_impact_window": False, "event_risk": "LOW", "recommendation": "NORMAL"}
+    signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY", "confidence": 80.0, "entry": 1.0855, "sl": 1.0800, "tp": 1.0950, "lot": 0.05,
+            "economic_context": valid_econ,
+        },
+        "economic_context": valid_econ,
+    }
+    raw_req = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.05, "price": 1.0855, "sl": 1.0800, "tp": 1.0950, "type": 0,
+        "_economic_context": valid_econ,
+    }
+
+    # Cas 1 : get_open_positions renvoie None
+    mock_connector.get_open_positions.return_value = None
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        mock_send.assert_not_called()
+
+    # Cas 2 : get_open_positions lève une exception
+    mock_connector.get_open_positions.side_effect = RuntimeError("MT5 IPC Pipe Broken")
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        mock_send.assert_not_called()
+
+
+def test_trade_execution_fail_closed_metadonnees_symbole_indisponibles_ou_nulles():
+    """
+    Vérifie que si les métadonnées broker du symbole (tick_value, tick_size, get_symbol_info)
+    sont manquantes ou nulles, le calcul de risque est impossible et l'ordre est REJETÉ sans appel MT5.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+
+    valid_econ = {"status": "OK", "high_impact_window": False, "event_risk": "LOW", "recommendation": "NORMAL"}
+    signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY", "confidence": 80.0, "entry": 1.0855, "sl": 1.0800, "tp": 1.0950, "lot": 0.05,
+            "economic_context": valid_econ,
+        },
+        "economic_context": valid_econ,
+    }
+    raw_req = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.05, "price": 1.0855, "sl": 1.0800, "tp": 1.0950, "type": 0,
+        "_economic_context": valid_econ,
+    }
+
+    # Cas 1 : get_symbol_info renvoie None (symbole non supporté ou MT5 hors-ligne)
+    mock_connector.get_symbol_info.return_value = None
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        assert "indisponibles" in res["reason"]
+        mock_send.assert_not_called()
+
+    # Cas 2 : trade_tick_value ou trade_tick_size est nul ou manquant
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 0.0, "trade_tick_size": 0.0
+    }
+    assert trade_exec.prepare_order_request(signal) is None
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req)
+        assert res["success"] is False
+        assert "nulles ou négatives" in res["reason"] or "invalide" in res["reason"]
+        mock_send.assert_not_called()
+
+
+def test_trade_execution_bloque_statut_stale_sans_autres_champs():
+    """
+    Vérifie qu'un contexte économique avec uniquement status == 'STALE'
+    (sans que data_freshness ou is_rate_stale ne soient fournis)
+    est STRICTEMENT bloqué en mode automatique et semi-automatique.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001
+    }
+
+    stale_only_context = {
+        "status": "STALE",  # Pas de data_freshness ni de is_rate_stale !
+        "high_impact_window": False,
+        "event_risk": "LOW",
+        "recommendation": "NORMAL",
+        "reason": "Données économiques périmées (status STALE pur)",
+    }
+
+    signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY", "confidence": 80.0, "entry": 1.0855, "sl": 1.0800, "tp": 1.0950, "lot": 0.05,
+            "economic_context": stale_only_context,
+        },
+        "economic_context": stale_only_context,
+    }
+    raw_req = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.05, "price": 1.0855, "sl": 1.0800, "tp": 1.0950, "type": 0,
+        "_economic_context": stale_only_context,
+    }
+
+    for mode in ("auto", "semi-auto"):
+        trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode=mode)
+        assert trade_exec.prepare_order_request(signal) is None
+        with patch("MetaTrader5.order_send") as mock_send:
+            res = trade_exec.execute_order(raw_req)
+            assert res["success"] is False
+            assert "périmées" in res["reason"]
+            mock_send.assert_not_called()
+
+
+

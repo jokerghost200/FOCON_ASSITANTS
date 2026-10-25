@@ -411,6 +411,7 @@ class TestCerebrosEndToEndFlow:
         # 1.30 pt de SL avec lot 1.0 (tick_size 0.01, tick_val 1.0) -> Risque = 130 $
         # 130 $ / 10 000 $ = 1.30 % (passerait si max(balance, equity) était utilisé)
         # Mais 130 $ / 8 000 $ = 1.625 % (> 1.5 % plafond absolu de SafetyRiskGuard) !
+        econ_ok = {"status": "OK", "high_impact_window": False, "event_risk": "LOW", "recommendation": "NORMAL"}
         signal = {
             "symbol": "XAUUSD",
             "decision": {
@@ -420,7 +421,9 @@ class TestCerebrosEndToEndFlow:
                 "sl": 1998.70,  # Dist 1.30 pt -> 130 ticks -> 130 $
                 "tp": 2010.00,
                 "lot": 1.0,
-            }
+                "economic_context": econ_ok,
+            },
+            "economic_context": econ_ok,
         }
 
         blocked = trade_exec.prepare_order_request(signal)

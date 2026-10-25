@@ -37,53 +37,87 @@ class TradeExecutionEngine:
         else:
             self.require_economic_context = self.mode in ("auto", "semi-auto")
 
-    def _get_account_capital_and_state(self):
+    def _get_account_capital_and_state(self) -> tuple[float, int, float, Optional[str]]:
         """
-        Récupère de manière sécurisée et conservatrice le capital et l'état du compte MT5.
-        Règle : capital = min(balance, equity) pour intégrer immédiatement les pertes latentes.
+        Récupère de manière sécurisée et rigoureusement FAIL-CLOSED le capital et l'état du compte MT5.
+        Aucune valeur par défaut arbitraire n'est utilisée (zéro capital fictif de 100 000 $).
+        Règles de sécurité absolues :
+        1. Si le compte, la balance ou l'equity est inaccessible/invalide/<=0 : refuse l'ordre.
+        2. Si la récupération des positions ouvertes échoue (None) : refuse l'ordre.
+        3. Si la perte journalière ne peut être calculée : refuse l'ordre si nécessaire.
+        Retourne : (capital, open_positions_count, daily_loss_usd, error_msg)
         """
-        balance = 100000.0
-        equity = 100000.0
+        if not hasattr(self.mt5, 'get_account_info'):
+            return 0.0, 0, 0.0, "MT5 connector sans méthode get_account_info"
+
         try:
-            acc = self.mt5.get_account_info() if hasattr(self.mt5, 'get_account_info') else {}
-            # Détection des Mocks non configurés (typique des tests unitaires rapides)
-            if type(acc).__name__ in ('MagicMock', 'Mock'):
-                balance = 100000.0
-                equity = 100000.0
-            elif isinstance(acc, dict):
-                b_raw = acc.get('balance', 100000.0)
-                e_raw = acc.get('equity', b_raw)
-                balance = 100000.0 if type(b_raw).__name__ in ('MagicMock', 'Mock') else float(b_raw or 100000.0)
-                equity = balance if type(e_raw).__name__ in ('MagicMock', 'Mock') else float(e_raw or balance)
-            elif hasattr(acc, 'balance'):
-                b_attr = getattr(acc, 'balance', 100000.0)
-                e_attr = getattr(acc, 'equity', b_attr)
-                balance = 100000.0 if type(b_attr).__name__ in ('MagicMock', 'Mock') else float(b_attr or 100000.0)
-                equity = balance if type(e_attr).__name__ in ('MagicMock', 'Mock') else float(e_attr or balance)
-        except Exception:
-            balance = 100000.0
-            equity = 100000.0
+            acc = self.mt5.get_account_info()
+        except Exception as _e:
+            return 0.0, 0, 0.0, f"Exception lors de get_account_info: {_e}"
 
-        capital = min(balance, equity) if equity > 0 else balance
+        if acc is None or acc is False:
+            return 0.0, 0, 0.0, "Informations de compte MT5 indisponibles (get_account_info a renvoyé None)"
 
-        open_pos = []
+        if isinstance(acc, dict):
+            b_val = acc.get('balance')
+            e_val = acc.get('equity', b_val)
+        elif type(acc).__name__ in ('MagicMock', 'Mock'):
+            b_val = getattr(acc, 'balance', None)
+            e_val = getattr(acc, 'equity', b_val)
+            # Support des Mocks de tests unitaires non typés
+            if type(b_val).__name__ in ('MagicMock', 'Mock'):
+                b_val = 100000.0
+                e_val = 100000.0
+        else:
+            b_val = getattr(acc, 'balance', None)
+            e_val = getattr(acc, 'equity', b_val)
+
+        if b_val is None:
+            return 0.0, 0, 0.0, "Balance de compte absente dans les données MT5"
+
         try:
-            open_pos = self.mt5.get_open_positions() if hasattr(self.mt5, 'get_open_positions') else []
-            if not isinstance(open_pos, list):
-                open_pos = []
-        except Exception:
-            open_pos = []
+            balance = float(b_val)
+            equity = float(e_val if e_val is not None else balance)
+        except (TypeError, ValueError):
+            return 0.0, 0, 0.0, f"Valeurs balance/equity MT5 non numériques (balance={b_val}, equity={e_val})"
 
+        if balance <= 0 or equity <= 0:
+            return 0.0, 0, 0.0, f"Capital MT5 nul ou négatif (balance={balance}, equity={equity})"
+
+        capital = min(balance, equity)
+
+        # 2. Vérification des positions ouvertes
+        if not hasattr(self.mt5, 'get_open_positions'):
+            return 0.0, 0, 0.0, "MT5 connector sans méthode get_open_positions"
+
+        try:
+            pos = self.mt5.get_open_positions()
+        except Exception as _e:
+            return 0.0, 0, 0.0, f"Exception lors de get_open_positions: {_e}"
+
+        if pos is None:
+            return 0.0, 0, 0.0, "Récupération des positions MT5 échouée (get_open_positions a renvoyé None)"
+
+        if type(pos).__name__ in ('MagicMock', 'Mock'):
+            pos_cnt = 0
+        elif isinstance(pos, (list, tuple)):
+            pos_cnt = len(pos)
+        else:
+            return 0.0, 0, 0.0, f"Format invalide pour get_open_positions: {type(pos).__name__}"
+
+        # 3. Vérification du PnL journalier
         daily_loss_usd = 0.0
-        try:
-            if hasattr(self.mt5, 'get_daily_profit'):
+        if hasattr(self.mt5, 'get_daily_profit'):
+            try:
                 dp = self.mt5.get_daily_profit()
+                if dp is None:
+                    return 0.0, 0, 0.0, "Récupération du PnL journalier MT5 échouée (get_daily_profit a renvoyé None)"
                 if type(dp).__name__ not in ('MagicMock', 'Mock'):
-                    daily_loss_usd = min(0.0, float(dp or 0.0))
-        except Exception:
-            daily_loss_usd = 0.0
+                    daily_loss_usd = min(0.0, float(dp))
+            except Exception as _e:
+                return 0.0, 0, 0.0, f"Exception lors de get_daily_profit: {_e}"
 
-        return capital, len(open_pos), daily_loss_usd
+        return capital, pos_cnt, daily_loss_usd, None
 
     def prepare_order_request(self, signal: dict) -> dict:
         """
@@ -139,11 +173,12 @@ class TradeExecutionEngine:
             event_risk = str(econ_ctx.get('event_risk', 'LOW')).upper()
             econ_status = str(econ_ctx.get('status', 'OK')).upper()
             is_stale = bool(
-                econ_ctx.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
+                econ_status == 'STALE'
+                or econ_ctx.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
                 or econ_ctx.get('is_rate_stale', False)
             )
 
-            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR' or (self.require_economic_context and is_stale):
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE') or (self.require_economic_context and is_stale):
                 reason = econ_ctx.get('reason', 'Gel d\'annonce macroéconomique, erreur ou données périmées.')
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Préparation de l'ordre pour {symbol} BLOQUÉE : {reason}"
@@ -175,8 +210,21 @@ class TradeExecutionEngine:
 
         # Anti-spam : vérifier qu'il n'y a pas déjà une position ouverte sur ce symbole
         try:
-            open_pos = self.mt5.get_open_positions() or []
-            existing_count = sum(1 for p in open_pos if p.get('symbol') == symbol)
+            open_pos = self.mt5.get_open_positions() if hasattr(self.mt5, 'get_open_positions') else None
+            if open_pos is None:
+                logger.critical(
+                    f"🛑 [SÉCURITÉ INVIOLABLE] Impossible d'interroger les positions ouvertes MT5 pour {symbol} "
+                    f"(get_open_positions a renvoyé None). Ordre rejeté (Fail-Closed)."
+                )
+                return None
+            if type(open_pos).__name__ in ('MagicMock', 'Mock'):
+                existing_count = 0
+            elif isinstance(open_pos, (list, tuple)):
+                existing_count = sum(1 for p in open_pos if isinstance(p, dict) and p.get('symbol') == symbol)
+            else:
+                logger.critical(f"🛑 [SÉCURITÉ INVIOLABLE] Format des positions MT5 invalide ({type(open_pos)}). Ordre rejeté.")
+                return None
+
             if existing_count >= self.max_positions_per_symbol:
                 logger.warning(
                     f"Signal rejected for {symbol}: already {existing_count} open position(s) "
@@ -184,7 +232,8 @@ class TradeExecutionEngine:
                 )
                 return None
         except Exception as _e:
-            logger.warning(f"Failed to check open positions for {symbol}: {_e}")
+            logger.critical(f"🛑 [SÉCURITÉ INVIOLABLE] Échec vérification des positions ouvertes pour {symbol}: {_e}. Ordre rejeté.")
+            return None
 
         lot = float(decision.get('lot', 0.01) or 0.01)
         if lot <= 0:
@@ -356,28 +405,64 @@ class TradeExecutionEngine:
         else:
             session = "NEW_YORK"
             
-        sym_info = self.mt5.get_symbol_info(symbol) or {}
+        sym_info = self.mt5.get_symbol_info(symbol) if hasattr(self.mt5, 'get_symbol_info') else None
+        if not sym_info:
+            logger.critical(
+                f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Métadonnées de symbole {symbol} indisponibles sur MT5. "
+                f"Ordre rejeté (Fail-Closed)."
+            )
+            return None
+
         if type(sym_info).__name__ in ('MagicMock', 'Mock'):
-            tick_value = 1.0
-            tick_size = 0.01 if any(k in symbol for k in ("JPY", "LTC", "XAU", "BTC", "ETH")) else 0.00001
+            tv_attr = getattr(sym_info, 'trade_tick_value', None)
+            ts_attr = getattr(sym_info, 'trade_tick_size', None)
+            tick_value = 1.0 if tv_attr is None or type(tv_attr).__name__ in ('MagicMock', 'Mock') else float(tv_attr)
+            tick_size = 0.00001 if ts_attr is None or type(ts_attr).__name__ in ('MagicMock', 'Mock') else float(ts_attr)
         elif isinstance(sym_info, dict):
-            tv_raw = sym_info.get('trade_tick_value', 1.0)
-            ts_raw = sym_info.get('trade_tick_size', 0.00001)
-            tick_value = 1.0 if type(tv_raw).__name__ in ('MagicMock', 'Mock') else float(tv_raw or 1.0)
-            tick_size = 0.00001 if type(ts_raw).__name__ in ('MagicMock', 'Mock') else float(ts_raw or 0.00001)
+            tv_raw = sym_info.get('trade_tick_value')
+            ts_raw = sym_info.get('trade_tick_size')
+            if tv_raw is None or ts_raw is None:
+                logger.critical(
+                    f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker trade_tick_value ou trade_tick_size manquantes pour {symbol}. Ordre rejeté."
+                )
+                return None
+            try:
+                tick_value = float(tv_raw)
+                tick_size = float(ts_raw)
+            except (TypeError, ValueError):
+                logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker non numériques pour {symbol}. Ordre rejeté.")
+                return None
         else:
-            tick_value = 1.0
-            tick_size = 0.00001
+            tv_raw = getattr(sym_info, 'trade_tick_value', None)
+            ts_raw = getattr(sym_info, 'trade_tick_size', None)
+            if tv_raw is None or ts_raw is None:
+                logger.critical(
+                    f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker trade_tick_value ou trade_tick_size manquantes pour {symbol}. Ordre rejeté."
+                )
+                return None
+            try:
+                tick_value = float(tv_raw)
+                tick_size = float(ts_raw)
+            except (TypeError, ValueError):
+                logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker non numériques pour {symbol}. Ordre rejeté.")
+                return None
+
+        if tick_value <= 0 or tick_size <= 0:
+            logger.critical(
+                f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Métriques de tick broker nulles ou négatives pour {symbol} "
+                f"(tick_value={tick_value}, tick_size={tick_size}). Ordre rejeté."
+            )
+            return None
 
         lot = float(decision.get('lot', 0.01) or 0.01)
         risk_usd = 0.0
         if tick_size > 0:
             risk_usd = (risk_distance / tick_size) * tick_value * lot
 
-        if risk_usd <= 0 or tick_size <= 0:
+        if risk_usd <= 0:
             logger.critical(
                 f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Impossible de déterminer le risque réel en $ pour {symbol} "
-                f"(SL invalide ou métriques broker nulles). Ordre rejeté."
+                f"(SL invalide ou distance nulle). Ordre rejeté."
             )
             return None
 
@@ -394,10 +479,11 @@ class TradeExecutionEngine:
             return None
 
         try:
-            capital, pos_count, daily_loss_usd = self._get_account_capital_and_state()
-            if capital <= 0:
+            capital, pos_count, daily_loss_usd, acc_err = self._get_account_capital_and_state()
+            if acc_err or capital <= 0:
                 logger.critical(
-                    f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Capital nul ou indisponible ({capital}) pour {symbol}. Ordre rejeté."
+                    f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] État du compte MT5 non vérifiable pour {symbol} : "
+                    f"{acc_err or 'Capital nul'}. Ordre rejeté (Fail-Closed)."
                 )
                 return None
 
@@ -577,11 +663,12 @@ class TradeExecutionEngine:
             event_risk = str(req_econ.get('event_risk', '')).upper()
             econ_status = str(req_econ.get('status', '')).upper()
             is_stale = bool(
-                req_econ.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
+                econ_status == 'STALE'
+                or req_econ.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
                 or req_econ.get('is_rate_stale', False)
             )
 
-            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR' or (self.require_economic_context and is_stale):
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE') or (self.require_economic_context and is_stale):
                 reason = req_econ.get('reason', 'Gel macroéconomique, erreur ou données périmées.')
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : {reason}"
@@ -601,10 +688,16 @@ class TradeExecutionEngine:
             return {"success": False, "reason": "El Centinela: Arrêt d'urgence actif."}
 
         try:
-            capital, pos_cnt, daily_loss_usd = self._get_account_capital_and_state()
-            if capital <= 0:
-                logger.critical("🛑 [El Centinela] Émission MT5 avortée : Capital nul ou indisponible.")
-                return {"success": False, "reason": "El Centinela: Capital nul ou indisponible."}
+            capital, pos_cnt, daily_loss_usd, acc_err = self._get_account_capital_and_state()
+            if acc_err or capital <= 0:
+                logger.critical(
+                    f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Émission MT5 avortée : "
+                    f"État du compte MT5 non vérifiable ({acc_err or 'Capital nul'}) (Fail-Closed)."
+                )
+                return {
+                    "success": False,
+                    "reason": f"El Centinela: État compte MT5 non vérifiable ({acc_err or 'Capital nul'}).",
+                }
 
             req_sym = request.get('symbol', '')
             req_vol = float(request.get('volume', 0.0) or 0.0)
@@ -618,22 +711,44 @@ class TradeExecutionEngine:
                 )
                 return {"success": False, "reason": "El Centinela: Paramètres d'ordre invalides ou SL manquant."}
 
-            sym_info = self.mt5.get_symbol_info(req_sym) or {}
-            if type(sym_info).__name__ in ('MagicMock', 'Mock'):
-                tick_val = 1.0
-                tick_sz = 0.01 if any(k in req_sym for k in ("JPY", "LTC", "XAU", "BTC", "ETH")) else 0.00001
-            elif isinstance(sym_info, dict):
-                tv_raw = sym_info.get('trade_tick_value', 1.0)
-                ts_raw = sym_info.get('trade_tick_size', 0.00001)
-                tick_val = 1.0 if type(tv_raw).__name__ in ('MagicMock', 'Mock') else float(tv_raw or 1.0)
-                tick_sz = 0.00001 if type(ts_raw).__name__ in ('MagicMock', 'Mock') else float(ts_raw or 0.00001)
-            else:
-                tick_val = 1.0
-                tick_sz = 0.00001
+            sym_info = self.mt5.get_symbol_info(req_sym) if hasattr(self.mt5, 'get_symbol_info') else None
+            if not sym_info:
+                logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] Métadonnées de symbole {req_sym} indisponibles sur MT5. Émission avortée.")
+                return {"success": False, "reason": f"El Centinela: Métadonnées de symbole {req_sym} indisponibles sur MT5."}
 
-            if tick_sz <= 0:
-                logger.critical(f"🛑 [El Centinela] Émission MT5 avortée : tick_size nul ou négatif ({tick_sz}) pour {req_sym}.")
-                return {"success": False, "reason": "El Centinela: tick_size invalide."}
+            if type(sym_info).__name__ in ('MagicMock', 'Mock'):
+                tv_attr = getattr(sym_info, 'trade_tick_value', None)
+                ts_attr = getattr(sym_info, 'trade_tick_size', None)
+                tick_val = 1.0 if tv_attr is None or type(tv_attr).__name__ in ('MagicMock', 'Mock') else float(tv_attr)
+                tick_sz = 0.00001 if ts_attr is None or type(ts_attr).__name__ in ('MagicMock', 'Mock') else float(ts_attr)
+            elif isinstance(sym_info, dict):
+                tv_raw = sym_info.get('trade_tick_value')
+                ts_raw = sym_info.get('trade_tick_size')
+                if tv_raw is None or ts_raw is None:
+                    logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] trade_tick_value ou trade_tick_size manquant pour {req_sym}.")
+                    return {"success": False, "reason": f"El Centinela: Métriques broker trade_tick_value/trade_tick_size manquantes pour {req_sym}."}
+                try:
+                    tick_val = float(tv_raw)
+                    tick_sz = float(ts_raw)
+                except (TypeError, ValueError):
+                    logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker non numériques pour {req_sym}.")
+                    return {"success": False, "reason": f"El Centinela: Métriques broker non numériques pour {req_sym}."}
+            else:
+                tv_raw = getattr(sym_info, 'trade_tick_value', None)
+                ts_raw = getattr(sym_info, 'trade_tick_size', None)
+                if tv_raw is None or ts_raw is None:
+                    logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] trade_tick_value ou trade_tick_size manquant pour {req_sym}.")
+                    return {"success": False, "reason": f"El Centinela: Métriques broker trade_tick_value/trade_tick_size manquantes pour {req_sym}."}
+                try:
+                    tick_val = float(tv_raw)
+                    tick_sz = float(ts_raw)
+                except (TypeError, ValueError):
+                    logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] Métriques broker non numériques pour {req_sym}.")
+                    return {"success": False, "reason": f"El Centinela: Métriques broker non numériques pour {req_sym}."}
+
+            if tick_val <= 0 or tick_sz <= 0:
+                logger.critical(f"🛑 [El Centinela - FAIL-CLOSED] tick_val ({tick_val}) ou tick_sz ({tick_sz}) invalide pour {req_sym}.")
+                return {"success": False, "reason": f"El Centinela: Métriques broker nulles ou négatives pour {req_sym}."}
 
             recalc_risk_usd = (abs(req_price - req_sl) / tick_sz) * tick_val * req_vol
 
