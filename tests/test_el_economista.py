@@ -846,3 +846,85 @@ def test_calendar_provider_bls_official_vs_heuristic_approximate():
     assert cpi_future["source"] == "HEURISTIC_ESTIMATE"
     assert "[Date estimée]" in cpi_future["title"]
 
+
+def test_matrice_complete_passerelle_execution_modes_et_contextes():
+    """
+    Validation exhaustive de la matrice d'exécution :
+    Modes : [auto, semi-auto, assist]
+    Contextes : [absent, invalide, périmé, blackout, sain]
+    Vérifie formellement le respect du principe Fail-Closed et les appels MT5.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    mock_deal_ok = MagicMock(retcode=10009, order=55555, price=1.0855, volume=0.05)
+
+    scenarios = {
+        "absent": None,
+        "invalide": "PAYLOAD_INVALIDE",
+        "perime": {
+            "status": "OK",
+            "high_impact_window": False,
+            "event_risk": "LOW",
+            "recommendation": "NORMAL",
+            "data_freshness": "STALE",
+            "is_rate_stale": True,
+            "reason": "Taux directeurs anciens > 90 jours",
+        },
+        "blackout": {
+            "status": "OK",
+            "high_impact_window": True,
+            "event_risk": "CRITICAL",
+            "recommendation": "NO_TRADE_NEWS",
+            "reason": "Publication NFP dans 5 minutes",
+        },
+        "sain": {
+            "status": "OK",
+            "high_impact_window": False,
+            "event_risk": "LOW",
+            "recommendation": "NORMAL",
+            "data_freshness": "FRESH",
+            "is_rate_stale": False,
+            "reason": "Conditions macroéconomiques normales",
+        },
+    }
+
+    for mode in ("auto", "semi-auto", "assist"):
+        engine = TradeExecutionEngine(mt5_connector=mock_connector, mode=mode)
+
+        for scen_name, econ_val in scenarios.items():
+            raw_req = {
+                "symbol": "EURUSD",
+                "action": 0,
+                "volume": 0.05,
+                "price": 1.0855,
+                "sl": 1.0800,
+                "tp": 1.0950,
+                "type": 0,
+            }
+            if econ_val is not None:
+                raw_req["_economic_context"] = econ_val
+
+            with patch("MetaTrader5.order_send", return_value=mock_deal_ok) as mock_send:
+                res = engine.execute_order(raw_req)
+
+                if mode in ("auto", "semi-auto"):
+                    if scen_name in ("absent", "invalide", "perime", "blackout"):
+                        assert res["success"] is False, f"Mode {mode} / scénario {scen_name} aurait dû être bloqué !"
+                        mock_send.assert_not_called()
+                    else:  # sain
+                        assert res["success"] is True, f"Mode {mode} / scénario {scen_name} aurait dû passer !"
+                        mock_send.assert_called_once()
+                else:  # assist
+                    if scen_name in ("invalide", "blackout"):
+                        assert res["success"] is False, f"Mode assist / scénario {scen_name} aurait dû être bloqué !"
+                        mock_send.assert_not_called()
+                    else:  # absent, perime, sain
+                        assert res["success"] is True, f"Mode assist / scénario {scen_name} aurait dû être autorisé !"
+                        mock_send.assert_called_once()
+
+

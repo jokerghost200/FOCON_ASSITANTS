@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import logging
 from typing import Optional, Dict, Any, List
 from src.core.mt5_connector import MT5Connector
