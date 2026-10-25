@@ -66,13 +66,33 @@ class ElEstratega:
         direction_filter: str = "BOTH",
         observation: Optional[Dict[str, Any]] = None,
         ai_advice: Optional[Dict[str, Any]] = None,
+        economic_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Décideur Officiel Unique :
         Génère une décision stratégique complète par arbitrage institutionnel et quantitatif.
         Si une observation structurée d'El Observador est fournie, extrait automatiquement les contextes.
+        Si un contexte macroéconomique d'El Economista est fourni, respecte le gel d'annonces (News Blackout)
+        et ajuste la confiance en fonction de la force relative des devises (CSI) et du carry trade.
         Si un avis d'IA externe est fourni, le confronte rigoureusement à l'espérance mathématique.
         """
+        # 0. Évaluation de sécurité macroéconomique préalable (El Economista)
+        if economic_context and isinstance(economic_context, dict):
+            is_blackout = economic_context.get("high_impact_window", False)
+            event_risk = economic_context.get("event_risk", "LOW")
+            econ_rec = economic_context.get("recommendation", "NORMAL")
+
+            if is_blackout or econ_rec == "NO_TRADE_NEWS" or event_risk in ("CRITICAL", "HIGH"):
+                reason = economic_context.get("reason", "Annonce macroéconomique majeure imminente")
+                logger.info(f"🛑 [El Estratega] Gel d'ordre macroéconomique imposé pour {symbol} : {reason}")
+                return {
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "reason": f"Gel d'ordre macroéconomique (El Economista) : {reason}",
+                    "economic_context": economic_context,
+                    "cerebro_origen": "El Estratega",
+                }
+
         # 1. Extraction si observation structurée d'El Observador est injectée
         if observation:
             tech_features = observation.get("tech_features", tech_features)
@@ -134,6 +154,28 @@ class ElEstratega:
                         f"Conflit d'arbitrage : Moteur quantitatif propose {local_action} "
                         f"tandis que l'IA propose {ai_action}. Sécurité prioritaire = WAIT."
                     )
+
+        # 4. Modération ou renforcement par le contexte macroéconomique (El Economista)
+        if economic_context and isinstance(economic_context, dict):
+            decision["economic_context"] = economic_context
+            econ_bias = economic_context.get("bias", "NEUTRAL")
+            current_action = decision.get("action")
+            current_conf = float(decision.get("confidence", 50.0) or 50.0)
+
+            if current_action == "BUY":
+                if econ_bias == "BEARISH":
+                    decision["confidence"] = max(10.0, current_conf - 15.0)
+                    decision["reason"] += " (Attention: Contre-courant macroéconomique baissier)."
+                elif econ_bias == "BULLISH":
+                    decision["confidence"] = min(98.0, current_conf + 5.0)
+                    decision["reason"] += " [Confluence macroéconomique haussière validée]."
+            elif current_action == "SELL":
+                if econ_bias == "BULLISH":
+                    decision["confidence"] = max(10.0, current_conf - 15.0)
+                    decision["reason"] += " (Attention: Contre-courant macroéconomique haussier)."
+                elif econ_bias == "BEARISH":
+                    decision["confidence"] = min(98.0, current_conf + 5.0)
+                    decision["reason"] += " [Confluence macroéconomique baissière validée]."
 
         decision["cerebro_origen"] = "El Estratega"
         return decision

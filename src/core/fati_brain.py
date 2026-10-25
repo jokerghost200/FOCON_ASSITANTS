@@ -18,6 +18,7 @@ from src.cerebros.el_estratega import ElEstratega
 from src.cerebros.el_sabio import ElSabio
 from src.cerebros.el_investigador import ElInvestigador
 from src.cerebros.el_centinela import ElCentinela
+from src.cerebros.el_economista import ElEconomista
 
 from src.services.learning_scheduler import LearningScheduler
 from src.services.health_monitor import SystemHealthMonitor
@@ -28,8 +29,14 @@ logger = logging.getLogger(__name__)
 class FATIBrain:
     """
     Système unifié d'Intelligence Autonome de Trading (FATI).
-    Orchestre les 5 Cerveaux Espagnols spécialisés tout en assurant
-    une rétro-compatibilité intégrale avec l'ensemble du projet.
+    Orchestre les 6 Cerveaux Espagnols spécialisés ("Los Seis Cerebros") tout en assurant
+    une rétro-compatibilité intégrale avec l'ensemble du projet :
+    1. OBSERVER        -> El Observador    (src.cerebros.el_observador)
+    2. DÉCIDER         -> El Estratega     (src.cerebros.el_estratega)
+    3. APPRENDRE       -> El Sabio         (src.cerebros.el_sabio)
+    4. EXPÉRIMENTER    -> El Investigador  (src.cerebros.el_investigador)
+    5. SÉCURISER       -> El Centinela     (src.cerebros.el_centinela)
+    6. MACROÉCONOMIE   -> El Economista    (src.cerebros.el_economista)
     """
 
     def __init__(
@@ -81,6 +88,9 @@ class FATIBrain:
         self.promotion_gate = self.centinela.promotion_gate
         self.rollback = self.centinela.rollback
 
+        # 6. CEREBRO ECONOMISTA : Intelligence macroéconomique, calendrier, CSI et gel d'annonces
+        self.economista = ElEconomista(mt5_connector=mt5_connector)
+
         # Services d'infrastructure
         self.scheduler = LearningScheduler(interval_seconds=1800)
         self.health = SystemHealthMonitor(
@@ -95,8 +105,9 @@ class FATIBrain:
         self.scheduler.register_task("audit_drift", self._scheduled_drift_audit)
         self.scheduler.register_task("discover_toxic_patterns", self._scheduled_pattern_discovery)
         self.scheduler.register_task("research_cycle", self._scheduled_research_cycle)
+        self.scheduler.register_task("refresh_economic_data", self._scheduled_economic_refresh)
 
-        logger.info("🧠 [FATI] Los 5 Cerebros Autónomos inicializados con éxito.")
+        logger.info("🧠 [FATI] Los 6 Cerebros Autónomos inicializados con éxito.")
 
     def observe_and_decide(
         self,
@@ -112,11 +123,19 @@ class FATIBrain:
         direction_filter: str = "BOTH",
         observation: Optional[Dict[str, Any]] = None,
         ai_advice: Optional[Dict[str, Any]] = None,
+        economic_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Cycle Pilier 1 & 2 : El Observador & El Estratega.
-        Journalise la décision via El Sabio pour la postérité statistique.
+        Cycle Pilier 1, 2 & 6 : El Observador, El Estratega & El Economista.
+        Intègre le contexte macroéconomique et journalise la décision via El Sabio pour la postérité statistique.
         """
+        # Consultation automatique d'El Economista si non injecté préalablement
+        if economic_context is None and hasattr(self, "economista") and self.economista:
+            try:
+                economic_context = self.economista.analizar_contexto_economico(symbol)
+            except Exception as _ece:
+                logger.debug(f"[FATI] Erreur consultation El Economista pour {symbol}: {_ece}")
+
         decision = self.estratega.decidir(
             symbol=symbol,
             timeframe=timeframe,
@@ -130,6 +149,7 @@ class FATIBrain:
             direction_filter=direction_filter,
             observation=observation,
             ai_advice=ai_advice,
+            economic_context=economic_context,
         )
 
         # Enregistrement systématique de la décision dans le journal (El Sabio)
@@ -189,3 +209,12 @@ class FATIBrain:
             logger.info(f"🔬 [El Investigador] Rapport de cycle autonome : {report}")
         except Exception as e:
             logger.error(f"[FATI Research] Erreur cycle recherche planifié : {e}")
+
+    def _scheduled_economic_refresh(self):
+        """Tâche d'arrière-plan : rafraîchissement des flux économiques gratuits (El Economista)."""
+        try:
+            res = self.economista.actualizar_datos_economicos()
+            logger.info(f"📰 [El Economista] Flux économiques rafraîchis : {res}")
+        except Exception as e:
+            logger.debug(f"[FATI Economic] Erreur rafraîchissement économique : {e}")
+

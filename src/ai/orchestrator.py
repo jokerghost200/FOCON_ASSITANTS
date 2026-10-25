@@ -62,6 +62,7 @@ class AIOrchestrator:
         self.sabio = self.fati.sabio
         self.investigador = self.fati.investigador
         self.centinela = self.fati.centinela
+        self.economista = getattr(self.fati, "economista", None)
 
         # Cerveau quantitatif local et détecteurs unifiés avec El Estratega & El Observador
         self.local_brain = self.estratega.local_brain
@@ -572,9 +573,24 @@ class AIOrchestrator:
         else:
             rsi_status = f"Neutre / Favorable (RSI {rsi_val:.1f})"
         
-        # 2. News Context (optional: Gemini+Search can be slow when quotas are exhausted)
+        # 2. News Context & Macroeconomic Analysis (El Economista)
+        economic_context = None
+        if self.economista:
+            try:
+                economic_context = self.economista.analizar_contexto_economico(symbol)
+            except Exception as _ece:
+                logger.debug(f"[El Economista] Erreur analyse économique pour {symbol}: {_ece}")
+
         if self.live_news_enabled:
             news_context = self.router.analyze_news(symbol, stop_event=stop_event)
+        elif economic_context:
+            news_context = {
+                "market_impact": economic_context.get("event_risk", "LOW"),
+                "direction": economic_context.get("bias", "NEUTRAL"),
+                "summary": economic_context.get("reason", "Analyse macroéconomique locale El Economista."),
+                "events": [economic_context.get("next_event_title")] if economic_context.get("next_event_title") else [],
+                "economic_context": economic_context,
+            }
         else:
             news_context = {
                 "market_impact": "NEUTRAL",
@@ -894,6 +910,7 @@ class AIOrchestrator:
             spread_price=spread_price,
             direction_filter=dir_filter_upper,
             ai_advice=ai_advice,
+            economic_context=economic_context,
         )
 
         # ─── PHASE 2: OVERRIDE RISK WITH STRATEGY ENGINE ───
@@ -1035,7 +1052,9 @@ class AIOrchestrator:
 
         # ─── GARDE-FOU INDÉPENDANT ABSOLU : EL CENTINELA ───
         if self.centinela:
-            capital = max(float(account_info.get('balance', 0.0) or 0.0), float(account_info.get('equity', 0.0) or 0.0))
+            bal = float(account_info.get('balance', 0.0) or 0.0)
+            eq = float(account_info.get('equity', 0.0) or 0.0)
+            capital = min(bal, eq) if eq > 0 else bal
             daily_loss = min(0.0, float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0))
             open_count = len(self.mt5.get_open_positions() or [])
             risk_usd = float(proposal.get('risk_amount_usd', 0.0) or (capital * 0.01))
@@ -1064,6 +1083,7 @@ class AIOrchestrator:
             "tech_features": tech_features,
             "amd_context": amd_context,
             "news_context": news_context,
+            "economic_context": economic_context,
             "decision": proposal
         }
 

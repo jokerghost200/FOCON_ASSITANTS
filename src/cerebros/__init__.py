@@ -16,6 +16,7 @@ from src.cerebros.el_estratega import ElEstratega
 from src.cerebros.el_sabio import ElSabio
 from src.cerebros.el_investigador import ElInvestigador
 from src.cerebros.el_centinela import ElCentinela
+from src.cerebros.el_economista import ElEconomista
 
 __all__ = [
     "ElObservador",
@@ -23,4 +24,6 @@ __all__ = [
     "ElSabio",
     "ElInvestigador",
     "ElCentinela",
+    "ElEconomista",
 ]
+
