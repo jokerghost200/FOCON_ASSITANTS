@@ -142,7 +142,135 @@ class TestLocalQuantBrain(unittest.TestCase):
         self.assertLessEqual(decision["statistical_win_prob"], 0.68)
         # L'espérance mathématique doit être positive
         self.assertGreater(decision["expected_value_r"], 0.0)
+        # Métadonnées de calibration explicite
+        self.assertFalse(decision["is_calibrated"])
+        self.assertEqual(decision["probability_status"], "UNCALIBRATED_HEURISTIC")
+        self.assertIn("normalized_confluence_pct", decision)
+
+    def test_decide_fail_closed_missing_or_nan_technical_features(self):
+        """Phase 1 : Vérifie que des indicateurs manquants, NaN ou Inf provoquent un WAIT immédiat."""
+        valid_features = {
+            "close": 1.1000, "ema_50": 1.0990, "ema_200": 1.0950,
+            "rsi_14": 52.0, "atr_14": 0.0012, "trend": "BULLISH",
+        }
+        # 1. RSI manquant
+        f_no_rsi = dict(valid_features)
+        del f_no_rsi["rsi_14"]
+        d1 = self.brain.decide("EURUSD", "M15", f_no_rsi)
+        self.assertEqual(d1["action"], "WAIT")
+        self.assertEqual(d1["market_regime"], "DEGRADED_DATA")
+        self.assertIn("Fail-Closed", d1["invalidation_reason"])
+
+        # 2. EMA_50 est NaN
+        f_nan_ema = dict(valid_features)
+        f_nan_ema["ema_50"] = float("nan")
+        d2 = self.brain.decide("EURUSD", "M15", f_nan_ema)
+        self.assertEqual(d2["action"], "WAIT")
+        self.assertEqual(d2["market_regime"], "DEGRADED_DATA")
+
+        # 3. ATR_14 est nul ou négatif
+        f_zero_atr = dict(valid_features)
+        f_zero_atr["atr_14"] = 0.0
+        d3 = self.brain.decide("EURUSD", "M15", f_zero_atr)
+        self.assertEqual(d3["action"], "WAIT")
+        self.assertEqual(d3["market_regime"], "DEGRADED_DATA")
+
+        # 4. Close est manquant ou <= 0
+        f_bad_close = dict(valid_features)
+        f_bad_close["close"] = -1.0
+        d4 = self.brain.decide("EURUSD", "M15", f_bad_close)
+        self.assertEqual(d4["action"], "WAIT")
+        self.assertEqual(d4["market_regime"], "DEGRADED_DATA")
+
+    def test_decide_fail_closed_invalid_sl_tp_geometry(self):
+        """Phase 1 : Vérifie qu'un SL ou TP placé du mauvais côté de l'entrée est refusé (WAIT)."""
+        indicators = {
+            "close": 100.0, "rsi_14": 50.0, "ema_50": 98.0, "ema_200": 90.0,
+            "macd": 0.5, "macd_signal": 0.2, "macd_hist": 0.3, "adx": 30.0, "atr_14": 1.5,
+            "trend": "BULLISH",
+        }
+        boomerang_data = {"decision": "VALID", "direction": "BUY", "score": 85.0}
+
+        # Mocking or simulating an invalid SL via monkey-patching min_sl_dist logic or custom OB
+        class BadOB:
+            direction = "BUY"
+            is_retested = True
+            score = 80
+            ob_type = "BULLISH_OB"
+            sl = 105.0  # SL au-dessus de l'entrée pour un BUY -> INVALIDE !
+
+        d_bad_geom = self.brain.decide(
+            "BTCUSD", "M15", indicators,
+            boomerang_data=boomerang_data,
+            order_blocks=[BadOB()],
+            htf_trend="BULLISH",
+        )
+        # Doit être rejeté en WAIT pour géométrie invalide
+        self.assertEqual(d_bad_geom["action"], "WAIT")
+        self.assertIn("Géométrie", d_bad_geom["invalidation_reason"])
+
+    def test_decide_fail_closed_insufficient_reward_risk_ratio(self):
+        """Phase 1 : Vérifie qu'un ratio R:R inférieur à min_rr conduit à WAIT."""
+        strict_brain = LocalQuantBrain(min_confidence=60.0, min_rr=3.0)  # Exige un R:R >= 3.0
+        indicators = {
+            "close": 100.0, "rsi_14": 50.0, "ema_50": 98.0, "ema_200": 90.0,
+            "macd": 0.5, "macd_signal": 0.2, "macd_hist": 0.3, "adx": 30.0, "atr_14": 1.5,
+            "trend": "BULLISH",
+        }
+        boomerang_data = {"decision": "VALID", "direction": "BUY", "score": 85.0}
+
+        # Par défaut, le setup BUY propose un RR de ~2.0
+        res = strict_brain.decide(
+            "BTCUSD", "M15", indicators,
+            boomerang_data=boomerang_data,
+            htf_trend="BULLISH",
+        )
+        self.assertEqual(res["action"], "WAIT")
+        self.assertIn("Ratio R:R insuffisant", res["invalidation_reason"])
+
+    def test_drift_detector_quarantine_blocks_el_estratega_and_decision_engine(self):
+        """Phase 1 & 4 : Vérifie que le DriftDetector en quarantaine critique bloque l'exécution dans El Estratega."""
+        from src.cerebros.el_estratega import ElEstratega
+        from src.learning.drift_detector import PerformanceDriftDetector
+
+        drift_det = PerformanceDriftDetector(window_size=5, min_trades_to_evaluate=3)
+        drift_det.is_quarantined = True  # Dérive critique active
+
+        estratega = ElEstratega(drift_detector=drift_det)
+        tech_features = {
+            "close": 1.1000, "ema_50": 1.0990, "ema_200": 1.0950,
+            "rsi_14": 50.0, "atr_14": 0.0010, "trend": "BULLISH",
+        }
+        res = estratega.decidir(
+            symbol="EURUSD", timeframe="M15", tech_features=tech_features,
+            boomerang_data={"decision": "VALID", "direction": "BUY", "score": 90},
+            htf_trend="BULLISH",
+        )
+        self.assertEqual(res["action"], "WAIT")
+        self.assertTrue(res.get("is_quarantined", False))
+        self.assertIn("QUARANTAINE CRITIQUE", res["reason"])
+
+    def test_adaptive_weights_rollback_and_history_logging(self):
+        """Phase 1 & 3 : Vérifie la réversibilité (rollback) et le logging détaillé d'AdaptiveWeightsEngine."""
+        import tempfile, os
+        from src.learning.adaptive_weights import AdaptiveWeightsEngine
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fpath = os.path.join(tmp_dir, "weights_test.json")
+            engine = AdaptiveWeightsEngine(file_path=str(fpath), learning_rate=2.0)
+            orig_ob = engine.weights["ob_weight"]
+
+            # Modifier le poids
+            engine.record_trade_outcome("ORDER_BLOCK", is_win=True, pnl=50.0, result_r=2.5, exit_reason="TP_HIT")
+            new_ob = engine.weights["ob_weight"]
+            self.assertGreater(new_ob, orig_ob)
+            self.assertEqual(len(engine.history_log), 1)
+            self.assertEqual(engine.history_log[0]["result_r"], 2.5)
+
+            # Rollback
+            restored = engine.rollback()
+            self.assertEqual(restored["ob_weight"], orig_ob)
 
 
 if __name__ == "__main__":
     unittest.main()
+

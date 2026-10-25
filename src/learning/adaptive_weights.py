@@ -38,6 +38,7 @@ class AdaptiveWeightsEngine:
         self.file_path = file_path
         self.learning_rate = learning_rate
         self.weights = dict(DEFAULT_WEIGHTS)
+        self.previous_weights = dict(DEFAULT_WEIGHTS)
         self.history_log = []
         self._load()
 
@@ -52,12 +53,19 @@ class AdaptiveWeightsEngine:
                         if k in DEFAULT_WEIGHTS:
                             low, high = WEIGHT_BOUNDS.get(k, (0.0, 100.0))
                             self.weights[k] = max(low, min(high, float(v)))
+                    prev_w = data.get("previous_weights", {})
+                    if prev_w:
+                        self.previous_weights = dict(prev_w)
+                    else:
+                        self.previous_weights = dict(self.weights)
                     self.history_log = data.get("history_log", [])[-20:]
                 logger.info(f"🧠 [Poids Adaptatifs] Poids chargés avec succès: {self.weights}")
             except Exception as e:
                 logger.warning(f"Erreur chargement adaptive_weights.json ({e}). Utilisation des poids par défaut.")
                 self.weights = dict(DEFAULT_WEIGHTS)
+                self.previous_weights = dict(DEFAULT_WEIGHTS)
         else:
+            self.previous_weights = dict(self.weights)
             self._save()
 
     def _save(self):
@@ -68,6 +76,7 @@ class AdaptiveWeightsEngine:
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump({
                     "weights": self.weights,
+                    "previous_weights": self.previous_weights,
                     "default_weights": DEFAULT_WEIGHTS,
                     "bounds": WEIGHT_BOUNDS,
                     "history_log": self.history_log,
@@ -80,8 +89,16 @@ class AdaptiveWeightsEngine:
         """Retourne une copie des poids actifs actuels."""
         return dict(self.weights)
 
-    def record_trade_outcome(self, setup_type: str, is_win: bool, pnl: float = 0.0):
-        """Ajuste directement et prudemment le poids associé à un setup après clôture."""
+    def rollback(self) -> Dict[str, float]:
+        """Restaure la version précédente des poids pour réversibilité immédiate."""
+        self.weights = dict(self.previous_weights)
+        self._save()
+        logger.warning(f"🔄 [Poids Adaptatifs] Rollback effectué vers la version précédente : {self.weights}")
+        return dict(self.weights)
+
+    def record_trade_outcome(self, setup_type: str, is_win: bool, pnl: float = 0.0, result_r: float = 0.0, exit_reason: str = ""):
+        """Ajuste prudemment le poids associé à un setup après clôture en conservant l'état antérieur."""
+        self.previous_weights = dict(self.weights)
         key_map = {
             "ORDER_BLOCK": "ob_weight",
             "SMC_ORDER_BLOCK": "ob_weight",
@@ -96,19 +113,29 @@ class AdaptiveWeightsEngine:
         delta = self.learning_rate if is_win else -self.learning_rate
         low, high = WEIGHT_BOUNDS.get(target, (0.0, 100.0))
         self.weights[target] = max(low, min(high, round(self.weights.get(target, 30.0) + delta, 2)))
+        self.history_log.append({
+            "setup_type": setup_type,
+            "is_win": is_win,
+            "pnl": pnl,
+            "result_r": result_r,
+            "exit_reason": exit_reason,
+        })
+        self.history_log = self.history_log[-50:]
         self._save()
 
-    def recalibrate(self, closed_trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def recalibrate(self, closed_trades: List[Dict[str, Any]], min_sample: int = 3) -> Dict[str, Any]:
         """
         Recalibre les poids en analysant la performance empirique des composantes.
-        Nécessite au moins 3 trades clôturés pour commencer l'ajustement.
+        Sauvegarde l'état précédent avant tout changement.
         """
-        if not closed_trades or len(closed_trades) < 3:
+        if not closed_trades or len(closed_trades) < min_sample:
             return {
                 "status": "SKIPPED",
-                "reason": f"Pas assez de trades ({len(closed_trades)} < 3 minimum requis pour recalibrer).",
+                "reason": f"Pas assez de trades ({len(closed_trades) if closed_trades else 0} < {min_sample} minimum requis pour recalibrer).",
                 "weights": dict(self.weights),
             }
+
+        self.previous_weights = dict(self.weights)
 
         # Fenêtre d'analyse : jusqu'à 30 derniers trades
         sample = closed_trades[-30:]

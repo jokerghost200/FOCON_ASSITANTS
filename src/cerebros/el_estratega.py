@@ -41,12 +41,15 @@ class ElEstratega:
         decision_engine: Optional[DecisionEngine] = None,
         observador=None,
         weights_engine=None,
+        drift_detector=None,
     ):
         self.weights_engine = weights_engine
+        self.drift_detector = drift_detector
         self.local_brain = local_brain or LocalQuantBrain(min_confidence=60.0, min_rr=1.5, weights_engine=weights_engine)
         self.decision_engine = decision_engine or DecisionEngine(
             local_brain=self.local_brain,
             regime_detector=getattr(observador, "regime_detector", None),
+            drift_detector=drift_detector,
         )
         self.crt_detector = CRTDetector(min_sweep_atr_mult=0.10, min_range_atr_mult=0.50, min_rr_tp1=1.5)
         self.ob_detector = OrderBlockDetector(impulse_atr_mult=1.8, lookback=150, retest_tolerance=0.6)
@@ -74,9 +77,22 @@ class ElEstratega:
         Si une observation structurée d'El Observador est fournie, extrait automatiquement les contextes.
         Si un contexte macroéconomique d'El Economista est fourni, respecte le gel d'annonces (News Blackout)
         et ajuste la confiance en fonction de la force relative des devises (CSI) et du carry trade.
+        Si une alerte de dérive (DriftDetector) est active, applique une mise en quarantaine immédiate (NO-TRADE).
         Si un avis d'IA externe est fourni, le confronte rigoureusement à l'espérance mathématique.
         """
-        # 0. Évaluation de sécurité macroéconomique préalable (El Economista)
+        # 0.0 Évaluation de la dérive de performance (DriftDetector / Quarantaine)
+        if self.drift_detector and getattr(self.drift_detector, "is_quarantined", False):
+            reason = "Stratégie en QUARANTAINE CRITIQUE (DriftDetector) : dérive de performance négative."
+            logger.critical(f"🛑 [El Estratega - SÉCURITÉ DRIFT] Quarantaine critique active pour {symbol}. Ordre bloqué (NO-TRADE).")
+            return {
+                "action": "WAIT",
+                "confidence": 0,
+                "reason": reason,
+                "cerebro_origen": "El Estratega",
+                "is_quarantined": True,
+            }
+
+        # 0.1 Évaluation de sécurité macroéconomique préalable (El Economista)
         if economic_context and isinstance(economic_context, dict):
             is_blackout = bool(economic_context.get("high_impact_window", False))
             event_risk = str(economic_context.get("event_risk", "LOW")).upper()

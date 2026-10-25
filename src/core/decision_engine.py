@@ -20,9 +20,15 @@ class DecisionEngine:
     Relie la détection de régime, le cerveau quantitatif local et les filtres de sécurité.
     """
 
-    def __init__(self, local_brain: Optional[LocalQuantBrain] = None, regime_detector: Optional[MarketRegimeDetector] = None):
+    def __init__(
+        self,
+        local_brain: Optional[LocalQuantBrain] = None,
+        regime_detector: Optional[MarketRegimeDetector] = None,
+        drift_detector: Optional[Any] = None,
+    ):
         self.local_brain = local_brain or LocalQuantBrain(min_confidence=65.0, min_rr=1.5)
         self.regime_detector = regime_detector or MarketRegimeDetector()
+        self.drift_detector = drift_detector
 
     def evaluate(
         self,
@@ -41,6 +47,32 @@ class DecisionEngine:
         Génère une décision de trading unifiée, enrichie du diagnostic de régime et de métriques d'espérance R.
         """
         tech = tech_features or {}
+
+        # 0. Évaluation de dérive statistique (DriftDetector)
+        if self.drift_detector and getattr(self.drift_detector, "is_quarantined", False):
+            close = float(tech.get("close") or 0.0) if tech else 0.0
+            reason = f"🛑 [FATI DriftDetector] Stratégie en QUARANTAINE CRITIQUE sur {symbol} (dérive de performance négative)."
+            return {
+                "action": "WAIT",
+                "confidence": 0,
+                "technical_score": 0.0,
+                "statistical_win_prob": 0.0,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
+                "expected_value_r": 0.0,
+                "market_regime": "QUARANTINE",
+                "invalidation_reason": "Quarantaine critique DriftDetector",
+                "entry": close,
+                "sl": 0.0,
+                "tp": 0.0,
+                "reason": reason,
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "technical_score": 0.0, "statistical_win_prob": 0.0, "expected_value_r": 0.0,
+                    "market_regime": "QUARANTINE", "invalidation_reason": "Quarantaine critique DriftDetector",
+                }
+            }
+
         atr = float(tech.get("atr_14") or 0.001)
         spread_ratio = (spread_price / max(atr, 1e-9)) if atr > 0 else 0.0
 

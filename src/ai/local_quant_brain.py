@@ -15,6 +15,7 @@ Stratégie :
 """
 
 import logging
+import math
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -27,19 +28,52 @@ class LocalQuantBrain:
         self.weights_engine = weights_engine
 
     @staticmethod
-    def detect_market_regime(tech_features: Dict[str, Any], amd_context: Optional[Dict[str, Any]] = None) -> str:
+    def _is_valid_numeric(val: Any, strictly_positive: bool = False) -> bool:
+        """Vérifie la validité numérique stricte d'un indicateur technique."""
+        if val is None:
+            return False
+        try:
+            f = float(val)
+            if math.isnan(f) or math.isinf(f):
+                return False
+            if strictly_positive and f <= 0:
+                return False
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def detect_market_regime(cls, tech_features: Dict[str, Any], amd_context: Optional[Dict[str, Any]] = None) -> str:
         """
         Détermine le régime de marché déterministe actuel :
         - TRENDING_BULLISH : Tendance haussière affirmée (flux acheteur)
         - TRENDING_BEARISH : Tendance baissière affirmée (flux vendeur)
         - VOLATILE_EXPANSION : Forte volatilité / expansion de range
         - RANGE_CONSOLIDATION : Absence de tendance claire / consolidation
+        - DEGRADED_DATA : Données techniques manquantes ou corrompues (Fail-Closed)
         """
+        if not tech_features or not isinstance(tech_features, dict):
+            return "DEGRADED_DATA"
+
+        close_raw = tech_features.get("close")
+        ema50_raw = tech_features.get("ema_50")
+        ema200_raw = tech_features.get("ema_200")
+        rsi_raw = tech_features.get("rsi_14")
+
+        # Validation Fail-Closed : aucune valeur inventée par défaut
+        if not (
+            cls._is_valid_numeric(close_raw, strictly_positive=True)
+            and cls._is_valid_numeric(ema50_raw, strictly_positive=True)
+            and cls._is_valid_numeric(ema200_raw, strictly_positive=True)
+            and cls._is_valid_numeric(rsi_raw)
+        ):
+            return "DEGRADED_DATA"
+
         amd_context = amd_context or {}
-        close = float(tech_features.get("close") or 0.0)
-        ema50 = float(tech_features.get("ema_50") or close)
-        ema200 = float(tech_features.get("ema_200") or close)
-        rsi = float(tech_features.get("rsi_14") or 50.0)
+        close = float(close_raw)
+        ema50 = float(ema50_raw)
+        ema200 = float(ema200_raw)
+        rsi = float(rsi_raw)
         adx = float(tech_features.get("adx") or 0.0)
         trend = str(tech_features.get("trend") or "NEUTRAL").upper()
         phase = str(amd_context.get("Phase", "")).upper()
@@ -57,12 +91,11 @@ class LocalQuantBrain:
     @staticmethod
     def calibrate_probability(technical_score: float, market_regime: str = "RANGE_CONSOLIDATION") -> float:
         """
-        Priorité 4 de l'audit quantitatif :
-        Un score de confluence technique (ex: 80/100) n'est PAS un taux de réussite (win rate).
-        Modèle logistique calibrant le score technique brut en probabilité statistique de gain hors-échantillon P(Win).
-        Plafonne le win rate à des niveaux réalistes (0.35 à 0.68) pour éviter tout sur-ajustement.
+        Modèle logistique calibrant le score technique brut en probabilité indicative P(Win).
+        NOTE MÉTHODOLOGIQUE (Phase 1) :
+        Cette valeur est une estimation heuristique sigmoïde bornée [0.35, 0.68].
+        Elle porte le statut 'UNCALIBRATED_HEURISTIC' jusqu'à validation empirique hors-échantillon.
         """
-        import math
         s = max(0.0, min(100.0, float(technical_score)))
         p_min = 0.35
         p_max = 0.65
@@ -70,6 +103,8 @@ class LocalQuantBrain:
             p_max = 0.68  # Léger avantage statistique dans le sens du trend
         elif market_regime == "VOLATILE_EXPANSION":
             p_max = 0.60  # Risque de faux signaux accru en pic de volatilité
+        elif market_regime == "DEGRADED_DATA":
+            return 0.0
 
         # Sigmoïde centrée sur 65.0 (seuil standard de déclenchement)
         sigmoid = 1.0 / (1.0 + math.exp(-0.07 * (s - 65.0)))
@@ -100,37 +135,91 @@ class LocalQuantBrain:
         crt_setup: Any = None,
     ) -> Dict[str, Any]:
         """
-        Génère une décision de trading quantitative complète et déterministe.
-        Retourne un dictionnaire compatible avec le format de décision de l'IA enrichi
-        de la calibration statistique et de la journalisation d'invalidation.
+        Génère une décision de trading quantitative complète, déterministe et vérifiée.
+        Applique le principe FAIL-CLOSED : toute donnée technique manquante ou incohérente
+        conduit à un refus d'ordre immédiat (WAIT).
         """
         amd_context = amd_context or {}
         boomerang_data = boomerang_data or {}
         order_blocks = order_blocks or []
 
-        close = float(tech_features.get("close") or 0.0)
-        ema50 = float(tech_features.get("ema_50") or close)
-        ema200 = float(tech_features.get("ema_200") or close)
-        rsi = float(tech_features.get("rsi_14") or 50.0)
-        atr = float(tech_features.get("atr_14") or (close * 0.001))
-        macd_hist = float(tech_features.get("macd_hist") or 0.0)
-        trend = str(tech_features.get("trend") or "NEUTRAL").upper()
-
-        market_regime = self.detect_market_regime(tech_features, amd_context)
-
-        if close <= 0 or atr <= 0:
+        # 0. CONTRÔLE FAIL-CLOSED : Validation stricte des données techniques sans substitution arbitraire
+        if not tech_features or not isinstance(tech_features, dict):
+            inv_reason = "tech_features absent ou invalide"
             return {
                 "action": "WAIT",
                 "confidence": 0,
                 "technical_score": 0.0,
-                "statistical_win_prob": 0.35,
-                "market_regime": market_regime,
-                "invalidation_reason": "Données techniques insuffisantes",
-                "entry": close,
-                "sl": close,
-                "tp": close,
-                "reason": "Cerveau Local: Données techniques insuffisantes",
+                "statistical_win_prob": 0.0,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
+                "expected_value_r": 0.0,
+                "market_regime": "DEGRADED_DATA",
+                "invalidation_reason": inv_reason,
+                "entry": 0.0,
+                "sl": 0.0,
+                "tp": 0.0,
+                "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "entry": 0.0, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                    "technical_score": 0.0, "statistical_win_prob": 0.0,
+                    "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0, "market_regime": "DEGRADED_DATA",
+                    "confluences": [], "invalidation_reason": inv_reason,
+                }
             }
+
+        close_raw = tech_features.get("close")
+        atr_raw = tech_features.get("atr_14")
+        ema50_raw = tech_features.get("ema_50")
+        ema200_raw = tech_features.get("ema_200")
+        rsi_raw = tech_features.get("rsi_14")
+
+        is_valid_input = (
+            self._is_valid_numeric(close_raw, strictly_positive=True)
+            and self._is_valid_numeric(atr_raw, strictly_positive=True)
+            and self._is_valid_numeric(ema50_raw, strictly_positive=True)
+            and self._is_valid_numeric(ema200_raw, strictly_positive=True)
+            and self._is_valid_numeric(rsi_raw)
+        )
+
+        if not is_valid_input:
+            safe_close = float(close_raw) if self._is_valid_numeric(close_raw) else 0.0
+            inv_reason = "Données techniques manquantes, non finies ou invalides (RSI/EMA/ATR/Close) - Fail-Closed"
+            return {
+                "action": "WAIT",
+                "confidence": 0,
+                "technical_score": 0.0,
+                "statistical_win_prob": 0.0,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
+                "expected_value_r": 0.0,
+                "market_regime": "DEGRADED_DATA",
+                "invalidation_reason": inv_reason,
+                "entry": safe_close,
+                "sl": 0.0,
+                "tp": 0.0,
+                "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                "journal_record": {
+                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "entry": safe_close, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                    "technical_score": 0.0, "statistical_win_prob": 0.0,
+                    "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0, "market_regime": "DEGRADED_DATA",
+                    "confluences": [], "invalidation_reason": inv_reason,
+                }
+            }
+
+        close = float(close_raw)
+        atr = float(atr_raw)
+        ema50 = float(ema50_raw)
+        ema200 = float(ema200_raw)
+        rsi = float(rsi_raw)
+        macd_hist = float(tech_features.get("macd_hist") or 0.0)
+        trend = str(tech_features.get("trend") or "NEUTRAL").upper()
+
+        market_regime = self.detect_market_regime(tech_features, amd_context)
 
         # ─── 1. FILTRES ANTI-CHASING / ANTI-FOMO ─────────────────────────────
         ema_dist_atr = (close - ema50) / atr
@@ -143,6 +232,9 @@ class LocalQuantBrain:
                 "confidence": 85,
                 "technical_score": 0.0,
                 "statistical_win_prob": calibrated_p,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
+                "expected_value_r": 0.0,
                 "market_regime": market_regime,
                 "invalidation_reason": "Anti-Chasing: Surachat extrême",
                 "entry": close,
@@ -151,32 +243,13 @@ class LocalQuantBrain:
                 "reason": reason_msg,
                 "journal_record": {
                     "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                    "entry": close, "sl": 0.0, "tp": 0.0, "rr": 0.0,
                     "technical_score": 0.0, "statistical_win_prob": calibrated_p,
-                    "market_regime": market_regime, "invalidation_reason": "Anti-Chasing: Surachat extrême",
+                    "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0, "market_regime": market_regime,
+                    "confluences": [], "invalidation_reason": "Anti-Chasing: Surachat extrême",
                 }
             }
-        if rsi <= 30 or ema_dist_atr < -2.5:
-            # Survente extrême ou cours trop étendu
-            reason_msg = f"Cerveau Local: Marché en survente sévère (RSI={rsi:.1f}, {ema_dist_atr:.1f} ATR). Attente de rebond."
-            calibrated_p = self.calibrate_probability(0.0, market_regime)
-            return {
-                "action": "WAIT",
-                "confidence": 85,
-                "technical_score": 0.0,
-                "statistical_win_prob": calibrated_p,
-                "market_regime": market_regime,
-                "invalidation_reason": "Anti-Chasing: Survente extrême",
-                "entry": close,
-                "sl": 0.0,
-                "tp": 0.0,
-                "reason": reason_msg,
-                "journal_record": {
-                    "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
-                    "technical_score": 0.0, "statistical_win_prob": calibrated_p,
-                    "market_regime": market_regime, "invalidation_reason": "Anti-Chasing: Survente extrême",
-                }
-            }
-
         # ─── 2. ANALYSE DES CONFLUENCES INSTITUTIONNELLES & POIDS ADAPTATIFS ────
         weights = self.weights_engine.get_weights() if self.weights_engine else {
             "ob_weight": 35.0,
@@ -192,6 +265,10 @@ class LocalQuantBrain:
         w_rsi = float(weights.get("rsi_pullback_weight", 15.0))
         w_htf = float(weights.get("htf_alignment_weight", 15.0))
         w_amd = float(weights.get("amd_expansion_weight", 10.0))
+
+        # Poids maximal disponible pour la normalisation rigoureuse
+        crt_max_weight = 30.0 if crt_setup else 0.0
+        total_available_weight = w_ob + w_boom + w_trend + w_rsi + w_htf + w_amd + crt_max_weight
 
         bull_score = 0.0
         bear_score = 0.0
@@ -284,29 +361,102 @@ class LocalQuantBrain:
             entry = close
             # Stop loss placé sous la mèche CRT, sous l'Order Block ou sous le swing bas récent
             if crt_setup and getattr(crt_setup, 'direction', '') == "BUY":
-                sl = min(float(crt_setup.sl_raw) - (spread_price * 2 + min_distance), round(entry - min_sl_dist, 5))
+                if float(crt_setup.sl_raw) >= entry:
+                    sl = float(crt_setup.sl_raw)
+                else:
+                    sl = min(float(crt_setup.sl_raw) - (spread_price * 2 + min_distance), round(entry - min_sl_dist, 5))
                 tp = float(crt_setup.tp2)
             elif active_ob and active_ob.direction == "BUY" and active_ob.sl:
-                sl = min(float(active_ob.sl), round(entry - min_sl_dist, 5))
+                if float(active_ob.sl) >= entry:
+                    sl = float(active_ob.sl)
+                else:
+                    sl = min(float(active_ob.sl), round(entry - min_sl_dist, 5))
                 sl_dist = abs(entry - sl)
-                tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
+                tp = round(entry + sl_dist * 2.0, 5)
             else:
                 sl = round(entry - max(atr * 1.5, min_sl_dist), 5)
                 sl_dist = abs(entry - sl)
-                tp = round(entry + sl_dist * max(self.min_rr, 2.0), 5)
+                tp = round(entry + sl_dist * 2.0, 5)
 
             tech_score = round(bull_score, 1)
+            normalized_pct = min(100.0, round((bull_score / max(total_available_weight, 1.0)) * 100.0, 1))
             win_prob = self.calibrate_probability(tech_score, market_regime)
+
+            # Contrôle de cohérence géométrique SL / TP
+            if sl >= entry or tp <= entry:
+                inv_reason = f"Géométrie des prix invalide pour BUY (entry={entry}, sl={sl}, tp={tp}). Ordre rejeté."
+                calibrated_p = self.calibrate_probability(0.0, market_regime)
+                return {
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "technical_score": tech_score,
+                    "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": calibrated_p,
+                    "is_calibrated": False,
+                    "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0,
+                    "market_regime": market_regime,
+                    "invalidation_reason": inv_reason,
+                    "entry": entry,
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                    "journal_record": {
+                        "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                        "entry": entry, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                        "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                        "statistical_win_prob": calibrated_p,
+                        "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                        "expected_value_r": 0.0, "market_regime": market_regime,
+                        "confluences": reasons, "invalidation_reason": inv_reason,
+                    }
+                }
+
             sl_dist = abs(entry - sl)
             tp_dist = abs(tp - entry)
             rr_ratio = round(tp_dist / max(sl_dist, 1e-9), 2)
+
+            # Contrôle du ratio Risque/Rendement (1.0 minimum pour cibles structurelles CRT, self.min_rr sinon)
+            min_rr_threshold = 1.0 if crt_setup else self.min_rr
+            if rr_ratio < min_rr_threshold:
+                inv_reason = f"Ratio R:R insuffisant ({rr_ratio:.2f} < {min_rr_threshold:.2f}). Ordre rejeté."
+                calibrated_p = self.calibrate_probability(0.0, market_regime)
+                return {
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "technical_score": tech_score,
+                    "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": calibrated_p,
+                    "is_calibrated": False,
+                    "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0,
+                    "market_regime": market_regime,
+                    "invalidation_reason": inv_reason,
+                    "entry": entry,
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                    "journal_record": {
+                        "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                        "entry": entry, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                        "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                        "statistical_win_prob": calibrated_p,
+                        "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                        "expected_value_r": 0.0, "market_regime": market_regime,
+                        "confluences": reasons, "invalidation_reason": inv_reason,
+                    }
+                }
+
             ev_r = self.calculate_expected_value_r(win_prob, rr_ratio)
 
             return {
                 "action": "BUY",
                 "confidence": min(95, int(bull_score)),
                 "technical_score": tech_score,
+                "normalized_confluence_pct": normalized_pct,
                 "statistical_win_prob": win_prob,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
                 "expected_value_r": ev_r,
                 "market_regime": market_regime,
                 "entry": entry,
@@ -316,7 +466,9 @@ class LocalQuantBrain:
                 "journal_record": {
                     "symbol": symbol, "timeframe": timeframe, "action": "BUY",
                     "entry": entry, "sl": sl, "tp": tp, "rr": rr_ratio,
-                    "technical_score": tech_score, "statistical_win_prob": win_prob,
+                    "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": win_prob,
+                    "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
                     "expected_value_r": ev_r, "market_regime": market_regime,
                     "confluences": reasons, "invalidation_reason": None,
                 }
@@ -326,29 +478,102 @@ class LocalQuantBrain:
             entry = close
             # Stop loss placé au-dessus de la mèche CRT, au-dessus de l'Order Block ou au-dessus du swing haut
             if crt_setup and getattr(crt_setup, 'direction', '') == "SELL":
-                sl = max(float(crt_setup.sl_raw) + (spread_price * 2 + min_distance), round(entry + min_sl_dist, 5))
+                if float(crt_setup.sl_raw) <= entry:
+                    sl = float(crt_setup.sl_raw)
+                else:
+                    sl = max(float(crt_setup.sl_raw) + (spread_price * 2 + min_distance), round(entry + min_sl_dist, 5))
                 tp = float(crt_setup.tp2)
             elif active_ob and active_ob.direction == "SELL" and active_ob.sl:
-                sl = max(float(active_ob.sl), round(entry + min_sl_dist, 5))
+                if float(active_ob.sl) <= entry:
+                    sl = float(active_ob.sl)
+                else:
+                    sl = max(float(active_ob.sl), round(entry + min_sl_dist, 5))
                 sl_dist = abs(sl - entry)
-                tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
+                tp = round(entry - sl_dist * 2.0, 5)
             else:
                 sl = round(entry + max(atr * 1.5, min_sl_dist), 5)
                 sl_dist = abs(sl - entry)
-                tp = round(entry - sl_dist * max(self.min_rr, 2.0), 5)
+                tp = round(entry - sl_dist * 2.0, 5)
 
             tech_score = round(bear_score, 1)
+            normalized_pct = min(100.0, round((bear_score / max(total_available_weight, 1.0)) * 100.0, 1))
             win_prob = self.calibrate_probability(tech_score, market_regime)
+
+            # Contrôle de cohérence géométrique SL / TP
+            if sl <= entry or tp >= entry:
+                inv_reason = f"Géométrie des prix invalide pour SELL (entry={entry}, sl={sl}, tp={tp}). Ordre rejeté."
+                calibrated_p = self.calibrate_probability(0.0, market_regime)
+                return {
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "technical_score": tech_score,
+                    "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": calibrated_p,
+                    "is_calibrated": False,
+                    "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0,
+                    "market_regime": market_regime,
+                    "invalidation_reason": inv_reason,
+                    "entry": entry,
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                    "journal_record": {
+                        "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                        "entry": entry, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                        "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                        "statistical_win_prob": calibrated_p,
+                        "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                        "expected_value_r": 0.0, "market_regime": market_regime,
+                        "confluences": reasons, "invalidation_reason": inv_reason,
+                    }
+                }
+
             sl_dist = abs(sl - entry)
             tp_dist = abs(entry - tp)
             rr_ratio = round(tp_dist / max(sl_dist, 1e-9), 2)
+
+            # Contrôle du ratio Risque/Rendement (1.0 minimum pour cibles structurelles CRT, self.min_rr sinon)
+            min_rr_threshold = 1.0 if crt_setup else self.min_rr
+            if rr_ratio < min_rr_threshold:
+                inv_reason = f"Ratio R:R insuffisant ({rr_ratio:.2f} < {min_rr_threshold:.2f}). Ordre rejeté."
+                calibrated_p = self.calibrate_probability(0.0, market_regime)
+                return {
+                    "action": "WAIT",
+                    "confidence": 0,
+                    "technical_score": tech_score,
+                    "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": calibrated_p,
+                    "is_calibrated": False,
+                    "probability_status": "UNCALIBRATED_HEURISTIC",
+                    "expected_value_r": 0.0,
+                    "market_regime": market_regime,
+                    "invalidation_reason": inv_reason,
+                    "entry": entry,
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "reason": f"Cerveau Quant Local [FAIL-CLOSED] : {inv_reason}",
+                    "journal_record": {
+                        "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
+                        "entry": entry, "sl": 0.0, "tp": 0.0, "rr": 0.0,
+                        "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                        "statistical_win_prob": calibrated_p,
+                        "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
+                        "expected_value_r": 0.0, "market_regime": market_regime,
+                        "confluences": reasons, "invalidation_reason": inv_reason,
+                    }
+                }
+
             ev_r = self.calculate_expected_value_r(win_prob, rr_ratio)
 
             return {
                 "action": "SELL",
                 "confidence": min(95, int(bear_score)),
                 "technical_score": tech_score,
+                "normalized_confluence_pct": normalized_pct,
                 "statistical_win_prob": win_prob,
+                "is_calibrated": False,
+                "probability_status": "UNCALIBRATED_HEURISTIC",
                 "expected_value_r": ev_r,
                 "market_regime": market_regime,
                 "entry": entry,
@@ -358,13 +583,16 @@ class LocalQuantBrain:
                 "journal_record": {
                     "symbol": symbol, "timeframe": timeframe, "action": "SELL",
                     "entry": entry, "sl": sl, "tp": tp, "rr": rr_ratio,
-                    "technical_score": tech_score, "statistical_win_prob": win_prob,
+                    "technical_score": tech_score, "normalized_confluence_pct": normalized_pct,
+                    "statistical_win_prob": win_prob,
+                    "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
                     "expected_value_r": ev_r, "market_regime": market_regime,
                     "confluences": reasons, "invalidation_reason": None,
                 }
             }
 
         best_score = round(max(bull_score, bear_score), 1)
+        normalized_pct = min(100.0, round((best_score / max(total_available_weight, 1.0)) * 100.0, 1))
         win_prob = self.calibrate_probability(best_score, market_regime)
         inv_reason = (
             f"Score de confluence insuffisant pour un avantage statistique avéré "
@@ -375,7 +603,11 @@ class LocalQuantBrain:
             "action": "WAIT",
             "confidence": 50,
             "technical_score": best_score,
+            "normalized_confluence_pct": normalized_pct,
             "statistical_win_prob": win_prob,
+            "is_calibrated": False,
+            "probability_status": "UNCALIBRATED_HEURISTIC",
+            "expected_value_r": 0.0,
             "market_regime": market_regime,
             "invalidation_reason": inv_reason,
             "entry": close,
@@ -385,7 +617,9 @@ class LocalQuantBrain:
             "journal_record": {
                 "symbol": symbol, "timeframe": timeframe, "action": "WAIT",
                 "entry": close, "sl": 0.0, "tp": 0.0, "rr": 0.0,
-                "technical_score": best_score, "statistical_win_prob": win_prob,
+                "technical_score": best_score, "normalized_confluence_pct": normalized_pct,
+                "statistical_win_prob": win_prob,
+                "is_calibrated": False, "probability_status": "UNCALIBRATED_HEURISTIC",
                 "expected_value_r": 0.0, "market_regime": market_regime,
                 "confluences": reasons, "invalidation_reason": inv_reason,
             }

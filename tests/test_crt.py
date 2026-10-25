@@ -447,6 +447,7 @@ class TestCRTDetector(unittest.TestCase):
                 "expiration_seconds": 3600,
             },
             "tech_features": {"atr_14": 0.0010},
+            "economic_context": {"status": "OK", "event_risk": "LOW"},
         }
 
         req = engine.prepare_order_request(signal)
@@ -541,6 +542,7 @@ class TestCRTDetector(unittest.TestCase):
                 "reason": "CRT Simple Market Order",
             },
             "tech_features": {"atr_14": 0.0010},
+            "economic_context": {"status": "OK", "event_risk": "LOW"},
         }
 
         req = engine.prepare_order_request(signal)

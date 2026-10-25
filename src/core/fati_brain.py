@@ -72,6 +72,10 @@ class FATIBrain:
         self.drift_detector = self.sabio.drift_detector
         self.feedback = self.sabio.feedback
 
+        # Connexion de la sentinelle de dérive (DriftDetector) à l'arbitrage décisionnel
+        self.estratega.drift_detector = self.drift_detector
+        self.decision_engine.drift_detector = self.drift_detector
+
         # 4. CEREBRO INVESTIGADOR : Formulation d'hypothèses, A/B testing sandbox, Walk-Forward
         self.investigador = ElInvestigador()
         self.hypotheses = self.investigador.hypotheses

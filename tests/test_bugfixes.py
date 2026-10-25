@@ -264,7 +264,12 @@ class TestBugfixes(unittest.TestCase):
         from src.trading.trade_execution import TradeExecutionEngine
         import MetaTrader5 as mt5
 
-        te = TradeExecutionEngine(mt5_connector=MagicMock())
+        mock_mt5 = MagicMock()
+        mock_mt5.get_account_info.return_value = {"balance": 20000.0, "equity": 20000.0}
+        mock_mt5.get_open_positions.return_value = []
+        mock_mt5.get_daily_profit.return_value = 0.0
+        mock_mt5.get_symbol_info.return_value = {"trade_tick_value": 1.0, "trade_tick_size": 0.01}
+        te = TradeExecutionEngine(mt5_connector=mock_mt5, mode="assist")
 
         # Mock order_check failure with code 10022 then success
         err_res = MagicMock()
