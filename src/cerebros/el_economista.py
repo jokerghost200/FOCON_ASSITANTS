@@ -73,98 +73,127 @@ class ElEconomista:
         sym = symbol.upper()
         curr = "USD" if "USD" in sym or sym in ("XAUUSD", "BTCUSD", "ETHUSD") else sym[:3]
 
-        # 1. Vérification du calendrier et gel d'annonces
-        blackout_info = self.calendar.is_in_news_blackout(
-            symbol=sym, window_minutes=news_blackout_minutes, min_impact="HIGH"
-        )
-        is_blackout = bool(blackout_info.get("in_blackout", False))
+        try:
+            # 1. Vérification du calendrier et gel d'annonces
+            blackout_info = self.calendar.is_in_news_blackout(
+                symbol=sym, window_minutes=news_blackout_minutes, min_impact="HIGH"
+            )
+            is_blackout = bool(blackout_info.get("in_blackout", False))
 
-        # 2. Force relative des devises (MT5 CSI)
-        cs_info = self.currency_strength.get_pair_bias(sym)
+            # 2. Force relative des devises (MT5 CSI) - vérification de disponibilité
+            cs_info = self.currency_strength.get_pair_bias(sym)
+            cs_avail = bool(cs_info.get("available", True) and cs_info.get("status") != "UNAVAILABLE")
 
-        # 3. Différentiel de taux directeurs
-        macro_diff = self.macro.calculate_interest_differential(sym)
+            # 3. Différentiel de taux directeurs - vérification de fraîcheur
+            macro_diff = self.macro.calculate_interest_differential(sym)
+            macro_fresh = not bool(macro_diff.get("is_stale", False))
 
-        # 4. Sentiment des actualités
-        sentiment_info = self.news.get_sentiment_summary(currency=curr, hours=24.0)
+            # 4. Sentiment des actualités
+            sentiment_info = self.news.get_sentiment_summary(currency=curr, hours=24.0)
 
-        # ── Synthèse Macroéconomique Globale ──
-        score_bull = 0.0
-        score_bear = 0.0
-        reasons = []
+            # ── Synthèse Macroéconomique Globale ──
+            score_bull = 0.0
+            score_bear = 0.0
+            reasons = []
 
-        # Poids Force relative des devises (40%)
-        if cs_info["bias"] == "BULLISH":
-            score_bull += 0.40
-            reasons.append(cs_info["reason"])
-        elif cs_info["bias"] == "BEARISH":
-            score_bear += 0.40
-            reasons.append(cs_info["reason"])
-
-        # Poids Différentiel de taux (35%)
-        if macro_diff["carry_bias"] == "BULLISH":
-            score_bull += 0.35
-            reasons.append(macro_diff["reason"])
-        elif macro_diff["carry_bias"] == "BEARISH":
-            score_bear += 0.35
-            reasons.append(macro_diff["reason"])
-
-        # Poids Sentiment des actualités (25%)
-        if sentiment_info["sentiment_label"] == "BULLISH":
-            score_bull += 0.25
-            reasons.append(f"Actualités favorables ({sentiment_info['sentiment_score']:+.2f}).")
-        elif sentiment_info["sentiment_label"] == "BEARISH":
-            score_bear += 0.25
-            reasons.append(f"Actualités défavorables ({sentiment_info['sentiment_score']:+.2f}).")
-
-        # Biais résultant
-        if score_bull >= score_bear + 0.15:
-            overall_bias = "BULLISH"
-            confidence = round(score_bull, 2)
-        elif score_bear >= score_bull + 0.15:
-            overall_bias = "BEARISH"
-            confidence = round(score_bear, 2)
-        else:
-            overall_bias = "NEUTRAL"
-            confidence = 0.50
-
-        # Risque d'événement
-        if is_blackout:
-            event_risk = "CRITICAL" if blackout_info.get("impact") == "CRITICAL" else "HIGH"
-            recommendation = "NO_TRADE_NEWS"
-            final_reason = f"🛑 [GEL ANNONCE ÉCONOMIQUE] {blackout_info['reason']}"
-        else:
-            event_risk = "LOW"
-            if overall_bias == "BULLISH":
-                recommendation = "FAVOR_BUY"
-                final_reason = f"Contexte macro favorable à l'achat : {' | '.join(reasons)}"
-            elif overall_bias == "BEARISH":
-                recommendation = "FAVOR_SELL"
-                final_reason = f"Contexte macro favorable à la vente : {' | '.join(reasons)}"
+            # Poids Force relative des devises (40%) - UNIQUEMENT SI LES DONNÉES RÉELLES EXISTENT
+            if cs_avail:
+                if cs_info["bias"] == "BULLISH":
+                    score_bull += 0.40
+                    reasons.append(cs_info["reason"])
+                elif cs_info["bias"] == "BEARISH":
+                    score_bear += 0.40
+                    reasons.append(cs_info["reason"])
             else:
-                recommendation = "NORMAL"
-                final_reason = "Contexte macro neutre ou équilibré."
+                reasons.append("Force devises : " + cs_info.get("reason", "Données MT5 insuffisantes"))
 
-        return {
-            "cerebro_origen": "El Economista",
-            "symbol": sym,
-            "bias": overall_bias,
-            "confidence": confidence,
-            "event_risk": event_risk,
-            "high_impact_window": is_blackout,
-            "minutes_to_next_event": blackout_info.get("minutes_to_event", 999.0),
-            "next_event_title": blackout_info.get("event_title"),
-            "currency_strength": {
-                "base": cs_info.get("base_strength", 50.0),
-                "quote": cs_info.get("quote_strength", 50.0),
-                "differential": cs_info.get("differential", 0.0),
-            },
-            "interest_rate_differential": macro_diff.get("differential", 0.0),
-            "news_sentiment": sentiment_info.get("sentiment_label", "NEUTRAL"),
-            "reason": final_reason,
-            "recommendation": recommendation,
-            "data_freshness": "FRESH" if self.calendar.last_fetch_time else "LOCAL_FALLBACK",
-        }
+            # Poids Différentiel de taux (35%) - UNIQUEMENT SI LES TAUX SONT CONFIRMÉS FRAIS (<90j)
+            if macro_fresh:
+                if macro_diff["carry_bias"] == "BULLISH":
+                    score_bull += 0.35
+                    reasons.append(macro_diff["reason"])
+                elif macro_diff["carry_bias"] == "BEARISH":
+                    score_bear += 0.35
+                    reasons.append(macro_diff["reason"])
+            else:
+                reasons.append("Carry Trade : " + macro_diff.get("reason", "Taux non vérifiés récemment"))
+
+            # Poids Sentiment des actualités (25%) - Uniquement si des actualités ont été trouvées
+            sent_label = sentiment_info.get("sentiment_label", "NEUTRAL")
+            if sent_label == "BULLISH":
+                score_bull += 0.25
+                reasons.append(f"Actualités favorables ({sentiment_info.get('sentiment_score', 0):+.2f}).")
+            elif sent_label == "BEARISH":
+                score_bear += 0.25
+                reasons.append(f"Actualités défavorables ({sentiment_info.get('sentiment_score', 0):+.2f}).")
+
+            # Biais résultant
+            if score_bull >= score_bear + 0.15:
+                overall_bias = "BULLISH"
+                confidence = round(score_bull, 2)
+            elif score_bear >= score_bull + 0.15:
+                overall_bias = "BEARISH"
+                confidence = round(score_bear, 2)
+            else:
+                overall_bias = "NEUTRAL"
+                confidence = 0.50
+
+            # Risque d'événement
+            if is_blackout:
+                event_risk = "CRITICAL" if blackout_info.get("impact") == "CRITICAL" else "HIGH"
+                recommendation = "NO_TRADE_NEWS"
+                conf_str = blackout_info.get("calendar_confidence", "VERIFIED")
+                final_reason = f"🛑 [GEL ANNONCE ÉCONOMIQUE] {blackout_info['reason']}"
+            else:
+                event_risk = "LOW"
+                if overall_bias == "BULLISH":
+                    recommendation = "FAVOR_BUY"
+                    final_reason = f"Contexte macro favorable à l'achat : {' | '.join(reasons)}"
+                elif overall_bias == "BEARISH":
+                    recommendation = "FAVOR_SELL"
+                    final_reason = f"Contexte macro favorable à la vente : {' | '.join(reasons)}"
+                else:
+                    recommendation = "NORMAL"
+                    final_reason = f"Contexte macro neutre ou équilibré ({' | '.join(reasons)})"
+
+            return {
+                "cerebro_origen": "El Economista",
+                "symbol": sym,
+                "status": "OK",
+                "bias": overall_bias,
+                "confidence": confidence,
+                "event_risk": event_risk,
+                "high_impact_window": is_blackout,
+                "minutes_to_next_event": blackout_info.get("minutes_to_event", 999.0),
+                "next_event_title": blackout_info.get("event_title"),
+                "calendar_confidence": blackout_info.get("calendar_confidence", "VERIFIED"),
+                "currency_strength": {
+                    "available": cs_avail,
+                    "base": cs_info.get("base_strength", 50.0),
+                    "quote": cs_info.get("quote_strength", 50.0),
+                    "differential": cs_info.get("differential", 0.0),
+                },
+                "interest_rate_differential": macro_diff.get("differential", 0.0),
+                "is_rate_stale": not macro_fresh,
+                "news_sentiment": sentiment_info.get("sentiment_label", "NEUTRAL"),
+                "reason": final_reason,
+                "recommendation": recommendation,
+                "data_freshness": "FRESH" if self.calendar.last_fetch_time else "LOCAL_FALLBACK",
+            }
+        except Exception as e:
+            logger.error(f"🛑 [El Economista] Erreur critique analyse macro pour {symbol}: {e}")
+            return {
+                "cerebro_origen": "El Economista",
+                "symbol": sym,
+                "status": "ERROR",
+                "bias": "NEUTRAL",
+                "confidence": 0.0,
+                "event_risk": "CRITICAL",
+                "high_impact_window": True,
+                "recommendation": "NO_TRADE_NEWS",
+                "reason": f"Panne critique du cerveau économique ({e}) : Sécurité Fail-Closed activée.",
+                "data_freshness": "ERROR",
+            }
 
     def es_periodo_bloqueo_noticias(self, symbol: str, window_minutes: float = 30.0) -> bool:
         """

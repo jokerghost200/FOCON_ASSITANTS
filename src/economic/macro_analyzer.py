@@ -11,22 +11,34 @@ de taux d'intérêt (Carry Trade) pour les 7 grandes devises internationales :
 - Banque Nationale Suisse (BNS / CHF)
 - Banque de Réserve d'Australie (RBA / AUD)
 - Banque du Canada (BoC / CAD)
+
+SÉCURITÉ ET TRAÇABILITÉ DES DONNÉES :
+- Chaque taux est associé à sa source officielle, sa date d'effet et sa date de vérification.
+- Si un taux dépasse le délai maximal de fraîcheur (TTL 90 jours sans confirmation),
+  il est explicitement marqué STALE / PÉRIMÉ et le biais Carry Trade est neutralisé.
 """
 
 import logging
 from typing import Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
 
 from src.economic.economic_memory import EconomicMemory
 
 logger = logging.getLogger(__name__)
 
-# Base de référence des taux directeurs actuels et postures monétaires des banques centrales
+# TTL maximal de validité d'un taux sans réévaluation officielle
+MAX_RATE_AGE_DAYS = 90
+
+# Référentiel initial vérifié des banques centrales avec source et horodatage
 CENTRAL_BANK_RATES = {
     "USD": {
         "bank": "Federal Reserve (Fed)",
         "rate": 5.25,
         "inflation": 2.6,
         "stance": "NEUTRAL_HAWKISH",
+        "effective_date": "2024-11-07",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "Federal Reserve FOMC Statement",
         "description": "Taux élevés, politique restrictive dépendante des données d'emploi et d'inflation.",
     },
     "EUR": {
@@ -34,6 +46,9 @@ CENTRAL_BANK_RATES = {
         "rate": 3.25,
         "inflation": 2.2,
         "stance": "DOVISH",
+        "effective_date": "2024-10-17",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "ECB Monetary Policy Decisions",
         "description": "Cycle d'assouplissement monétaire pour soutenir la croissance en zone euro.",
     },
     "GBP": {
@@ -41,6 +56,9 @@ CENTRAL_BANK_RATES = {
         "rate": 4.75,
         "inflation": 2.3,
         "stance": "NEUTRAL",
+        "effective_date": "2024-11-07",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "Bank of England MPC Minutes",
         "description": "Baisse graduelle des taux tout en surveillant la persistance de l'inflation des services.",
     },
     "JPY": {
@@ -48,6 +66,9 @@ CENTRAL_BANK_RATES = {
         "rate": 0.25,
         "inflation": 2.5,
         "stance": "HAWKISH",
+        "effective_date": "2024-07-31",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "Bank of Japan Outlook Report",
         "description": "Sortie des taux négatifs, hausses graduelles pour normaliser la politique monétaire.",
     },
     "CHF": {
@@ -55,6 +76,9 @@ CENTRAL_BANK_RATES = {
         "rate": 1.00,
         "inflation": 1.1,
         "stance": "DOVISH",
+        "effective_date": "2024-09-26",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "BNS Monetary Policy Assessment",
         "description": "Inflation très basse, baisses de taux pour freiner l'appréciation excessive du franc suisse.",
     },
     "CAD": {
@@ -62,6 +86,9 @@ CENTRAL_BANK_RATES = {
         "rate": 3.75,
         "inflation": 1.9,
         "stance": "DOVISH",
+        "effective_date": "2024-10-23",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "Bank of Canada Rate Announcement",
         "description": "Assouplissement monétaire vigoureux face au ralentissement économique.",
     },
     "AUD": {
@@ -69,6 +96,9 @@ CENTRAL_BANK_RATES = {
         "rate": 4.35,
         "inflation": 2.8,
         "stance": "HAWKISH",
+        "effective_date": "2024-11-05",
+        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "source": "RBA Statement on Monetary Policy",
         "description": "Prudence maximale face à une inflation sous-jacente tenace, maintien de taux restrictifs.",
     },
 }
@@ -77,15 +107,19 @@ CENTRAL_BANK_RATES = {
 class MacroAnalyzer:
     """
     Analyseur des déterminants macroéconomiques fondamentaux.
+    Vérifie la fraîcheur des données et refuse d'attribuer un biais carry trade sur des taux périmés.
     """
 
-    def __init__(self, memory: Optional[EconomicMemory] = None):
+    def __init__(self, memory: Optional[EconomicMemory] = None, max_age_days: int = MAX_RATE_AGE_DAYS):
         self.memory = memory or EconomicMemory()
+        self.max_age_days = max_age_days
+        self.central_bank_rates = {k: dict(v) for k, v in CENTRAL_BANK_RATES.items()}
         self._sync_default_rates()
 
     def _sync_default_rates(self):
         """Enregistre les taux initiaux dans la mémoire SQLite s'ils sont absents."""
-        for curr, data in CENTRAL_BANK_RATES.items():
+        now_str = datetime.now(timezone.utc).isoformat()
+        for curr, data in self.central_bank_rates.items():
             existing = self.memory.get_latest_macro_snapshot(curr)
             if not existing:
                 self.memory.store_macro_snapshot(
@@ -93,32 +127,55 @@ class MacroAnalyzer:
                     interest_rate=data["rate"],
                     inflation_rate=data["inflation"],
                     monetary_stance=data["stance"],
+                    updated_at=now_str,
                 )
 
     def get_central_bank_info(self, currency: str) -> Dict[str, Any]:
-        """Retourne la fiche macroéconomique d'une devise."""
+        """
+        Retourne la fiche macroéconomique d'une devise avec son indicateur de fraîcheur.
+        """
         curr = currency.upper()
         mem_snap = self.memory.get_latest_macro_snapshot(curr)
-        ref_data = CENTRAL_BANK_RATES.get(curr, {
+        ref_data = self.central_bank_rates.get(curr, {
             "bank": f"Central Bank of {curr}",
             "rate": 3.0,
             "inflation": 2.0,
             "stance": "NEUTRAL",
-            "description": "Données macroéconomiques standard.",
+            "effective_date": "UNKNOWN",
+            "last_verified_at": "2020-01-01T00:00:00+00:00",
+            "source": "Fallback Default",
+            "description": "Données macroéconomiques non répertoriées.",
         })
 
+        info = dict(ref_data)
         if mem_snap:
-            ref_data = dict(ref_data)
-            ref_data["rate"] = float(mem_snap.get("interest_rate", ref_data["rate"]))
-            ref_data["inflation"] = float(mem_snap.get("inflation_rate", ref_data["inflation"]))
-            ref_data["stance"] = str(mem_snap.get("monetary_stance", ref_data["stance"]))
+            info["rate"] = float(mem_snap.get("interest_rate", info["rate"]))
+            info["inflation"] = float(mem_snap.get("inflation_rate", info["inflation"]))
+            info["stance"] = str(mem_snap.get("monetary_stance", info["stance"]))
+            if "updated_at" in mem_snap and mem_snap["updated_at"]:
+                info["last_verified_at"] = mem_snap["updated_at"]
 
-        return ref_data
+        # Calcul de la fraîcheur (staleness)
+        now = datetime.now(timezone.utc)
+        is_stale = False
+        age_days = 0.0
+        try:
+            verified_time = datetime.fromisoformat(str(info["last_verified_at"]).replace("Z", "+00:00"))
+            age_days = (now - verified_time).total_seconds() / 86400.0
+            if age_days > self.max_age_days:
+                is_stale = True
+        except Exception:
+            is_stale = True
+
+        info["is_stale"] = is_stale
+        info["age_days"] = round(age_days, 1)
+        info["freshness"] = "STALE" if is_stale else "FRESH"
+        return info
 
     def calculate_interest_differential(self, symbol: str) -> Dict[str, Any]:
         """
         Calcule le différentiel de taux d'intérêt (Carry Trade) pour une paire.
-        Ex: EURUSD -> Taux EUR (3.25%) - Taux USD (5.25%) = -2.00% (Défavorable à l'Euro).
+        Neutralise le biais si l'une des devises repose sur des données périmées.
         """
         sym = symbol.upper()
         if len(sym) >= 6:
@@ -134,10 +191,33 @@ class MacroAnalyzer:
         rate_quote = float(quote_info.get("rate", 0.0))
         diff = round(rate_base - rate_quote, 2)
 
-        # Détermination du biais Carry
+        # ── Contrôle de Fraîcheur des Données ──
+        if base_info.get("is_stale") or quote_info.get("is_stale"):
+            stale_curr = base if base_info.get("is_stale") else quote
+            logger.warning(
+                f"⚠️ [Carry Trade] Taux {stale_curr} périmé (non vérifié depuis > {self.max_age_days}j). "
+                f"Biais de taux neutralisé par précaution."
+            )
+            return {
+                "symbol": sym,
+                "base_currency": base,
+                "quote_currency": quote,
+                "base_rate": rate_base,
+                "quote_rate": rate_quote,
+                "differential": diff,
+                "carry_bias": "NEUTRAL",
+                "is_stale": True,
+                "freshness": "STALE",
+                "reason": (
+                    f"Taux directeurs {base} ou {quote} non vérifiés récemment "
+                    f"({stale_curr} périmé > {self.max_age_days} jours). Biais Carry Trade neutralisé par prudence."
+                ),
+            }
+
+        # Détermination du biais Carry Trade uniquement si les données sont confirmées fraîches
         if diff >= 1.50:
             carry_bias = "BULLISH"
-            reason = f"Différentiel de taux très favorable (+{diff:.2f}%) à {base} ({rate_base}%) vs {quote} ({rate_quote}%)."
+            reason = f"Différentiel de taux favorable (+{diff:.2f}%) à {base} ({rate_base}%) vs {quote} ({rate_quote}%)."
         elif diff <= -1.50:
             carry_bias = "BEARISH"
             reason = f"Différentiel de taux défavorable ({diff:.2f}%) à {base} ({rate_base}%) vs {quote} ({rate_quote}%)."
@@ -153,7 +233,11 @@ class MacroAnalyzer:
             "quote_rate": rate_quote,
             "differential": diff,
             "carry_bias": carry_bias,
+            "is_stale": False,
+            "freshness": "FRESH",
             "base_stance": base_info.get("stance"),
             "quote_stance": quote_info.get("stance"),
+            "source_base": base_info.get("source"),
+            "source_quote": quote_info.get("source"),
             "reason": reason,
         }

@@ -134,7 +134,27 @@ class FATIBrain:
             try:
                 economic_context = self.economista.analizar_contexto_economico(symbol)
             except Exception as _ece:
-                logger.debug(f"[FATI] Erreur consultation El Economista pour {symbol}: {_ece}")
+                logger.error(f"[FATI] Erreur consultation El Economista pour {symbol}: {_ece}")
+                # FAIL-CLOSED : En cas d'erreur ou d'exception, verrouiller immédiatement l'ouverture d'ordres
+                economic_context = {
+                    "cerebro_origen": "El Economista",
+                    "symbol": symbol,
+                    "status": "ERROR",
+                    "bias": "NEUTRAL",
+                    "confidence": 0.0,
+                    "event_risk": "CRITICAL",
+                    "high_impact_window": True,
+                    "minutes_to_next_event": 0.0,
+                    "next_event_title": "EXCEPTION_IN_ECONOMIC_BRAIN",
+                    "calendar_confidence": "UNCERTAIN",
+                    "currency_strength": {"available": False, "base": 50.0, "quote": 50.0, "differential": 0.0},
+                    "interest_rate_differential": 0.0,
+                    "is_rate_stale": True,
+                    "news_sentiment": "UNAVAILABLE",
+                    "reason": f"Erreur critique El Economista : {_ece}. Blocage de sécurité activé (Fail-Closed).",
+                    "recommendation": "NO_TRADE_NEWS",
+                    "data_freshness": "STALE_OR_ERROR",
+                }
 
         decision = self.estratega.decidir(
             symbol=symbol,

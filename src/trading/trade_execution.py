@@ -96,6 +96,25 @@ class TradeExecutionEngine:
             logger.error(f"Invalid signal: symbol={symbol} action={decision.get('action')}")
             return None
 
+        # ── Contrôle de Sécurité Macroéconomique (El Economista - Fail-Closed Inviolable) ──
+        econ_ctx = (
+            signal.get('economic_context')
+            or decision.get('economic_context')
+            or (signal.get('news_context', {}).get('economic_context') if isinstance(signal.get('news_context'), dict) else None)
+        )
+        if isinstance(econ_ctx, dict):
+            is_blackout = bool(econ_ctx.get('high_impact_window', False))
+            econ_rec = str(econ_ctx.get('recommendation', 'NORMAL')).upper()
+            event_risk = str(econ_ctx.get('event_risk', 'LOW')).upper()
+            econ_status = str(econ_ctx.get('status', 'OK')).upper()
+
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR':
+                reason = econ_ctx.get('reason', 'Gel d\'annonce macroéconomique ou erreur économique critique.')
+                logger.critical(
+                    f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Préparation de l'ordre pour {symbol} BLOQUÉE : {reason}"
+                )
+                return None
+
 
         # ── Filtrage Directionnel (BUY_ONLY / SELL_ONLY / BOTH) ──
         policy = getattr(self, 'allowed_trade_direction', 'BOTH').upper()
@@ -408,6 +427,7 @@ class TradeExecutionEngine:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
             "_snapshot": snapshot,
+            "_economic_context": econ_ctx,
         }
         if is_pending:
             exp_seconds = int(decision.get('expiration_seconds') or (decision.get('expiration_bars', 4) * 900))
@@ -489,6 +509,24 @@ class TradeExecutionEngine:
             getattr(mt5, 'TRADE_RETCODE_DONE', 10009),
             getattr(mt5, 'TRADE_RETCODE_PLACED', 10008),
         )
+
+        # ── CONTRÔLE DE SÉCURITÉ MACROÉCONOMIQUE ULTIME AVANT ORDER_SEND (Strictement Fail-Closed) ──
+        req_econ = request.get('_economic_context') or request.get('economic_context')
+        if isinstance(req_econ, dict):
+            if (
+                bool(req_econ.get('high_impact_window', False))
+                or str(req_econ.get('recommendation', '')).upper() == 'NO_TRADE_NEWS'
+                or str(req_econ.get('event_risk', '')).upper() in ('CRITICAL', 'HIGH')
+                or str(req_econ.get('status', '')).upper() == 'ERROR'
+            ):
+                logger.critical(
+                    f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : "
+                    f"Gel macroéconomique ou erreur critique ({req_econ.get('reason')})."
+                )
+                return {
+                    "success": False,
+                    "reason": f"El Economista: Gel macroéconomique ou erreur critique ({req_econ.get('reason')}).",
+                }
 
         # ── CONTRÔLE DE SÉCURITÉ NIVEAU 0 RÉPÉTÉ AVANT TOUT MT5.ORDER_SEND (Strictement Fail-Closed) ──
         if not self.centinela:

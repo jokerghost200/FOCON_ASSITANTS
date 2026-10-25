@@ -186,6 +186,7 @@ class NewsCollector:
                 "sentiment_label": "NEUTRAL",
                 "article_count": 0,
                 "headline_sample": [],
+                "is_fresh": False,
             }
 
         scores = [float(n.get("sentiment_score", 0.0) or 0.0) for n in news]
@@ -206,4 +207,5 @@ class NewsCollector:
             "sentiment_label": label,
             "article_count": len(news),
             "headline_sample": headlines,
+            "is_fresh": len(news) > 0,
         }

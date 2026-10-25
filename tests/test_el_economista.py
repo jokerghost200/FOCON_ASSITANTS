@@ -339,3 +339,256 @@ def test_fati_brain_integration_el_economista():
     assert "action" in dec
     # Le contexte économique a été interrogé
     assert "fati_decision_id" in dec
+
+
+# ─── 9. TESTS EXIGÉS PAR L'AUDIT : 7 SCÉNARIOS CRITIQUES DE FIABILITÉ ET NON-TRANSMISSION MT5 ───
+
+def test_scenario_1_calendrier_ne_repond_plus_fail_closed():
+    """
+    Scénario 1 : Le calendrier ne répond plus ou lève une exception.
+    Résultat obligatoire : Aucun nouvel ordre automatique si le risque économique ne peut pas être évalué (WAIT).
+    """
+    fati = FATIBrain()
+    fati.economista.analizar_contexto_economico = MagicMock(side_effect=RuntimeError("Calendar provider timeout / network unreachable"))
+
+    tech = {"close": 1.0850, "rsi_14": 50.0, "atr_14": 0.0015, "trend": "Bullish"}
+    decision = fati.observe_and_decide(
+        symbol="EURUSD",
+        timeframe="M15",
+        tech_features=tech,
+    )
+
+    # Doit strictement bloquer l'ordre (Fail-Closed)
+    assert decision["action"] == "WAIT"
+    assert decision["confidence"] == 0
+    assert "Fail-Closed" in decision["reason"] or "Gel d'ordre macroéconomique" in decision["reason"]
+
+
+def test_scenario_2_annonce_reelle_imminente_wait_zero_mt5():
+    """
+    Scénario 2 : Une annonce réelle est imminente.
+    Résultat obligatoire : WAIT, puis aucune transmission à MT5 (0 appel à mt5.order_send).
+    """
+    db_file = ":memory:"
+    mem = EconomicMemory(db_path=db_file)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    imminent_time = (now + datetime.timedelta(minutes=5)).isoformat()
+    mem.save_economic_events([
+        {
+            "event_id": "imminent_nfp",
+            "title": "US Non-Farm Payrolls",
+            "country": "US",
+            "currency": "USD",
+            "date_utc": imminent_time,
+            "impact": "HIGH",
+        }
+    ])
+
+    cal = CalendarProvider(memory=mem)
+    news = NewsCollector(memory=mem)
+    macro = MacroAnalyzer(memory=mem)
+    economista = ElEconomista(memory=mem, calendar=cal, news=news, macro=macro)
+
+    econ_ctx = economista.analizar_contexto_economico("EURUSD")
+    assert econ_ctx["high_impact_window"] is True
+    assert econ_ctx["recommendation"] == "NO_TRADE_NEWS"
+
+    estratega = ElEstratega()
+    tech = {"close": 1.0850, "rsi_14": 52.0, "atr_14": 0.0015, "trend": "Bullish"}
+    decision = estratega.decidir(
+        symbol="EURUSD",
+        timeframe="M15",
+        tech_features=tech,
+        economic_context=econ_ctx,
+    )
+    assert decision["action"] == "WAIT"
+
+    # Vérification TradeExecutionEngine : barrière infranchissable
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector)
+
+    # 1. Préparation de l'ordre refusée
+    signal = {"symbol": "EURUSD", "decision": decision, "economic_context": econ_ctx}
+    prep_res = trade_exec.prepare_order_request(signal)
+    assert prep_res is None
+
+    # 2. Même si une requête brute contourne et tente d'exécuter avec le contexte économique :
+    raw_req = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.1,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "_economic_context": econ_ctx,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        exec_res = trade_exec.execute_order(raw_req)
+        assert exec_res["success"] is False
+        assert "Gel macroéconomique" in exec_res["reason"]
+        mock_send.assert_not_called()
+
+
+def test_scenario_3_dates_calendrier_incertaines():
+    """
+    Scénario 3 : Les dates du calendrier local sont incertaines (hors réunions fixes vérifiées).
+    Résultat obligatoire : Ne pas présenter le risque comme faible avec certitude (marquage APPROXIMATE).
+    """
+    db_file = ":memory:"
+    mem = EconomicMemory(db_path=db_file)
+    cal = CalendarProvider(memory=mem)
+
+    # 1. Calendrier officiel vérifié
+    events = cal.generate_recurring_fallback_events()
+    assert len(events) > 0
+    assert all(e.get("calendar_confidence") == "VERIFIED" for e in events)
+
+    # 2. Insertion d'un événement approximatif / non vérifié
+    now = datetime.datetime.now(datetime.timezone.utc)
+    mem.save_economic_events([
+        {
+            "event_id": "approx_event_01",
+            "title": "Estimated Retail Sales Forecast",
+            "country": "US",
+            "currency": "USD",
+            "date_utc": (now + datetime.timedelta(minutes=10)).isoformat(),
+            "impact": "HIGH",
+            "is_verified": False,
+            "calendar_confidence": "APPROXIMATE",
+        }
+    ])
+    blackout_info = cal.is_in_news_blackout("EURUSD")
+    assert blackout_info["in_blackout"] is True
+    assert blackout_info["is_verified"] is False
+    assert blackout_info["calendar_confidence"] == "APPROXIMATE"
+    assert "APPROXIMATE" in blackout_info["reason"]
+
+
+def test_scenario_4_mt5_insuffisant_force_devises_unavailable_sans_score_invente():
+    """
+    Scénario 4 : MT5 ne fournit pas assez de bougies (< 3 paires valides).
+    Résultat obligatoire : Force des devises indisponible (status=UNAVAILABLE), sans score inventé.
+    """
+    mock_connector = MagicMock()
+    # Retourne None pour toutes les requêtes de bougies
+    mock_connector.get_rates_dataframe.return_value = None
+
+    cs = CurrencyStrengthEngine(mt5_connector=mock_connector)
+    bias = cs.get_pair_bias("EURUSD")
+
+    assert bias["status"] == "UNAVAILABLE"
+    assert bias["available"] is False
+    assert bias["bias"] == "NEUTRAL"
+    assert bias["base_strength"] == 50.0
+    assert bias["quote_strength"] == 50.0
+    assert bias["differential"] == 0.0
+    assert "Données de cours MT5 insuffisantes" in bias["reason"]
+
+
+def test_scenario_5_taux_directeur_ancien_marque_perime_carry_neutre():
+    """
+    Scénario 5 : Un taux directeur est ancien (> 90 jours).
+    Résultat obligatoire : Donnée marquée périmée, neutralisation du carry trade.
+    """
+    db_file = ":memory:"
+    mem = EconomicMemory(db_path=db_file)
+    macro = MacroAnalyzer(memory=mem)
+
+    # On enregistre un snapshot périmé (> 90 jours)
+    old_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=120)).isoformat()
+    macro.central_bank_rates["USD"]["last_verified_at"] = old_date
+    with mem._get_connection() as conn:
+        conn.execute("UPDATE macro_snapshots SET updated_at = ? WHERE currency = 'USD'", (old_date,))
+        conn.commit()
+
+    res = macro.calculate_interest_differential("USDJPY")
+    assert res["is_stale"] is True
+    assert res["carry_bias"] == "NEUTRAL"
+    assert "périmé" in res["reason"]
+
+
+def test_scenario_6_flux_rss_vides_ou_anciens_sentiment_neutre():
+    """
+    Scénario 6 : Les flux RSS sont vides ou anciens (> 48h).
+    Résultat obligatoire : Sentiment neutre ou indisponible, jamais une fausse conviction.
+    """
+    db_file = ":memory:"
+    mem = EconomicMemory(db_path=db_file)
+    news = NewsCollector(memory=mem)
+
+    # Base complètement vide
+    summary_empty = news.get_sentiment_summary(currency="USD")
+    assert summary_empty["sentiment_label"] == "NEUTRAL"
+    assert summary_empty["sentiment_score"] == 0.0
+    assert summary_empty["article_count"] == 0
+    assert summary_empty["is_fresh"] is False
+
+    # Article vieux de 72 heures
+    old_published = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=72)).isoformat()
+    mem.save_news_articles([{
+        "title": "Fed announces massive interest rate cut",
+        "link": "https://example.com/old",
+        "published_utc": old_published,
+        "currency": "USD",
+        "sentiment_score": 0.9,
+        "sentiment_label": "BULLISH",
+    }])
+
+    # On interroge avec une fenêtre de 24h : l'article ancien ne doit pas influencer
+    summary_recent = news.get_sentiment_summary(currency="USD", hours=24.0)
+    assert summary_recent["sentiment_label"] == "NEUTRAL"
+    assert summary_recent["article_count"] == 0
+
+
+def test_scenario_7_cerveau_economique_exception_fail_closed_zero_mt5():
+    """
+    Scénario 7 : Le cerveau économique lève une exception inattendue.
+    Résultat obligatoire : Aucun contournement du blocage de sécurité, zero transmission à MT5.
+    """
+    fati = FATIBrain()
+    # Simulation d'un crash brutal dans le cerveau économique
+    fati.economista.analizar_contexto_economico = MagicMock(side_effect=Exception("Critical SQLite Lock Failure"))
+
+    tech = {"close": 1.0850, "rsi_14": 50.0, "atr_14": 0.0015, "trend": "Bullish"}
+    decision = fati.observe_and_decide(
+        symbol="EURUSD",
+        timeframe="M15",
+        tech_features=tech,
+    )
+
+    # La décision doit être WAIT
+    assert decision["action"] == "WAIT"
+    assert decision["confidence"] == 0
+    assert "Fail-Closed" in decision["reason"] or "Gel d'ordre macroéconomique" in decision["reason"]
+
+    # Tentative d'exécution dans TradeExecutionEngine
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector)
+
+    signal = {"symbol": "EURUSD", "decision": decision, "economic_context": decision.get("economic_context")}
+    assert trade_exec.prepare_order_request(signal) is None
+
+    # Et si ordre forcé manuellement
+    forced_req = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "_economic_context": decision.get("economic_context"),
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(forced_req)
+        assert res["success"] is False
+        mock_send.assert_not_called()

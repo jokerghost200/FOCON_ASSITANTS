@@ -78,12 +78,13 @@ class ElEstratega:
         """
         # 0. Évaluation de sécurité macroéconomique préalable (El Economista)
         if economic_context and isinstance(economic_context, dict):
-            is_blackout = economic_context.get("high_impact_window", False)
-            event_risk = economic_context.get("event_risk", "LOW")
-            econ_rec = economic_context.get("recommendation", "NORMAL")
+            is_blackout = bool(economic_context.get("high_impact_window", False))
+            event_risk = str(economic_context.get("event_risk", "LOW")).upper()
+            econ_rec = str(economic_context.get("recommendation", "NORMAL")).upper()
+            econ_status = str(economic_context.get("status", "OK")).upper()
 
-            if is_blackout or econ_rec == "NO_TRADE_NEWS" or event_risk in ("CRITICAL", "HIGH"):
-                reason = economic_context.get("reason", "Annonce macroéconomique majeure imminente")
+            if is_blackout or econ_rec == "NO_TRADE_NEWS" or event_risk in ("CRITICAL", "HIGH") or econ_status == "ERROR":
+                reason = economic_context.get("reason", "Annonce macroéconomique majeure ou indisponibilité des données")
                 logger.info(f"🛑 [El Estratega] Gel d'ordre macroéconomique imposé pour {symbol} : {reason}")
                 return {
                     "action": "WAIT",

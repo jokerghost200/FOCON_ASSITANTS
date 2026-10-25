@@ -579,7 +579,27 @@ class AIOrchestrator:
             try:
                 economic_context = self.economista.analizar_contexto_economico(symbol)
             except Exception as _ece:
-                logger.debug(f"[El Economista] Erreur analyse économique pour {symbol}: {_ece}")
+                logger.error(f"[El Economista] Erreur analyse économique pour {symbol}: {_ece}")
+                # FAIL-CLOSED : En cas d'exception dans le cerveau économique, verrouiller l'entrée en position
+                economic_context = {
+                    "cerebro_origen": "El Economista",
+                    "symbol": symbol,
+                    "status": "ERROR",
+                    "bias": "NEUTRAL",
+                    "confidence": 0.0,
+                    "event_risk": "CRITICAL",
+                    "high_impact_window": True,
+                    "minutes_to_next_event": 0.0,
+                    "next_event_title": "EXCEPTION_IN_ECONOMIC_BRAIN",
+                    "calendar_confidence": "UNCERTAIN",
+                    "currency_strength": {"available": False, "base": 50.0, "quote": 50.0, "differential": 0.0},
+                    "interest_rate_differential": 0.0,
+                    "is_rate_stale": True,
+                    "news_sentiment": "UNAVAILABLE",
+                    "reason": f"Erreur critique El Economista : {_ece}. Blocage de sécurité activé (Fail-Closed).",
+                    "recommendation": "NO_TRADE_NEWS",
+                    "data_freshness": "STALE_OR_ERROR",
+                }
 
         if self.live_news_enabled:
             news_context = self.router.analyze_news(symbol, stop_event=stop_event)
@@ -664,6 +684,37 @@ class AIOrchestrator:
 
                 # Cas 1 : Le trader pro valide un setup A+
                 if pro_signal:
+                    # Sécurité macroéconomique (El Economista) : même un profil Pro Trader est soumis au gel
+                    if economic_context and (
+                        economic_context.get("high_impact_window")
+                        or economic_context.get("recommendation") == "NO_TRADE_NEWS"
+                        or economic_context.get("status") == "ERROR"
+                        or economic_context.get("event_risk") in ("CRITICAL", "HIGH")
+                    ):
+                        logger.info(
+                            f"🛑 [El Economista] Ordre Pro Trader {pro_signal.trader} bloqué par le gel macroéconomique pour {symbol} : "
+                            f"{economic_context.get('reason')}"
+                        )
+                        wait_decision = {
+                            "action": "WAIT",
+                            "confidence": 0,
+                            "entry": close_p,
+                            "sl": 0.0,
+                            "tp": 0.0,
+                            "reason": f"Gel macroéconomique (El Economista) : {economic_context.get('reason')}",
+                            "pro_trader": pro_signal.trader,
+                            "economic_context": economic_context,
+                        }
+                        return {
+                            "status": "WAIT",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "tech_features": tech_features,
+                            "amd_context": amd_context,
+                            "news_context": news_context,
+                            "decision": wait_decision,
+                        }
+
                     logger.info(
                         f"👑 [Copie {pro_signal.trader}] Signal {pro_signal.direction} validé sur {symbol} "
                         f"(Mode {active_mode.upper()}). Entry={pro_signal.entry}, SL={pro_signal.sl}, TP={pro_signal.tp}"
@@ -685,6 +736,7 @@ class AIOrchestrator:
                         "trail": pro_signal.trail,
                         "decay_risk_mult": pro_signal.decay_risk_mult,
                         "simulation_only": (active_mode == "simulation"),
+                        "economic_context": economic_context,
                     }
 
                     account_info = self.mt5.get_account_info()

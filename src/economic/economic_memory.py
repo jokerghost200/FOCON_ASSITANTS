@@ -63,6 +63,8 @@ class EconomicMemory:
                     previous REAL,
                     unit TEXT,
                     source TEXT DEFAULT 'PUBLIC_CALENDAR',
+                    is_verified INTEGER DEFAULT 1,
+                    calendar_confidence TEXT DEFAULT 'VERIFIED',
                     created_at TEXT NOT NULL
                 )
             """)
@@ -122,11 +124,15 @@ class EconomicMemory:
     def store_event(self, event: Dict[str, Any]) -> bool:
         """Enregistre ou met à jour un événement économique."""
         now_str = datetime.now(timezone.utc).isoformat()
-        evt_id = str(event.get("id") or "")
+        evt_time = str(event.get("event_time") or event.get("date_utc") or now_str)
+        evt_id = str(event.get("id") or event.get("event_id") or "")
         if not evt_id:
             # Hash déterministe title + currency + time
-            raw_key = f"{event.get('title')}_{event.get('currency')}_{event.get('event_time')}"
+            raw_key = f"{event.get('title')}_{event.get('currency')}_{evt_time}"
             evt_id = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+
+        is_verif_val = 1 if event.get("is_verified", True) else 0
+        cal_conf_val = str(event.get("calendar_confidence", "VERIFIED"))
 
         try:
             with self._get_connection() as conn:
@@ -134,25 +140,29 @@ class EconomicMemory:
                 cursor.execute("""
                     INSERT INTO economic_events (
                         id, title, country, currency, impact, event_time,
-                        actual, forecast, previous, unit, source, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        actual, forecast, previous, unit, source, is_verified, calendar_confidence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         actual = excluded.actual,
                         forecast = excluded.forecast,
                         previous = excluded.previous,
-                        impact = excluded.impact
+                        impact = excluded.impact,
+                        is_verified = excluded.is_verified,
+                        calendar_confidence = excluded.calendar_confidence
                 """, (
                     evt_id,
                     str(event.get("title", "Unknown Event")),
                     str(event.get("country", "")),
                     str(event.get("currency", "USD")).upper(),
                     str(event.get("impact", "MEDIUM")).upper(),
-                    str(event.get("event_time", now_str)),
+                    evt_time,
                     event.get("actual"),
                     event.get("forecast"),
                     event.get("previous"),
                     str(event.get("unit", "")),
                     str(event.get("source", "PUBLIC_CALENDAR")),
+                    is_verif_val,
+                    cal_conf_val,
                     now_str,
                 ))
                 conn.commit()
@@ -210,7 +220,13 @@ class EconomicMemory:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
-                return [dict(row) for row in rows]
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    if "is_verified" in d:
+                        d["is_verified"] = bool(d["is_verified"])
+                    results.append(d)
+                return results
         except Exception as e:
             logger.error(f"Erreur EconomicMemory.get_upcoming_events: {e}")
             return []
@@ -245,7 +261,7 @@ class EconomicMemory:
                     str(item.get("currency", "GENERAL")).upper(),
                     float(item.get("sentiment_score", 0.0) or 0.0),
                     str(item.get("sentiment_label", "NEUTRAL")).upper(),
-                    str(item.get("published_at", now_str)),
+                    str(item.get("published_at") or item.get("published_utc") or now_str),
                     str(item.get("summary", "")),
                     now_str,
                 ))
@@ -301,9 +317,10 @@ class EconomicMemory:
         inflation_rate: float = 0.0,
         gdp_growth: float = 0.0,
         monetary_stance: str = "NEUTRAL",
+        updated_at: Optional[str] = None,
     ) -> bool:
         """Enregistre un snapshot des taux et de la posture monétaire."""
-        now_str = datetime.now(timezone.utc).isoformat()
+        now_str = updated_at or datetime.now(timezone.utc).isoformat()
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
