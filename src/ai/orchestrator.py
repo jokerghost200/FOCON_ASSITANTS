@@ -33,6 +33,7 @@ class AIOrchestrator:
         trade_memory=None,
         weights_engine=None,
         config: dict = None,
+        fati=None,
     ):
         self.mt5 = mt5_connector
         self.market_data = market_data
@@ -48,37 +49,28 @@ class AIOrchestrator:
         self.ai = ai_router
         self.news = ai_router
         self.risk = risk_manager
-        # Cerveau quantitatif local de secours (100% hors-ligne) avec poids adaptatifs
-        self.local_brain = LocalQuantBrain(min_confidence=60.0, min_rr=1.5, weights_engine=self.weights_engine)
-        # Boomerang setup detector
-        self.boomerang = BoomerangDetector(
-            impulse_atr_mult=2.0,
-            breakout_confirm=1,
-            retest_tolerance=0.5,
-            rejection_wick_min=0.3,
-            min_rr=1.5,
+
+        # Initialisation / Raccordement des 5 Cerveaux Spécialisés (FATI)
+        from src.core.fati_brain import FATIBrain
+        self.fati = fati or FATIBrain(
+            mt5_connector=self.mt5,
+            weights_engine=self.weights_engine,
+            trade_memory=self.trade_memory,
         )
-        self.ob_detector = OrderBlockDetector(
-            impulse_atr_mult=1.8,
-            lookback=300,
-            retest_tolerance=0.6,
-            sl_buffer_mult=0.2,
-            tp_rr_mult=2.5,
-        )
+        self.observador = self.fati.observador
+        self.estratega = self.fati.estratega
+        self.sabio = self.fati.sabio
+        self.investigador = self.fati.investigador
+        self.centinela = self.fati.centinela
+
+        # Cerveau quantitatif local et détecteurs unifiés avec El Estratega & El Observador
+        self.local_brain = self.estratega.local_brain
+        self.boomerang = self.estratega.boomerang
+        self.ob_detector = self.estratega.ob_detector
+        self.crt_detector = self.estratega.crt_detector
+        self.order_flow_engine = self.observador.order_flow_engine
+
         self.strategy_selector = StrategySelector()
-        self.crt_detector = CRTDetector(
-            min_sweep_atr_mult=0.10,
-            min_range_atr_mult=0.50,
-            min_rr_tp1=1.5,
-        )
-        # Moteur Order Flow & Microstructure (DOM L2, Heatmap, CVD, Volume Profile, Absorption)
-        of_cfg = self.config.get('order_flow', {}) if isinstance(self.config, dict) else {}
-        self.order_flow_engine = OrderFlowEngine(
-            vp_bins=int(of_cfg.get('volume_profile_bins', 50)),
-            imbalance_ratio=float(of_cfg.get('imbalance_ratio', 3.0)),
-            dom_wall_multiplier=float(of_cfg.get('dom_wall_multiplier', 2.0)),
-            min_confluence_score=float(of_cfg.get('min_confluence_score', 60.0)),
-        )
         self.order_flow_journal = OrderFlowJournal()
         self.strategy_profile_manager = StrategyProfileManager()
         self._symbol_cooldowns = {}
@@ -887,24 +879,22 @@ class AIOrchestrator:
                 logger.warning(f"Failed to parse AI decision JSON: {_je}")
                 decision = None
 
-        if not decision or not isinstance(decision, dict) or "action" not in decision:
-            logger.warning(
-                f"🧠 [Cerveau Local] API externe indisponible ou quota dépassé pour {symbol} "
-                f"-> Bascule automatique et immédiate sur le Cerveau Quantitatif Local !"
-            )
-            decision = self.local_brain.decide(
-                symbol=symbol,
-                timeframe=timeframe,
-                tech_features=tech_features,
-                amd_context=amd_context,
-                boomerang_data={"decision": boomerang_decision, "direction": boomerang_dir, "score": boomerang_score},
-                order_blocks=valid_obs,
-                htf_trend=htf_trend,
-                spread_price=spread_price,
-                min_distance=min_distance,
-                direction_filter=dir_filter_upper,
-                crt_setup=crt_setup,
-            )
+        ai_advice = decision if (decision and isinstance(decision, dict) and "action" in decision) else None
+        
+        # ─── ÉVALUATION PAR LE DÉCIDEUR OFFICIEL UNIQUE : EL ESTRATEGA ───
+        decision = self.estratega.decidir(
+            symbol=symbol,
+            timeframe=timeframe,
+            tech_features=tech_features,
+            amd_context=amd_context,
+            boomerang_data={"decision": boomerang_decision, "direction": boomerang_dir, "score": boomerang_score},
+            order_blocks=valid_obs,
+            crt_setup=crt_setup,
+            htf_trend=htf_trend,
+            spread_price=spread_price,
+            direction_filter=dir_filter_upper,
+            ai_advice=ai_advice,
+        )
 
         # ─── PHASE 2: OVERRIDE RISK WITH STRATEGY ENGINE ───
         if decision and decision.get("action") in ("BUY", "SELL") and proposals:
@@ -1041,6 +1031,32 @@ class AIOrchestrator:
         if not validation['valid']:
             return {"error": f"Risk validation failed: {validation['reason']}"}
             
+        proposal = validation['proposal']
+
+        # ─── GARDE-FOU INDÉPENDANT ABSOLU : EL CENTINELA ───
+        if self.centinela:
+            capital = max(float(account_info.get('balance', 0.0) or 0.0), float(account_info.get('equity', 0.0) or 0.0))
+            daily_loss = min(0.0, float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0))
+            open_count = len(self.mt5.get_open_positions() or [])
+            risk_usd = float(proposal.get('risk_amount_usd', 0.0) or (capital * 0.01))
+            sec = self.centinela.evaluar_seguridad(
+                capital=capital,
+                risk_amount_usd=risk_usd,
+                current_daily_loss_usd=daily_loss,
+                current_open_positions_count=open_count,
+            )
+            if not sec.get('safe', False):
+                logger.critical(f"🛑 [El Centinela] Ordre bloqué pour {symbol} : {sec.get('reason')}")
+                return {"error": f"El Centinela safety rejection: {sec.get('reason')}"}
+
+        # ─── ENREGISTREMENT AU JOURNAL STATISTIQUE : EL SABIO ───
+        if self.sabio:
+            try:
+                dec_id = self.sabio.registrar_decision(proposal, is_executed=True)
+                proposal["fati_decision_id"] = dec_id
+            except Exception as _se:
+                logger.debug(f"[El Sabio] Erreur enregistrement journal: {_se}")
+
         return {
             "status": "SIGNAL",
             "symbol": symbol,
@@ -1048,7 +1064,7 @@ class AIOrchestrator:
             "tech_features": tech_features,
             "amd_context": amd_context,
             "news_context": news_context,
-            "decision": validation['proposal']
+            "decision": proposal
         }
 
     def analyze_open_position(self, pos: dict, timeframe: str) -> dict:

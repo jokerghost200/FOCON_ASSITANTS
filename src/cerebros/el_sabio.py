@@ -5,16 +5,18 @@ CEREBRO 3 : EL SABIO (Pilier 3 - APPRENDRE & MÉMORISER)
 Nom Espagnol : El Sabio ("Le Sage / L'Érudit") - Alias : La Memoria
 Rôle : Mémorise chaque expérience, apprend des erreurs, adapte dynamiquement les pondérations
 et détecte toute dérive statistique du comportement du marché.
+Unifie la mémoire épisodique, le journal SQLite, l'analyse de dérive et l'auto-critique réflexive.
 
 Composants fédérés :
-- TradeJournal : Journal haute précision enregistrant chaque décision et chaque trade
+- TradeJournal : Journal haute précision SQLite enregistrant chaque décision et chaque trade
+- TradeMemoryEngine : Journal épisodique JSON avec snapshots MFE/MAE et tags réflexifs
 - ExperienceMemory : Base de mémoire épisodique extrayant les leçons et patterns toxiques
 - KnowledgeBase : Base de connaissances certifiées et règles apprises
 - PerformanceAnalyzer : Analyse statistique approfondie de performance
 - PerformanceDriftDetector : Sentinelle détectant la baisse d'efficacité d'une stratégie
 - FeedbackEngine : Boucle de rétroaction post-trade
 - AdaptiveWeightsEngine : Mise à jour adaptative des poids de confluences
-- ReflectiveCritic : Auto-critique réflexive
+- ReflectiveCritic : Auto-critique réflexive assistée par IA
 """
 
 import logging
@@ -36,7 +38,7 @@ class ElSabio:
     """
     Cerveau Apprenant & Mémorial (El Sabio)
     Garantit que le robot développe une sagesse statistique continue sans jamais répéter deux fois
-    la même erreur sur le marché.
+    la même erreur sur le marché. Unifie la mémoire pour qu'aucun apprentissage ne soit perdu.
     """
 
     def __init__(
@@ -48,6 +50,7 @@ class ElSabio:
         drift_detector: Optional[PerformanceDriftDetector] = None,
         weights_engine: Optional[AdaptiveWeightsEngine] = None,
         critic: Optional[ReflectiveCritic] = None,
+        trade_memory=None,
     ):
         self.journal = journal or TradeJournal()
         self.experience = experience or ExperienceMemory()
@@ -56,6 +59,7 @@ class ElSabio:
         self.drift_detector = drift_detector or PerformanceDriftDetector()
         self.weights_engine = weights_engine or AdaptiveWeightsEngine()
         self.critic = critic or ReflectiveCritic()
+        self.trade_memory = trade_memory
 
         self.feedback = FeedbackEngine(
             journal=self.journal,
@@ -65,9 +69,61 @@ class ElSabio:
             critic=self.critic,
         )
 
-    def registrar_decision(self, decision: Dict[str, Any], is_executed: bool = False) -> str:
+    def registrar_decision(self, decision: Dict[str, Any], is_executed: bool = False) -> Any:
         """Enregistre une décision stratégique dans le journal pour postérité statistique."""
         return self.journal.log_decision(decision, is_executed=is_executed)
+
+    def registrar_apertura_trade(
+        self,
+        ticket: int,
+        symbol: str,
+        action: str,
+        lot: float,
+        price: float,
+        sl: float,
+        tp: float,
+        snapshot: Optional[Dict[str, Any]] = None,
+        strategy: str = "GENERIC",
+        timeframe: str = "M15",
+        model_version: str = "v1.0.0",
+    ):
+        """
+        Enregistre l'ouverture d'un trade de manière unifiée :
+        Synchronise le TradeMemoryEngine (JSON) et le TradeJournal (SQLite).
+        """
+        # 1. Enregistrement SQLite (TradeJournal)
+        try:
+            self.journal.log_opened_trade(
+                ticket=ticket,
+                symbol=symbol,
+                side=action,
+                entry_price=price,
+                sl=sl,
+                tp=tp,
+                volume=lot,
+                strategy=strategy,
+                timeframe=timeframe,
+                model_version=model_version,
+                metadata=snapshot or {},
+            )
+        except Exception as e:
+            logger.warning(f"[El Sabio] Erreur journal SQLite lors de l'ouverture #{ticket}: {e}")
+
+        # 2. Enregistrement JSON (TradeMemoryEngine)
+        if self.trade_memory and hasattr(self.trade_memory, "record_entry"):
+            try:
+                self.trade_memory.record_entry(
+                    ticket=ticket,
+                    symbol=symbol,
+                    action=action,
+                    lot=lot,
+                    price=price,
+                    sl=sl,
+                    tp=tp,
+                    snapshot=snapshot or {},
+                )
+            except Exception as e:
+                logger.warning(f"[El Sabio] Erreur TradeMemoryEngine lors de l'ouverture #{ticket}: {e}")
 
     def aprender_de_trade(
         self,
@@ -83,8 +139,23 @@ class ElSabio:
         """
         Traite un trade clôturé : enregistrement du PnL, analyse MFE/MAE,
         critique réflexive et adaptation automatique des poids.
+        Garantit la synchronisation avec TradeMemoryEngine et TradeJournal.
         """
-        logger.info(f"🧬 [El Sabio] Intégration du trade #{ticket} (PnL: {pnl_usd:.2f}$, Sortie: {exit_reason})")
+        logger.info(f"🧬 [El Sabio] Intégration unifiée du trade #{ticket} (PnL: {pnl_usd:.2f}$, Sortie: {exit_reason})")
+
+        # 1. Mise à jour TradeMemoryEngine si connecté
+        if self.trade_memory and hasattr(self.trade_memory, "record_exit"):
+            try:
+                self.trade_memory.record_exit(
+                    ticket=ticket,
+                    close_price=exit_price,
+                    profit_usd=pnl_usd,
+                    exit_reason=exit_reason,
+                )
+            except Exception as e:
+                logger.debug(f"[El Sabio] TradeMemoryEngine record_exit notice: {e}")
+
+        # 2. Cycle de rétroaction post-trade (FeedbackEngine, TradeJournal, AdaptiveWeights, Critic)
         report = self.feedback.process_closed_trade(
             ticket=ticket,
             exit_price=exit_price,

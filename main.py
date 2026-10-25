@@ -89,6 +89,7 @@ def main():
     )
     
     from src.learning import TradeMemoryEngine, ReflectiveCritic, AdaptiveWeightsEngine
+    from src.core.fati_brain import FATIBrain
 
     weights_engine = AdaptiveWeightsEngine(file_path=str(BASE_DIR / "data" / "adaptive_weights.json"))
     critic = ReflectiveCritic(ai_router=router)
@@ -96,6 +97,14 @@ def main():
         file_path=str(BASE_DIR / "data" / "trade_memory.json"),
         critic=critic,
         weights_engine=weights_engine,
+    )
+
+    # ── Initialisation des Cinq Cerveaux FATI (Los Cinco Cerebros) ──
+    fati = FATIBrain(
+        mt5_connector=mt5,
+        weights_engine=weights_engine,
+        critic=critic,
+        trade_memory=trade_memory,
     )
 
     live_news_enabled = config.get('ai_models', {}).get('live_news_enabled', True)
@@ -108,6 +117,8 @@ def main():
         allowed_trade_direction=allowed_direction,
         trade_memory=trade_memory,
         weights_engine=weights_engine,
+        config=config,
+        fati=fati,
     )
     trade_exec = TradeExecutionEngine(
         mt5,
@@ -118,10 +129,14 @@ def main():
         daily_profit_target_usd=config['risk_management'].get('daily_profit_target_usd', 0.0),
         allowed_trade_direction=allowed_direction,
         trade_memory=trade_memory,
+        centinela=fati.centinela,
     )
     chat = ChatEngine(router)
     trade_manager = TradeManager(mt5, orchestrator, config=config, trade_memory=trade_memory)
     
+    # Démarrage du planificateur de cycles d'apprentissage & recherche en arrière-plan
+    fati.scheduler.start()
+
     # Launch UI
     app = QApplication(sys.argv)
     window = MainWindow(
@@ -132,6 +147,7 @@ def main():
     
     # Exit handler
     exit_code = app.exec()
+    fati.scheduler.stop()
     mt5.disconnect()
     sys.exit(exit_code)
 

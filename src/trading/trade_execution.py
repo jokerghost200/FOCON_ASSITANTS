@@ -14,6 +14,7 @@ class TradeExecutionEngine:
         daily_profit_target_usd: float = 0.0,
         allowed_trade_direction: str = "BOTH",
         trade_memory=None,
+        centinela=None,
     ):
         self.mt5 = mt5_connector
         self.mode = mode.lower()  # assist, semi-auto, auto
@@ -23,6 +24,7 @@ class TradeExecutionEngine:
         self.daily_profit_target_usd = daily_profit_target_usd
         self.allowed_trade_direction = allowed_trade_direction.upper()
         self.trade_memory = trade_memory
+        self.centinela = centinela
 
     def prepare_order_request(self, signal: dict) -> dict:
         """
@@ -44,6 +46,39 @@ class TradeExecutionEngine:
         if not symbol or action not in ('BUY', 'SELL'):
             logger.error(f"Invalid signal: symbol={symbol} action={decision.get('action')}")
             return None
+
+        # ── Vérification Indépendante El Centinela (Garde-Fou Inviolable Niveau 0) ──
+        if self.centinela:
+            if getattr(self.centinela, 'parada_emergencia_activa', False):
+                logger.critical(f"🛑 [El Centinela] ORDRE BLOQUÉ : Arrêt d'urgence actif pour {symbol}.")
+                return None
+            try:
+                acc = self.mt5.get_account_info() or {}
+                balance = float(acc.get('balance', 0.0) or 0.0)
+                equity = float(acc.get('equity', balance) or balance)
+                capital = max(balance, equity)
+                open_pos = self.mt5.get_open_positions() or []
+                pos_count = len(open_pos)
+                daily_p = float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0)
+                daily_loss_usd = min(0.0, daily_p)
+
+                risk_req_usd = float(decision.get('risk_usd', 0.0) or 0.0)
+                if risk_req_usd <= 0 and capital > 0:
+                    risk_req_usd = capital * 0.01  # estimation 1% si non encore calculé
+
+                sec_check = self.centinela.evaluar_seguridad(
+                    capital=capital,
+                    risk_amount_usd=risk_req_usd,
+                    current_daily_loss_usd=daily_loss_usd,
+                    current_open_positions_count=pos_count,
+                )
+                if not sec_check.get('safe', False):
+                    logger.critical(
+                        f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Rejet de l'ordre pour {symbol} : {sec_check.get('reason')}"
+                    )
+                    return None
+            except Exception as _ce:
+                logger.warning(f"TradeExecutionEngine: avertissement contrôle El Centinela: {_ce}")
 
         # ── Filtrage Directionnel (BUY_ONLY / SELL_ONLY / BOTH) ──
         policy = getattr(self, 'allowed_trade_direction', 'BOTH').upper()
@@ -383,6 +418,11 @@ class TradeExecutionEngine:
             getattr(mt5, 'TRADE_RETCODE_DONE', 10009),
             getattr(mt5, 'TRADE_RETCODE_PLACED', 10008),
         )
+
+        # Contrôle ultime avant envoi MT5
+        if self.centinela and getattr(self.centinela, 'parada_emergencia_activa', False):
+            logger.critical("🛑 [El Centinela] Émission MT5 avortée : Arrêt d'urgence actif.")
+            return {"success": False, "reason": "El Centinela: Arrêt d'urgence actif."}
 
         with MT5Connector._lock:
             result = mt5.order_send(mt5_req)

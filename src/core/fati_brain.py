@@ -38,6 +38,7 @@ class FATIBrain:
         local_brain=None,
         weights_engine=None,
         critic=None,
+        trade_memory=None,
     ):
         # 1. CEREBRO OBSERVADOR : Microstructure, régimes et dynamique des flux
         self.observador = ElObservador(mt5_connector=mt5_connector)
@@ -55,6 +56,7 @@ class FATIBrain:
         self.sabio = ElSabio(
             weights_engine=weights_engine,
             critic=critic,
+            trade_memory=trade_memory,
         )
         self.journal = self.sabio.journal
         self.experience = self.sabio.experience
@@ -92,6 +94,7 @@ class FATIBrain:
         # Enregistrement des tâches périodiques du planificateur
         self.scheduler.register_task("audit_drift", self._scheduled_drift_audit)
         self.scheduler.register_task("discover_toxic_patterns", self._scheduled_pattern_discovery)
+        self.scheduler.register_task("research_cycle", self._scheduled_research_cycle)
 
         logger.info("🧠 [FATI] Los 5 Cerebros Autónomos inicializados con éxito.")
 
@@ -107,6 +110,8 @@ class FATIBrain:
         htf_trend: str = "Unknown",
         spread_price: float = 0.0,
         direction_filter: str = "BOTH",
+        observation: Optional[Dict[str, Any]] = None,
+        ai_advice: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Cycle Pilier 1 & 2 : El Observador & El Estratega.
@@ -123,6 +128,8 @@ class FATIBrain:
             htf_trend=htf_trend,
             spread_price=spread_price,
             direction_filter=direction_filter,
+            observation=observation,
+            ai_advice=ai_advice,
         )
 
         # Enregistrement systématique de la décision dans le journal (El Sabio)
@@ -174,3 +181,11 @@ class FATIBrain:
         if toxic:
             hypotheses = self.investigador.generar_hipotesis(toxic)
             logger.info(f"💡 [El Investigador] {len(hypotheses)} hypothèses d'amélioration générées.")
+
+    def _scheduled_research_cycle(self):
+        """Tâche d'arrière-plan : cycle complet de recherche, sandbox et validation Walk-Forward."""
+        try:
+            report = self.investigador.ejecutar_ciclo_investigacion(sabio=self.sabio, centinela=self.centinela)
+            logger.info(f"🔬 [El Investigador] Rapport de cycle autonome : {report}")
+        except Exception as e:
+            logger.error(f"[FATI Research] Erreur cycle recherche planifié : {e}")
