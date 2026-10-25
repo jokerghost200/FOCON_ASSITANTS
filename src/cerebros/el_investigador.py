@@ -136,11 +136,26 @@ class ElInvestigador:
         if len(trades) >= 20:
             for hyp in hypotheses[:2]:  # Test ciblé des meilleures hypothèses
                 variant_trades = []
+                disallowed = hyp.parameter_modifications.get("disallowed_regimes", [])
+                min_conf = float(hyp.parameter_modifications.get("min_confidence", 0.0) or 0.0)
+                min_rr = float(hyp.parameter_modifications.get("min_rr", 0.0) or 0.0)
+
                 for tr in trades:
-                    # Simulation d'application des modifications
+                    # Simulation honnête et symétrique (AUCUN cherry-picking rétrospectif) :
+                    # Si une règle exclut un contexte, elle exclut TOUS les trades de ce contexte (gains ET pertes)
+                    if disallowed and tr.get("regime") in disallowed:
+                        continue
+                    if min_conf > 0 and float(tr.get("confidence", 0.0) or 0.0) < min_conf:
+                        continue
+                    if min_rr > 0 and float(tr.get("rr", 0.0) or 0.0) < min_rr:
+                        continue
+
                     v_tr = dict(tr)
-                    if tr.get("pnl_usd", 0) < 0 and tr.get("regime") in hyp.parameter_modifications.get("disallowed_regimes", []):
-                        continue  # Le filtre aurait évité cette perte
+                    # Application d'un coût de friction réaliste (spread / slippage additionnel) si spécifié
+                    friction_r = float(hyp.parameter_modifications.get("friction_penalty_r", 0.0) or 0.0)
+                    if friction_r > 0:
+                        v_tr["pnl_r"] = round(float(v_tr.get("pnl_r", 0.0) or 0.0) - friction_r, 4)
+
                     variant_trades.append(v_tr)
 
                 exp_result = self.ejecutar_experimento(hyp, trades, variant_trades)

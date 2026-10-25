@@ -298,3 +298,114 @@ class TestCerebrosEndToEndFlow:
         assert isinstance(report, dict)
         assert "hypotheses_generated" in report
         assert report["status"] == "COMPLETED"
+
+    def test_contournement_direct_execute_order_bloque_par_centinela(self, setup_system):
+        """
+        Test de contournement (Bypass Test) :
+        Appeler directement execute_order() avec une requête dangereuse (sans passer par prepare_order_request)
+        et vérifier formellement que mt5.order_send() n'est JAMAIS appelé.
+        """
+        from unittest.mock import patch
+        trade_exec = setup_system["trade_exec"]
+
+        # Requête artisanale dangereuse : Risque de 5000$ sur compte de 10000$ (50% > 1.5% max)
+        # Entry=2000.0, SL=1950.0 (dist=50.0). TickSize=0.01, TickVal=1.0, Vol=1.0 -> Risk = 5000$
+        dangerous_raw_request = {
+            "action": 1,
+            "symbol": "XAUUSD",
+            "volume": 1.0,
+            "price": 2000.0,
+            "sl": 1950.0,
+            "tp": 2100.0,
+            "type": 0,
+        }
+
+        with patch("MetaTrader5.order_send") as mock_mt5_send:
+            res = trade_exec.execute_order(dangerous_raw_request)
+            assert res["success"] is False
+            assert "El Centinela" in res["reason"]
+            # Preuve formelle : MT5 n'a jamais été contacté
+            mock_mt5_send.assert_not_called()
+
+    def test_el_centinela_fail_closed_sur_erreur_ou_absence(self, setup_system):
+        """
+        Prouve le comportement Fail-Closed absolu :
+        1) Si El Centinela est absent (None), aucun ordre ne part.
+        2) Si une exception imprévue survient pendant l'évaluation de sécurité, l'ordre est bloqué.
+        """
+        from unittest.mock import patch
+        trade_exec = setup_system["trade_exec"]
+
+        signal = {
+            "symbol": "XAUUSD",
+            "decision": {
+                "action": "BUY",
+                "confidence": 75.0,
+                "entry": 2000.50,
+                "sl": 1995.50,
+                "tp": 2010.50,
+                "lot": 0.05,
+            }
+        }
+
+        # Cas 1 : Centinela absent
+        trade_exec.centinela = None
+        prep_res = trade_exec.prepare_order_request(signal)
+        assert prep_res is None, "Fail-Closed violé : un ordre a été préparé sans Sentinelle !"
+
+        with patch("MetaTrader5.order_send") as mock_mt5_send:
+            exec_res = trade_exec.execute_order({"symbol": "XAUUSD", "volume": 0.05, "price": 2000.50, "sl": 1995.50})
+            assert exec_res["success"] is False
+            mock_mt5_send.assert_not_called()
+
+        # Cas 2 : Exception dans Centinela
+        mock_broken_centinela = MagicMock()
+        mock_broken_centinela.parada_emergencia_activa = False
+        mock_broken_centinela.evaluar_seguridad.side_effect = RuntimeError("Base de sécurité temporairement corrompue")
+        trade_exec.centinela = mock_broken_centinela
+
+        prep_res_exc = trade_exec.prepare_order_request(signal)
+        assert prep_res_exc is None, "Fail-Closed violé : l'ordre est passé malgré une exception dans la Sentinelle !"
+
+        with patch("MetaTrader5.order_send") as mock_mt5_send:
+            exec_res_exc = trade_exec.execute_order({"symbol": "XAUUSD", "volume": 0.05, "price": 2000.50, "sl": 1995.50})
+            assert exec_res_exc["success"] is False
+            mock_mt5_send.assert_not_called()
+
+    def test_capital_conservateur_avec_pertes_flottantes(self, setup_system):
+        """
+        Prouve la règle du capital conservateur min(balance, equity) :
+        Si le compte a un solde (balance) de 10 000 $ mais une equity de 8 000 $
+        (pertes latentes de 2 000 $), le risque est calculé sur 8 000 $.
+        Un ordre risquant 130 $ (1.3% du solde, mais 1.625% de l'equity) est bloqué (> 1.5% max).
+        """
+        from unittest.mock import patch
+        trade_exec = setup_system["trade_exec"]
+        trade_exec.centinela = setup_system["fati"].centinela
+
+        # Simuler un compte avec 2000$ de pertes flottantes
+        setup_system["mock_mt5"].get_account_info.return_value = {
+            "balance": 10000.0,
+            "equity": 8000.0,
+            "margin_free": 7000.0,
+            "currency": "USD",
+        }
+
+        # 1.30 pt de SL avec lot 1.0 (tick_size 0.01, tick_val 1.0) -> Risque = 130 $
+        # 130 $ / 10 000 $ = 1.30 % (passerait si max(balance, equity) était utilisé)
+        # Mais 130 $ / 8 000 $ = 1.625 % (> 1.5 % plafond absolu de SafetyRiskGuard) !
+        signal = {
+            "symbol": "XAUUSD",
+            "decision": {
+                "action": "BUY",
+                "confidence": 75.0,
+                "entry": 2000.00,
+                "sl": 1998.70,  # Dist 1.30 pt -> 130 ticks -> 130 $
+                "tp": 2010.00,
+                "lot": 1.0,
+            }
+        }
+
+        blocked = trade_exec.prepare_order_request(signal)
+        assert blocked is None, "La règle du capital conservateur a échoué : l'ordre a été accepté malgré le dépassement d'equity !"
+
