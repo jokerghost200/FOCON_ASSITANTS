@@ -1,4 +1,5 @@
 import logging
+from typing import Optional, Dict, Any, List
 from src.core.mt5_connector import MT5Connector
 
 logger = logging.getLogger(__name__)
