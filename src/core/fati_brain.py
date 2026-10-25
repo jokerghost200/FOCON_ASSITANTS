@@ -1,32 +1,24 @@
+# -*- coding: utf-8 -*-
 """
 FOCON Autonomous Trading Intelligence (FATI)
 ============================================
-Cerveau supérieur autonome à 5 piliers :
-1. OBSERVER  : MarketRegimeDetector (tendance, range, volatilité, illiquidité)
-2. RÉFLÉCHIR : DecisionEngine (probabilités calibrées, espérance E(R), NO-TRADE)
-3. APPRENDRE : TradeJournal, ExperienceMemory, KnowledgeBase, FeedbackEngine
-4. EXPÉRIMENTER : HypothesisGenerator, ExperimentRunner, WalkForwardValidator
-5. SÉCURISER : SafetyRiskGuard, PromotionGate, RollbackManager, ModelRegistry
+Architecture unifiée des 5 Cerveaux Spécialisés ("Los Cinco Cerebros") :
+1. OBSERVER     -> El Observador    (src.cerebros.el_observador)
+2. DÉCIDER      -> El Estratega     (src.cerebros.el_estratega)
+3. APPRENDRE    -> El Sabio         (src.cerebros.el_sabio)
+4. EXPÉRIMENTER -> El Investigador  (src.cerebros.el_investigador)
+5. SÉCURISER    -> El Centinela     (src.cerebros.el_centinela)
 """
 
 from typing import Dict, Any, List, Optional
 import logging
 
-from src.core.market_regime import MarketRegimeDetector
-from src.core.decision_engine import DecisionEngine
-from src.learning.trade_journal import TradeJournal
-from src.learning.experience_memory import ExperienceMemory
-from src.learning.knowledge_base import KnowledgeBase
-from src.learning.performance_analyzer import PerformanceAnalyzer
-from src.learning.drift_detector import PerformanceDriftDetector
-from src.learning.feedback_engine import FeedbackEngine
-from src.research.hypothesis_generator import HypothesisGenerator
-from src.research.experiment_runner import ExperimentRunner
-from src.research.walk_forward import WalkForwardValidator
-from src.research.model_registry import ModelRegistry
-from src.safety.risk_guard import SafetyRiskGuard
-from src.safety.promotion_gate import PromotionGate
-from src.safety.rollback import RollbackManager
+from src.cerebros.el_observador import ElObservador
+from src.cerebros.el_estratega import ElEstratega
+from src.cerebros.el_sabio import ElSabio
+from src.cerebros.el_investigador import ElInvestigador
+from src.cerebros.el_centinela import ElCentinela
+
 from src.services.learning_scheduler import LearningScheduler
 from src.services.health_monitor import SystemHealthMonitor
 
@@ -36,7 +28,8 @@ logger = logging.getLogger(__name__)
 class FATIBrain:
     """
     Système unifié d'Intelligence Autonome de Trading (FATI).
-    Fonctionne comme couche supérieure sans jamais perturber les composants existants.
+    Orchestre les 5 Cerveaux Espagnols spécialisés tout en assurant
+    une rétro-compatibilité intégrale avec l'ensemble du projet.
     """
 
     def __init__(
@@ -46,36 +39,47 @@ class FATIBrain:
         weights_engine=None,
         critic=None,
     ):
-        # 1. Piliers d'Observation & Décision
-        self.regime_detector = MarketRegimeDetector()
-        self.decision_engine = DecisionEngine(local_brain=local_brain, regime_detector=self.regime_detector)
+        # 1. CEREBRO OBSERVADOR : Microstructure, régimes et dynamique des flux
+        self.observador = ElObservador(mt5_connector=mt5_connector)
+        self.regime_detector = self.observador.regime_detector
 
-        # 2. Piliers d'Apprentissage & Mémoire
-        self.journal = TradeJournal()
-        self.experience = ExperienceMemory()
-        self.knowledge = KnowledgeBase()
-        self.analyzer = PerformanceAnalyzer()
-        self.drift_detector = PerformanceDriftDetector()
-        self.feedback = FeedbackEngine(
-            journal=self.journal,
-            experience=self.experience,
-            drift_detector=self.drift_detector,
+        # 2. CEREBRO ESTRATEGA : Décision, probabilités logistiques, SMC, CRT, Boomerang, E(R)
+        self.estratega = ElEstratega(
+            local_brain=local_brain,
+            observador=self.observador,
+            weights_engine=weights_engine,
+        )
+        self.decision_engine = self.estratega.decision_engine
+
+        # 3. CEREBRO SABIO : Mémoire, apprentissage réflexif, pondérations dynamiques et journal
+        self.sabio = ElSabio(
             weights_engine=weights_engine,
             critic=critic,
         )
+        self.journal = self.sabio.journal
+        self.experience = self.sabio.experience
+        self.knowledge = self.sabio.knowledge
+        self.analyzer = self.sabio.analyzer
+        self.drift_detector = self.sabio.drift_detector
+        self.feedback = self.sabio.feedback
 
-        # 3. Piliers de Recherche & Expérimentation
-        self.hypotheses = HypothesisGenerator()
-        self.experiments = ExperimentRunner()
-        self.walk_forward = WalkForwardValidator()
-        self.registry = ModelRegistry()
+        # 4. CEREBRO INVESTIGADOR : Formulation d'hypothèses, A/B testing sandbox, Walk-Forward
+        self.investigador = ElInvestigador()
+        self.hypotheses = self.investigador.hypotheses
+        self.experiments = self.investigador.experiments
+        self.walk_forward = self.investigador.walk_forward
+        self.registry = self.investigador.registry
 
-        # 4. Piliers de Sécurité & Promotion
-        self.risk_guard = SafetyRiskGuard()
-        self.promotion_gate = PromotionGate()
-        self.rollback = RollbackManager(registry=self.registry, weights_engine=weights_engine)
+        # 5. CEREBRO CENTINELA : Garde-fou indépendant, sas de promotion et circuit-breaker
+        self.centinela = ElCentinela(
+            registry=self.registry,
+            weights_engine=weights_engine,
+        )
+        self.risk_guard = self.centinela.risk_guard
+        self.promotion_gate = self.centinela.promotion_gate
+        self.rollback = self.centinela.rollback
 
-        # 5. Services d'infrastructure
+        # Services d'infrastructure
         self.scheduler = LearningScheduler(interval_seconds=1800)
         self.health = SystemHealthMonitor(
             mt5_connector=mt5_connector,
@@ -89,7 +93,7 @@ class FATIBrain:
         self.scheduler.register_task("audit_drift", self._scheduled_drift_audit)
         self.scheduler.register_task("discover_toxic_patterns", self._scheduled_pattern_discovery)
 
-        logger.info("🧠 [FATI] Cerveau Autonome initialisé avec ses 5 piliers complets.")
+        logger.info("🧠 [FATI] Los 5 Cerebros Autónomos inicializados con éxito.")
 
     def observe_and_decide(
         self,
@@ -105,10 +109,10 @@ class FATIBrain:
         direction_filter: str = "BOTH",
     ) -> Dict[str, Any]:
         """
-        Cycle Pilier 1 & 2 : Observe et Décide.
-        Journalise la décision pour la postérité statistique.
+        Cycle Pilier 1 & 2 : El Observador & El Estratega.
+        Journalise la décision via El Sabio pour la postérité statistique.
         """
-        decision = self.decision_engine.evaluate(
+        decision = self.estratega.decidir(
             symbol=symbol,
             timeframe=timeframe,
             tech_features=tech_features,
@@ -121,8 +125,8 @@ class FATIBrain:
             direction_filter=direction_filter,
         )
 
-        # Enregistrement systématique de la décision dans le journal
-        decision_id = self.journal.log_decision(decision, is_executed=(decision.get("action") in ("BUY", "SELL")))
+        # Enregistrement systématique de la décision dans le journal (El Sabio)
+        decision_id = self.sabio.registrar_decision(decision, is_executed=(decision.get("action") in ("BUY", "SELL")))
         decision["fati_decision_id"] = decision_id
         return decision
 
@@ -138,10 +142,10 @@ class FATIBrain:
         post_exit_candles: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
-        Cycle Pilier 3 : Apprend d'un trade clôturé.
-        Si une dérive critique est détectée, active automatiquement la mise en quarantaine / rollback.
+        Cycle Pilier 3 & 5 : El Sabio apprend du trade clôturé.
+        Si une dérive critique est détectée, El Centinela active immédiatement le rollback d'urgence.
         """
-        report = self.feedback.process_closed_trade(
+        report = self.sabio.aprender_de_trade(
             ticket=ticket,
             exit_price=exit_price,
             pnl_usd=pnl_usd,
@@ -154,19 +158,19 @@ class FATIBrain:
 
         drift = report.get("drift", {})
         if drift.get("status") == "CRITICAL_QUARANTINE":
-            logger.critical("🚨 [FATI] Dérive critique détectée en production. Déclenchement du rollback...")
-            self.rollback.trigger_rollback(incident_reason=drift.get("reason", "Dérive d'espérance critique"))
+            logger.critical("🚨 [FATI] Dérive critique détectée en production. El Centinela déclenche le rollback...")
+            self.centinela.activar_rollback(razon_incidente=drift.get("reason", "Dérive d'espérance critique"))
 
         return report
 
     def _scheduled_drift_audit(self):
-        """Tâche d'arrière-plan : surveillance de dérive de performance."""
-        recent = self.journal.get_closed_trades(limit=25)
-        self.drift_detector.evaluate_drift(recent)
+        """Tâche d'arrière-plan : surveillance de dérive de performance via El Sabio."""
+        recent = self.sabio.journal.get_closed_trades(limit=25)
+        self.sabio.drift_detector.evaluate_drift(recent)
 
     def _scheduled_pattern_discovery(self):
-        """Tâche d'arrière-plan : détection de patterns toxiques et génération d'hypothèses."""
-        toxic = self.experience.detect_toxic_patterns(min_sample=5, max_win_rate=0.30)
+        """Tâche d'arrière-plan : détection de patterns toxiques (El Sabio) et hypothèses (El Investigador)."""
+        toxic = self.sabio.detectar_patrones_toxicos(min_sample=5, max_win_rate=0.30)
         if toxic:
-            hypotheses = self.hypotheses.generate_from_toxic_patterns(toxic)
-            logger.info(f"💡 [FATI Research] {len(hypotheses)} hypothèses d'amélioration générées.")
+            hypotheses = self.investigador.generar_hipotesis(toxic)
+            logger.info(f"💡 [El Investigador] {len(hypotheses)} hypothèses d'amélioration générées.")
