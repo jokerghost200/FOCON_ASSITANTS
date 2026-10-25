@@ -36,8 +36,8 @@ CURRENCY_MAP = {
     "ETHUSD": ("USD", "USD"),
 }
 
-# ── CALENDRIER OFFICIEL VÉRIFIÉ DES RÉUNIONS MONÉTAIRES (Dates réelles certifiées) ──
-VERIFIED_CENTRAL_BANK_MEETINGS = {
+# ── CALENDRIER OFFICIEL VÉRIFIÉ DES BANQUES CENTRALES & BLS (Dates réelles certifiées) ──
+VERIFIED_SCHEDULES = {
     # FOMC (Fed) : Mercredis d'annonce de décision de taux à 14h00 Heure de l'Est (ET)
     "FOMC": {
         2025: [(1, 29), (3, 19), (5, 7), (6, 18), (7, 30), (9, 17), (10, 29), (12, 10)],
@@ -53,7 +53,22 @@ VERIFIED_CENTRAL_BANK_MEETINGS = {
         2025: [(2, 6), (3, 20), (5, 8), (6, 19), (8, 7), (9, 18), (11, 6), (12, 18)],
         2026: [(2, 5), (3, 19), (5, 7), (6, 18), (8, 6), (9, 17), (11, 5), (12, 17)],
     },
+    # Bureau of Labor Statistics (BLS) - US Employment Situation (NFP & Taux de chômage) à 08h30 ET
+    # Calendrier officiel publié : https://www.bls.gov/schedule/news_release/empsit.htm
+    "BLS_NFP": {
+        2025: {1: 10, 2: 7, 3: 7, 4: 4, 5: 2, 6: 6, 7: 3, 8: 1, 9: 5, 10: 3, 11: 7, 12: 5},
+        2026: {1: 9, 2: 6, 3: 6, 4: 3, 5: 8, 6: 5, 7: 2, 8: 7, 9: 4, 10: 2, 11: 6, 12: 4},
+    },
+    # Bureau of Labor Statistics (BLS) - US Consumer Price Index (CPI) à 08h30 ET
+    # Calendrier officiel publié : https://www.bls.gov/schedule/news_release/cpi.htm
+    "BLS_CPI": {
+        2025: {1: 15, 2: 12, 3: 12, 4: 10, 5: 13, 6: 11, 7: 15, 8: 13, 9: 11, 10: 15, 11: 12, 12: 10},
+        2026: {1: 14, 2: 11, 3: 11, 4: 14, 5: 12, 6: 10, 7: 14, 8: 12, 9: 11, 10: 14, 11: 10, 12: 11},
+    },
 }
+
+# Alias de compatibilité
+VERIFIED_CENTRAL_BANK_MEETINGS = VERIFIED_SCHEDULES
 
 
 def is_us_daylight_saving_time(dt: datetime) -> bool:
@@ -192,51 +207,82 @@ class CalendarProvider:
         except (ValueError, TypeError):
             return None
 
-    def generate_recurring_fallback_events(self) -> List[Dict[str, Any]]:
+    def generate_recurring_fallback_events(self, target_year: Optional[int] = None, target_month: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Génère les événements du calendrier officiel vérifié :
-        - NFP le premier vendredi du mois avec ajustement DST exact (12h30 UTC en été / 13h30 UTC en hiver).
-        - CPI vers la 2ème semaine du mois avec heure DST exacte.
-        - Réunions officielles vérifiées de la Fed (FOMC), de la BCE et de la BoE.
+        Génère les événements du calendrier hors-ligne :
+        - Les dates certifiées (BLS NFP, BLS CPI, FOMC, BCE, BoE) sont étiquetées 'VERIFIED'.
+        - Toute date calculée de manière heuristique/estimative est étiquetée 'APPROXIMATE'.
         """
         now = datetime.now(timezone.utc)
         events = []
-        year, month = now.year, now.month
+        year = target_year if target_year is not None else now.year
+        month = target_month if target_month is not None else now.month
 
-        # 1. US Non-Farm Payrolls (Premier Vendredi du mois avec calcul DST exact)
-        first_day = datetime(year, month, 1, 12, 0, tzinfo=timezone.utc)
-        first_friday_day = 1 + (4 - first_day.weekday()) % 7
-        nfp_utc = get_us_release_utc(year, month, first_friday_day, hour_et=8, minute_et=30)
+        # 1. US Non-Farm Payrolls (BLS)
+        if year in VERIFIED_SCHEDULES["BLS_NFP"] and month in VERIFIED_SCHEDULES["BLS_NFP"][year]:
+            nfp_day = VERIFIED_SCHEDULES["BLS_NFP"][year][month]
+            nfp_utc = get_us_release_utc(year, month, nfp_day, hour_et=8, minute_et=30)
+            events.append({
+                "id": f"nfp_{year}_{month}",
+                "title": "US Non-Farm Payrolls & Unemployment Rate (NFP)",
+                "country": "United States",
+                "currency": "USD",
+                "impact": "CRITICAL",
+                "event_time": nfp_utc.isoformat(),
+                "source": "OFFICIAL_BLS_SCHEDULE",
+                "is_verified": True,
+                "calendar_confidence": "VERIFIED",
+            })
+        else:
+            # Règle heuristique de repli : premier vendredi
+            first_day = datetime(year, month, 1, 12, 0, tzinfo=timezone.utc)
+            first_friday_day = 1 + (4 - first_day.weekday()) % 7
+            nfp_utc = get_us_release_utc(year, month, first_friday_day, hour_et=8, minute_et=30)
+            events.append({
+                "id": f"nfp_{year}_{month}",
+                "title": "US Non-Farm Payrolls & Unemployment Rate (NFP) [Date estimée]",
+                "country": "United States",
+                "currency": "USD",
+                "impact": "CRITICAL",
+                "event_time": nfp_utc.isoformat(),
+                "source": "HEURISTIC_ESTIMATE",
+                "is_verified": False,
+                "calendar_confidence": "APPROXIMATE",
+            })
 
-        events.append({
-            "id": f"nfp_{year}_{month}",
-            "title": "US Non-Farm Payrolls & Unemployment Rate (NFP)",
-            "country": "United States",
-            "currency": "USD",
-            "impact": "CRITICAL",
-            "event_time": nfp_utc.isoformat(),
-            "source": "OFFICIAL_BLS_SCHEDULE",
-            "is_verified": True,
-            "calendar_confidence": "VERIFIED",
-        })
-
-        # 2. US Consumer Price Index (CPI) - Deuxième semaine du mois (vers le 12-14)
-        cpi_day = 12 if (datetime(year, month, 12, tzinfo=timezone.utc).weekday() < 5) else 14
-        cpi_utc = get_us_release_utc(year, month, cpi_day, hour_et=8, minute_et=30)
-        events.append({
-            "id": f"cpi_us_{year}_{month}",
-            "title": "US Consumer Price Index (CPI MoM/YoY)",
-            "country": "United States",
-            "currency": "USD",
-            "impact": "CRITICAL",
-            "event_time": cpi_utc.isoformat(),
-            "source": "OFFICIAL_BLS_SCHEDULE",
-            "is_verified": True,
-            "calendar_confidence": "VERIFIED",
-        })
+        # 2. US Consumer Price Index (BLS)
+        if year in VERIFIED_SCHEDULES["BLS_CPI"] and month in VERIFIED_SCHEDULES["BLS_CPI"][year]:
+            cpi_day = VERIFIED_SCHEDULES["BLS_CPI"][year][month]
+            cpi_utc = get_us_release_utc(year, month, cpi_day, hour_et=8, minute_et=30)
+            events.append({
+                "id": f"cpi_us_{year}_{month}",
+                "title": "US Consumer Price Index (CPI MoM/YoY)",
+                "country": "United States",
+                "currency": "USD",
+                "impact": "CRITICAL",
+                "event_time": cpi_utc.isoformat(),
+                "source": "OFFICIAL_BLS_SCHEDULE",
+                "is_verified": True,
+                "calendar_confidence": "VERIFIED",
+            })
+        else:
+            # Règle heuristique de repli : mi-mois
+            cpi_day = 12 if (datetime(year, month, 12, tzinfo=timezone.utc).weekday() < 5) else 14
+            cpi_utc = get_us_release_utc(year, month, cpi_day, hour_et=8, minute_et=30)
+            events.append({
+                "id": f"cpi_us_{year}_{month}",
+                "title": "US Consumer Price Index (CPI MoM/YoY) [Date estimée]",
+                "country": "United States",
+                "currency": "USD",
+                "impact": "CRITICAL",
+                "event_time": cpi_utc.isoformat(),
+                "source": "HEURISTIC_ESTIMATE",
+                "is_verified": False,
+                "calendar_confidence": "APPROXIMATE",
+            })
 
         # 3. FOMC Réunions officielles vérifiées
-        fomc_dates = VERIFIED_CENTRAL_BANK_MEETINGS["FOMC"].get(year, [])
+        fomc_dates = VERIFIED_SCHEDULES["FOMC"].get(year, [])
         for (m, d) in fomc_dates:
             if m == month or (m == (month % 12 + 1)):
                 fomc_utc = get_us_release_utc(year, m, d, hour_et=14, minute_et=0)
@@ -253,7 +299,7 @@ class CalendarProvider:
                 })
 
         # 4. BCE Réunions officielles vérifiées
-        ecb_dates = VERIFIED_CENTRAL_BANK_MEETINGS["ECB"].get(year, [])
+        ecb_dates = VERIFIED_SCHEDULES["ECB"].get(year, [])
         for (m, d) in ecb_dates:
             if m == month or (m == (month % 12 + 1)):
                 ecb_utc = datetime(year, m, d, 12, 15, tzinfo=timezone.utc)
@@ -270,7 +316,7 @@ class CalendarProvider:
                 })
 
         # 5. BoE Réunions officielles vérifiées
-        boe_dates = VERIFIED_CENTRAL_BANK_MEETINGS["BOE"].get(year, [])
+        boe_dates = VERIFIED_SCHEDULES["BOE"].get(year, [])
         for (m, d) in boe_dates:
             if m == month or (m == (month % 12 + 1)):
                 boe_utc = datetime(year, m, d, 12, 0, tzinfo=timezone.utc)

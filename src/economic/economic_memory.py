@@ -71,6 +71,16 @@ class EconomicMemory:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON economic_events(event_time)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_curr ON economic_events(currency, impact)")
 
+            # Migration douce pour les bases existantes sur disque
+            try:
+                cursor.execute("ALTER TABLE economic_events ADD COLUMN is_verified INTEGER DEFAULT 1")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE economic_events ADD COLUMN calendar_confidence TEXT DEFAULT 'VERIFIED'")
+            except Exception:
+                pass
+
             # 2. Actualités et flux RSS financiers
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS economic_news (

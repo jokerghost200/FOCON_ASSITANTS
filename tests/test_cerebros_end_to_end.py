@@ -165,7 +165,7 @@ class TestCerebrosEndToEndFlow:
         analysis_res = orchestrator.analyze_symbol("XAUUSD", "M15")
         assert "status" in analysis_res
         
-        # Créer un signal valide estampillé par El Estratega
+        econ_ctx = fati.economista.analizar_contexto_economico("XAUUSD")
         signal = {
             "symbol": "XAUUSD",
             "timeframe": "M15",
@@ -179,7 +179,9 @@ class TestCerebrosEndToEndFlow:
                 "risk_usd": 50.0,
                 "reason": "Test Confluence SMC",
                 "cerebro_origen": "El Estratega",
-            }
+                "economic_context": econ_ctx,
+            },
+            "economic_context": econ_ctx,
         }
 
         # 3. Préparation de l'ordre : passage obligatoire par El Centinela
@@ -308,8 +310,7 @@ class TestCerebrosEndToEndFlow:
         from unittest.mock import patch
         trade_exec = setup_system["trade_exec"]
 
-        # Requête artisanale dangereuse : Risque de 5000$ sur compte de 10000$ (50% > 1.5% max)
-        # Entry=2000.0, SL=1950.0 (dist=50.0). TickSize=0.01, TickVal=1.0, Vol=1.0 -> Risk = 5000$
+        # 1. Requête avec contexte économique valide mais risque excessif (5000$ > 1.5% max)
         dangerous_raw_request = {
             "action": 1,
             "symbol": "XAUUSD",
@@ -318,13 +319,29 @@ class TestCerebrosEndToEndFlow:
             "sl": 1950.0,
             "tp": 2100.0,
             "type": 0,
+            "_economic_context": {"status": "OK", "high_impact_window": False, "event_risk": "LOW", "recommendation": "NORMAL"},
         }
 
         with patch("MetaTrader5.order_send") as mock_mt5_send:
             res = trade_exec.execute_order(dangerous_raw_request)
             assert res["success"] is False
             assert "El Centinela" in res["reason"]
-            # Preuve formelle : MT5 n'a jamais été contacté
+            mock_mt5_send.assert_not_called()
+
+        # 2. Requête artisanale sans AUCUN contexte macroéconomique en mode auto (bloquée par El Economista)
+        raw_request_no_econ = {
+            "action": 1,
+            "symbol": "XAUUSD",
+            "volume": 0.05,
+            "price": 2000.0,
+            "sl": 1995.0,
+            "tp": 2010.0,
+            "type": 0,
+        }
+        with patch("MetaTrader5.order_send") as mock_mt5_send:
+            res_no_econ = trade_exec.execute_order(raw_request_no_econ)
+            assert res_no_econ["success"] is False
+            assert "El Economista" in res_no_econ["reason"]
             mock_mt5_send.assert_not_called()
 
     def test_el_centinela_fail_closed_sur_erreur_ou_absence(self, setup_system):

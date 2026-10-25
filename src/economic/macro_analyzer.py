@@ -135,18 +135,54 @@ class MacroAnalyzer:
         Retourne la fiche macroéconomique d'une devise avec son indicateur de fraîcheur.
         """
         curr = currency.upper()
-        mem_snap = self.memory.get_latest_macro_snapshot(curr)
-        ref_data = self.central_bank_rates.get(curr, {
-            "bank": f"Central Bank of {curr}",
-            "rate": 3.0,
-            "inflation": 2.0,
-            "stance": "NEUTRAL",
-            "effective_date": "UNKNOWN",
-            "last_verified_at": "2020-01-01T00:00:00+00:00",
-            "source": "Fallback Default",
-            "description": "Données macroéconomiques non répertoriées.",
-        })
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
 
+        # Actifs non adossés à des banques centrales souveraines (ex. Métaux XAU/XAG, Crypto BTC/ETH, Matières premières)
+        if curr not in self.central_bank_rates:
+            mem_snap = self.memory.get_latest_macro_snapshot(curr)
+            if mem_snap:
+                rate = float(mem_snap.get("interest_rate", 0.0))
+                inflation = float(mem_snap.get("inflation_rate", 0.0))
+                stance = str(mem_snap.get("monetary_stance", "NEUTRAL"))
+                updated_at = mem_snap.get("updated_at") or now_str
+                try:
+                    age_days = (now - datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))).total_seconds() / 86400.0
+                    is_stale = age_days > self.max_age_days
+                except Exception:
+                    is_stale = False
+                    age_days = 0.0
+                return {
+                    "bank": f"Custom Asset ({curr})",
+                    "rate": rate,
+                    "inflation": inflation,
+                    "stance": stance,
+                    "effective_date": "N/A",
+                    "last_verified_at": updated_at,
+                    "source": "DATABASE_SNAPSHOT",
+                    "description": f"Données macro personnalisées pour {curr}.",
+                    "is_stale": is_stale,
+                    "age_days": round(age_days, 1),
+                    "freshness": "STALE" if is_stale else "FRESH",
+                    "is_sovereign": False,
+                }
+            return {
+                "bank": f"Non-Sovereign Asset ({curr})",
+                "rate": 0.0,
+                "inflation": 0.0,
+                "stance": "NEUTRAL",
+                "effective_date": "N/A",
+                "last_verified_at": now_str,
+                "source": "NON_SOVEREIGN_COMMODITY",
+                "description": f"Actif non souverain ({curr}) sans taux de banque centrale applicable.",
+                "is_stale": False,
+                "age_days": 0.0,
+                "freshness": "FRESH",
+                "is_sovereign": False,
+            }
+
+        mem_snap = self.memory.get_latest_macro_snapshot(curr)
+        ref_data = self.central_bank_rates[curr]
         info = dict(ref_data)
         if mem_snap:
             info["rate"] = float(mem_snap.get("interest_rate", info["rate"]))
@@ -155,8 +191,7 @@ class MacroAnalyzer:
             if "updated_at" in mem_snap and mem_snap["updated_at"]:
                 info["last_verified_at"] = mem_snap["updated_at"]
 
-        # Calcul de la fraîcheur (staleness)
-        now = datetime.now(timezone.utc)
+        # Calcul de la fraîcheur (staleness) pour les banques centrales souveraines
         is_stale = False
         age_days = 0.0
         try:
@@ -170,6 +205,7 @@ class MacroAnalyzer:
         info["is_stale"] = is_stale
         info["age_days"] = round(age_days, 1)
         info["freshness"] = "STALE" if is_stale else "FRESH"
+        info["is_sovereign"] = True
         return info
 
     def calculate_interest_differential(self, symbol: str) -> Dict[str, Any]:

@@ -15,6 +15,7 @@ class TradeExecutionEngine:
         allowed_trade_direction: str = "BOTH",
         trade_memory=None,
         centinela=None,
+        require_economic_context: Optional[bool] = None,
     ):
         from src.cerebros.el_centinela import ElCentinela
         self.mt5 = mt5_connector
@@ -26,6 +27,11 @@ class TradeExecutionEngine:
         self.allowed_trade_direction = allowed_trade_direction.upper()
         self.trade_memory = trade_memory
         self.centinela = centinela if centinela is not None else ElCentinela()
+        # En mode automatique et semi-automatique, la présence et conformité du contexte économique est obligatoire (Fail-Closed)
+        if require_economic_context is not None:
+            self.require_economic_context = bool(require_economic_context)
+        else:
+            self.require_economic_context = self.mode in ("auto", "semi-auto")
 
     def _get_account_capital_and_state(self):
         """
@@ -102,14 +108,39 @@ class TradeExecutionEngine:
             or decision.get('economic_context')
             or (signal.get('news_context', {}).get('economic_context') if isinstance(signal.get('news_context'), dict) else None)
         )
-        if isinstance(econ_ctx, dict):
+
+        # 1. Vérification d'absence ou invalidité de contexte économique
+        if econ_ctx is None:
+            if self.require_economic_context:
+                logger.critical(
+                    f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Ordre pour {symbol} REJETÉ : "
+                    f"Contexte économique absent en mode '{self.mode}'. Risque macroéconomique non garanti (Fail-Closed)."
+                )
+                return None
+            else:
+                logger.warning(
+                    f"⚠️ [Mode Assisté] Contexte économique absent pour {symbol}. "
+                    f"Tolérance exclusive au mode manuel/assisté (validation sous la responsabilité du trader)."
+                )
+        elif not isinstance(econ_ctx, dict):
+            logger.critical(
+                f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Ordre pour {symbol} REJETÉ : "
+                f"Contexte économique invalide ({type(econ_ctx).__name__}). Format non conforme (Fail-Closed)."
+            )
+            return None
+        else:
+            # 2. Vérification des alertes, pannes et péremption
             is_blackout = bool(econ_ctx.get('high_impact_window', False))
             econ_rec = str(econ_ctx.get('recommendation', 'NORMAL')).upper()
             event_risk = str(econ_ctx.get('event_risk', 'LOW')).upper()
             econ_status = str(econ_ctx.get('status', 'OK')).upper()
+            is_stale = bool(
+                econ_ctx.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
+                or econ_ctx.get('is_rate_stale', False)
+            )
 
-            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR':
-                reason = econ_ctx.get('reason', 'Gel d\'annonce macroéconomique ou erreur économique critique.')
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR' or (self.require_economic_context and is_stale):
+                reason = econ_ctx.get('reason', 'Gel d\'annonce macroéconomique, erreur ou données périmées.')
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Préparation de l'ordre pour {symbol} BLOQUÉE : {reason}"
                 )
@@ -512,20 +543,48 @@ class TradeExecutionEngine:
 
         # ── CONTRÔLE DE SÉCURITÉ MACROÉCONOMIQUE ULTIME AVANT ORDER_SEND (Strictement Fail-Closed) ──
         req_econ = request.get('_economic_context') or request.get('economic_context')
-        if isinstance(req_econ, dict):
-            if (
-                bool(req_econ.get('high_impact_window', False))
-                or str(req_econ.get('recommendation', '')).upper() == 'NO_TRADE_NEWS'
-                or str(req_econ.get('event_risk', '')).upper() in ('CRITICAL', 'HIGH')
-                or str(req_econ.get('status', '')).upper() == 'ERROR'
-            ):
+
+        if req_econ is None:
+            if self.require_economic_context:
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : "
-                    f"Gel macroéconomique ou erreur critique ({req_econ.get('reason')})."
+                    f"Contexte économique absent en mode '{self.mode}' (Fail-Closed)."
                 )
                 return {
                     "success": False,
-                    "reason": f"El Economista: Gel macroéconomique ou erreur critique ({req_econ.get('reason')}).",
+                    "reason": f"El Economista: Contexte économique absent en mode {self.mode} (Fail-Closed).",
+                }
+            else:
+                logger.warning(
+                    f"⚠️ [Mode Assisté] Émission MT5 pour {request.get('symbol')} sans contexte macroéconomique (tolérance mode assisté)."
+                )
+        elif not isinstance(req_econ, dict):
+            logger.critical(
+                f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : "
+                f"Contexte économique invalide ({type(req_econ).__name__}) (Fail-Closed)."
+            )
+            return {
+                "success": False,
+                "reason": f"El Economista: Contexte économique invalide ({type(req_econ).__name__}).",
+            }
+        else:
+            is_blackout = bool(req_econ.get('high_impact_window', False))
+            econ_rec = str(req_econ.get('recommendation', '')).upper()
+            event_risk = str(req_econ.get('event_risk', '')).upper()
+            econ_status = str(req_econ.get('status', '')).upper()
+            is_stale = bool(
+                req_econ.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
+                or req_econ.get('is_rate_stale', False)
+            )
+
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status == 'ERROR' or (self.require_economic_context and is_stale):
+                reason = req_econ.get('reason', 'Gel macroéconomique, erreur ou données périmées.')
+                logger.critical(
+                    f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : {reason}"
+                )
+                return {
+                    "success": False,
+                    "reason": f"El Economista: Gel macroéconomique, erreur ou données périmées ({reason}).",
                 }
 
         # ── CONTRÔLE DE SÉCURITÉ NIVEAU 0 RÉPÉTÉ AVANT TOUT MT5.ORDER_SEND (Strictement Fail-Closed) ──

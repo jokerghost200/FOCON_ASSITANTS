@@ -592,3 +592,257 @@ def test_scenario_7_cerveau_economique_exception_fail_closed_zero_mt5():
         res = trade_exec.execute_order(forced_req)
         assert res["success"] is False
         mock_send.assert_not_called()
+
+
+# ─── 8. TESTS SPÉCIFIQUES : VALIDATION FAIL-CLOSED CONTEXTE ABSENT & CALENDRIER OFFICIEL ───
+
+def test_execute_order_bloque_contexte_absent_en_mode_auto():
+    """
+    Vérifie formellement que si le contexte économique est ABSENT (None) en mode automatique,
+    l'ordre est immédiatement rejeté (Fail-Closed) et mt5.order_send() n'est JAMAIS appelé.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+    assert trade_exec.require_economic_context is True
+
+    # 1. Étape prepare_order_request : rejet direct si contexte économique absent
+    raw_signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY",
+            "confidence": 80.0,
+            "entry": 1.0850,
+            "sl": 1.0800,
+            "tp": 1.0950,
+            "lot": 0.05,
+            "risk_usd": 25.0,
+        }
+    }
+    assert trade_exec.prepare_order_request(raw_signal) is None
+
+    # 2. Étape execute_order : tentative directe de contournement sans contexte économique
+    raw_order_req = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "type": 0,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_order_req)
+        assert res["success"] is False
+        assert "Contexte économique absent" in res["reason"]
+        # Preuve formelle d'inviolabilité : MT5 n'est jamais contacté
+        mock_send.assert_not_called()
+
+
+def test_execute_order_bloque_contexte_invalide():
+    """
+    Vérifie qu'un contexte économique de type non-dictionnaire (ex. str, int, list)
+    est bloqué sans exception non interceptée et sans appel MT5.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+
+    # Format invalide (chaîne de caractères ou entier au lieu de dictionnaire)
+    signal_corrupt = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY",
+            "confidence": 80.0,
+            "entry": 1.0850,
+            "sl": 1.0800,
+            "tp": 1.0950,
+            "lot": 0.05,
+            "economic_context": "CORRUPTED_CONTEXT_PAYLOAD",
+        }
+    }
+    assert trade_exec.prepare_order_request(signal_corrupt) is None
+
+    raw_req_corrupt = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "type": 0,
+        "_economic_context": 99999,  # Entier au lieu de dict
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req_corrupt)
+        assert res["success"] is False
+        assert "Contexte économique invalide" in res["reason"]
+        mock_send.assert_not_called()
+
+
+def test_execute_order_bloque_contexte_perime():
+    """
+    Vérifie qu'un contexte économique marqué périmé (STALE ou is_rate_stale=True)
+    interdit formellement l'exécution d'un ordre en mode automatique.
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec = TradeExecutionEngine(mt5_connector=mock_connector, mode="auto")
+
+    # Données périmées (ex. taux directeurs non vérifiés depuis > 90j)
+    stale_ctx = {
+        "status": "OK",
+        "high_impact_window": False,
+        "event_risk": "LOW",
+        "recommendation": "NORMAL",
+        "data_freshness": "STALE",
+        "is_rate_stale": True,
+        "reason": "Données macroéconomiques périmées > 90 jours.",
+    }
+
+    signal_stale = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY",
+            "confidence": 80.0,
+            "entry": 1.0850,
+            "sl": 1.0800,
+            "tp": 1.0950,
+            "lot": 0.05,
+            "economic_context": stale_ctx,
+        }
+    }
+    assert trade_exec.prepare_order_request(signal_stale) is None
+
+    raw_req_stale = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "type": 0,
+        "_economic_context": stale_ctx,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = trade_exec.execute_order(raw_req_stale)
+        assert res["success"] is False
+        assert "périmées" in res["reason"]
+        mock_send.assert_not_called()
+
+
+def test_mode_assiste_tolere_absence_contexte_mais_bloque_blackout():
+    """
+    Vérifie la nuance demandée :
+    En mode 'assist', l'absence de contexte économique est tolérée (avec log avertissement),
+    MAIS si un contexte d'alerte (blackout ou CRITICAL) est présent, l'ordre reste bloqué !
+    """
+    from src.trading.trade_execution import TradeExecutionEngine
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 100000.0, "equity": 100000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001, "filling_mode": 1
+    }
+    trade_exec_assist = TradeExecutionEngine(mt5_connector=mock_connector, mode="assist")
+    assert trade_exec_assist.require_economic_context is False
+
+    # 1. Requête sans contexte en mode assisté : acceptée
+    raw_req_no_econ = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "type": 0,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        mock_deal = MagicMock()
+        mock_deal.retcode = 10009
+        mock_deal.order = 999111
+        mock_deal.price = 1.0855
+        mock_deal.volume = 0.05
+        mock_send.return_value = mock_deal
+
+        res = trade_exec_assist.execute_order(raw_req_no_econ)
+        assert res["success"] is True
+        mock_send.assert_called_once()
+
+    # 2. Requête AVEC alerte macroéconomique (Gel Blackout) en mode assisté : TOUJOURS bloquée
+    raw_req_blackout = {
+        "symbol": "EURUSD",
+        "action": 0,
+        "volume": 0.05,
+        "price": 1.0855,
+        "sl": 1.0800,
+        "tp": 1.0950,
+        "type": 0,
+        "_economic_context": {
+            "high_impact_window": True,
+            "event_risk": "CRITICAL",
+            "recommendation": "NO_TRADE_NEWS",
+            "reason": "US Non-Farm Payrolls imminent.",
+        },
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res_blocked = trade_exec_assist.execute_order(raw_req_blackout)
+        assert res_blocked["success"] is False
+        assert "Gel macroéconomique" in res_blocked["reason"]
+        mock_send.assert_not_called()
+
+
+def test_calendar_provider_bls_official_vs_heuristic_approximate():
+    """
+    Vérifie la distinction officielle entre dates certifiées BLS (VERIFIED)
+    et dates déduites par heuristique (APPROXIMATE).
+    Exemple concret : En juillet 2025, le 4 juillet est férié (Independence Day).
+    Le BLS a donc officiellement publié le NFP le jeudi 3 juillet 2025, et NON le vendredi 4 juillet.
+    """
+    db_file = ":memory:"
+    mem = EconomicMemory(db_path=db_file)
+    cal = CalendarProvider(memory=mem)
+
+    # 1. Année 2025 Mois 7 (Juillet 2025) : Doit être le 3 juillet à 12h30 UTC (heure d'été)
+    events_jul_2025 = cal.generate_recurring_fallback_events(target_year=2025, target_month=7)
+    nfp_event_2025 = next(e for e in events_jul_2025 if "Non-Farm Payrolls" in e["title"])
+    assert nfp_event_2025["is_verified"] is True
+    assert nfp_event_2025["calendar_confidence"] == "VERIFIED"
+    assert nfp_event_2025["source"] == "OFFICIAL_BLS_SCHEDULE"
+    assert "2025-07-03" in nfp_event_2025["event_time"]  # Jeudi 3 juillet !
+    assert "12:30:00" in nfp_event_2025["event_time"]  # EDT -> UTC
+
+    # 2. CPI Janvier 2025 : Officiellement le 15 janvier 2025 (BLS)
+    events_jan_2025 = cal.generate_recurring_fallback_events(target_year=2025, target_month=1)
+    cpi_event_2025 = next(e for e in events_jan_2025 if "CPI" in e["title"])
+    assert cpi_event_2025["is_verified"] is True
+    assert cpi_event_2025["calendar_confidence"] == "VERIFIED"
+    assert cpi_event_2025["source"] == "OFFICIAL_BLS_SCHEDULE"
+    assert "2025-01-15" in cpi_event_2025["event_time"]
+    assert "13:30:00" in cpi_event_2025["event_time"]  # EST -> UTC (hiver)
+
+    # 3. Année future non répertoriée (ex. 2028) : repli heuristique étiqueté APPROXIMATE
+    events_future = cal.generate_recurring_fallback_events(target_year=2028, target_month=7)
+    nfp_future = next(e for e in events_future if "Non-Farm Payrolls" in e["title"])
+    assert nfp_future["is_verified"] is False
+    assert nfp_future["calendar_confidence"] == "APPROXIMATE"
+    assert nfp_future["source"] == "HEURISTIC_ESTIMATE"
+    assert "[Date estimée]" in nfp_future["title"]
+
+    cpi_future = next(e for e in events_future if "CPI" in e["title"])
+    assert cpi_future["is_verified"] is False
+    assert cpi_future["calendar_confidence"] == "APPROXIMATE"
+    assert cpi_future["source"] == "HEURISTIC_ESTIMATE"
+    assert "[Date estimée]" in cpi_future["title"]
+
