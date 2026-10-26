@@ -9,13 +9,14 @@ Collecte les dépêches financières en temps réel depuis des flux RSS publics 
 Analyse locale du sentiment sans clé d'API grâce à un lexique financier quantitatif.
 Dédoublonnage automatique et stockage dans EconomicMemory.
 """
+from __future__ import annotations
 
 import re
 import logging
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
 
 from src.economic.economic_memory import EconomicMemory
@@ -104,7 +105,8 @@ class NewsCollector:
         articles = []
         try:
             root = ET.fromstring(xml_bytes)
-            channel = root.find("channel") or root
+            ch = root.find("channel")
+            channel = ch if ch is not None else root
 
             for item in channel.findall("item"):
                 title = item.findtext("title") or ""
@@ -147,7 +149,7 @@ class NewsCollector:
             return "GENERAL"
         return max(scores, key=scores.get)
 
-    def analyze_sentiment(self, text: str) -> (float, str):
+    def analyze_sentiment(self, text: str) -> tuple[float, str]:
         """
         Calcule un score de sentiment quantitatif entre -1.0 et +1.0
         en comptant les occurrences contextuelles de mots-clés financiers.
