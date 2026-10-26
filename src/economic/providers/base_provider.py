@@ -119,7 +119,10 @@ class BaseEconomicProvider:
         """
         Évalue objectivement la fraîcheur économique réelle selon la fréquence propre à l'indicateur.
         Distingue une collecte HTTP récente d'une statistique économique ancienne ou en retard.
-        Retourne (status, age_days) où status vaut 'OFFICIAL_CURRENT' ou 'STALE'.
+        Règles de sécurité Fail-Closed :
+        - Si la période ne peut pas être interprétée : retourne ('UNKNOWN', 999.0).
+        - Si la date est dans le futur (invalide pour des stats passées) : retourne ('UNKNOWN', 999.0).
+        - Retourne (status, age_days) où status vaut 'OFFICIAL_CURRENT', 'STALE' ou 'UNKNOWN'.
         """
         from datetime import date
         now = datetime.now(timezone.utc)
@@ -146,40 +149,56 @@ class BaseEconomicProvider:
         if not ref_date and reference_period:
             per = str(reference_period).strip().upper()
             try:
-                # Format ISO YYYY-MM-DD
-                if len(per) == 10 and per[4] == "-" and per[7] == "-":
-                    ref_date = date.fromisoformat(per)
+                # Format trimestriel YYYYQ1, YYYY-Q1, YYYY-Q2 (doit être testé AVANT les longueurs 7)
+                if "Q" in per:
+                    parts = per.replace("-", "").split("Q")
+                    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                        y = int(parts[0])
+                        q = int(parts[1])
+                        if 1 <= q <= 4:
+                            q_end_month = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+                            m, day = q_end_month[q]
+                            ref_date = date(y, m, day)
                 # Format mensuel BLS YYYYM09 ou YYYY-M09
                 elif "M" in per:
                     parts = per.replace("-", "").split("M")
-                    y = int(parts[0])
-                    m = int(parts[1])
-                    # Dernier jour du mois approximé (28 pour fév, 30/31 pour les autres)
-                    day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
-                    ref_date = date(y, m, day)
-                # Format mensuel ISO YYYY-MM
-                elif len(per) == 7 and per[4] == "-":
+                    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                        y = int(parts[0])
+                        m = int(parts[1])
+                        if 1 <= m <= 12:
+                            day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
+                            ref_date = date(y, m, day)
+                # Format ISO complet YYYY-MM-DD
+                elif len(per) == 10 and per[:4].isdigit() and per[4] == "-" and per[5:7].isdigit() and per[7] == "-" and per[8:10].isdigit():
+                    ref_date = date.fromisoformat(per)
+                # Format mensuel ISO YYYY-MM (ex: 2026-08)
+                elif len(per) == 7 and per[:4].isdigit() and per[4] == "-" and per[5:7].isdigit():
                     y = int(per[:4])
                     m = int(per[5:7])
-                    day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
-                    ref_date = date(y, m, day)
-                # Format trimestriel YYYYQ1 ou YYYY-Q1
-                elif "Q" in per:
-                    parts = per.replace("-", "").split("Q")
-                    y = int(parts[0])
-                    q = int(parts[1])
-                    q_end_month = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
-                    m, day = q_end_month.get(q, (12, 31))
-                    ref_date = date(y, m, day)
+                    if 1 <= m <= 12:
+                        day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
+                        ref_date = date(y, m, day)
                 # Format annuel YYYY
                 elif len(per) == 4 and per.isdigit():
                     ref_date = date(int(per), 12, 31)
             except Exception:
                 ref_date = None
 
+        # Règle Fail-Closed fondamentale : Si impossible d'interpréter la période,
+        # ne JAMAIS classer comme actuelle avec un âge nul. Retourner UNKNOWN avec âge pénalisant.
         if not ref_date:
-            # Période indéterminée : conservation du statut sans garantie
-            return "OFFICIAL_CURRENT", 0.0
+            return "UNKNOWN", 999.0
+
+        is_rate = any(k in ind_upper for k in ("RATE", "DFR", "MRO", "MLFR", "FED_FUNDS"))
+
+        # Vérification des dates futures
+        if ref_date > today:
+            # Pour un taux directeur, une date d'effet dans les 7 prochains jours correspond à
+            # une annonce de politique monétaire imminente validée par la banque centrale
+            if is_rate and 0 < (ref_date - today).days <= 7:
+                return "OFFICIAL_CURRENT", 0.0
+            # Pour une statistique passée (CPI, PIB, chômage) ou date aberrante : rejet strict
+            return "UNKNOWN", 999.0
 
         age_days = max(0.0, float((today - ref_date).days))
 
@@ -187,7 +206,7 @@ class BaseEconomicProvider:
         # - Taux directeurs : réévaluation toutes les 6-8 semaines (stale si > 90 jours sans décision)
         # - Statistiques mensuelles (CPI, Chômage, NFP, HICP) : délai usuel 2-5 semaines (stale si > 75 jours)
         # - Statistiques trimestrielles (PIB) : délai usuel 6-8 semaines (stale si > 150 jours)
-        if any(k in ind_upper for k in ("RATE", "DFR", "MRO", "MLFR", "FED_FUNDS")):
+        if is_rate:
             max_allowed = 90.0
         elif any(k in ind_upper for k in ("GDP", "PIB", "GROWTH")):
             max_allowed = 150.0
@@ -213,12 +232,25 @@ class BaseEconomicProvider:
     ) -> Dict[str, Any]:
         """
         Format standard d'un indicateur macroéconomique officiel.
-        Évalue automatiquement le statut (OFFICIAL_CURRENT vs STALE) selon l'âge réel de la donnée.
+        Évalue automatiquement le statut (OFFICIAL_CURRENT, STALE, UNKNOWN) selon l'âge et la validité.
         """
+        import math
         now_str = datetime.now(timezone.utc).isoformat()
         ind_clean = indicator.upper().strip()
         reg_clean = currency_or_region.upper().strip()
         per_clean = str(reference_period).strip()
+
+        # Validation numérique de la valeur
+        try:
+            val_float = float(value)
+            if math.isnan(val_float) or math.isinf(val_float):
+                val_float = 0.0
+                is_val_valid = False
+            else:
+                is_val_valid = True
+        except (ValueError, TypeError):
+            val_float = 0.0
+            is_val_valid = False
 
         # Évaluation dynamique de la fraîcheur si le statut n'est pas forcé (ex: HISTORICAL)
         calc_status, age_days = self.evaluate_staleness(
@@ -227,14 +259,19 @@ class BaseEconomicProvider:
             effective_date=effective_date,
             published_at=published_at,
         )
-        final_status = status or calc_status
+
+        if not is_val_valid:
+            final_status = "UNKNOWN"
+            age_days = 999.0
+        else:
+            final_status = status or calc_status
 
         return {
             "id": f"{self.name.upper()}_{ind_clean}_{reg_clean}_{per_clean}",
             "source": self.name.upper(),
             "indicator": ind_clean,
             "currency_or_region": reg_clean,
-            "value": float(value),
+            "value": val_float,
             "unit": unit,
             "reference_period": per_clean,
             "effective_date": effective_date,

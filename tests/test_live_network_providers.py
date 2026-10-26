@@ -48,8 +48,13 @@ def test_live_network_official_providers():
     unemp_ind = next((i for i in bls_indicators if i["indicator"] == "UNEMPLOYMENT"), bls_indicators[0])
     cpi_yoy_ind = next((i for i in bls_indicators if i["indicator"] == "CPI_YOY"), None)
 
-    # Vérification que la période obtenue est bien contemporaine (année 2026)
-    assert "2026" in str(unemp_ind["reference_period"]), f"Periode BLS attendue en 2026, recue: {unemp_ind['reference_period']}"
+    current_year = datetime.now(timezone.utc).year
+    # Vérification que la période obtenue est contemporaine (année courante ou précédente pour début d'année)
+    assert (str(current_year) in str(unemp_ind["reference_period"]) or str(current_year - 1) in str(unemp_ind["reference_period"])), (
+        f"Période BLS attendue contemporaine ({current_year}), reçue: {unemp_ind['reference_period']}"
+    )
+    assert unemp_ind["age_days"] <= 75.0, f"L'indicateur chômage doit avoir un âge <= 75j, reçu: {unemp_ind.get('age_days')}j"
+    assert unemp_ind["status"] == "OFFICIAL_CURRENT"
     assert unemp_ind["value"] > 0.0
     assert unemp_ind["published_at"] is None, "BLS v1 ne fournissant pas published_at, la valeur doit rester None"
 

@@ -141,5 +141,10 @@ class EurostatProvider(BaseEconomicProvider):
             if not dataset_success:
                 logger.warning(f"🛑 [EurostatProvider] Impossible d'obtenir {indicator_name} depuis Eurostat")
 
+        if not collected_indicators:
+            self.last_status = "ERROR"
+        else:
+            self.last_status = "SUCCESS"
+
         logger.info(f"🇪🇺 [EurostatProvider] {len(collected_indicators)} indicateurs Eurostat récupérés et validés.")
         return collected_indicators

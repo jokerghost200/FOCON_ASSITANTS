@@ -167,19 +167,32 @@ class TradeExecutionEngine:
             )
             return None
         else:
-            # 2. Vérification des alertes, pannes et péremption
+            # 2. Vérification des alertes, pannes et péremption (Fail-Closed strict)
             is_blackout = bool(econ_ctx.get('high_impact_window', False))
             econ_rec = str(econ_ctx.get('recommendation', 'NORMAL')).upper()
             event_risk = str(econ_ctx.get('event_risk', 'LOW')).upper()
             econ_status = str(econ_ctx.get('status', 'OK')).upper()
-            is_stale = bool(
-                econ_status == 'STALE'
-                or econ_ctx.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
-                or econ_ctx.get('is_rate_stale', False)
+            data_freshness = str(econ_ctx.get('data_freshness', 'LOCAL_FALLBACK')).upper()
+            is_rate_stale = bool(econ_ctx.get('is_rate_stale', False))
+            is_rate_unknown = bool(econ_ctx.get('is_rate_unknown', False))
+
+            is_unreliable = bool(
+                econ_status in ('ERROR', 'STALE', 'UNKNOWN')
+                or data_freshness in ('STALE', 'UNKNOWN', 'ERROR', 'STALE_OR_ERROR')
+                or is_rate_stale
+                or is_rate_unknown
             )
 
-            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE') or (self.require_economic_context and is_stale):
-                reason = econ_ctx.get('reason', 'Gel d\'annonce macroéconomique, erreur ou données périmées.')
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE', 'UNKNOWN') or (self.require_economic_context and is_unreliable):
+                if is_blackout:
+                    reason = econ_ctx.get('reason') or f"Gel d'annonce macroéconomique ({symbol})."
+                elif is_rate_unknown or econ_status == 'UNKNOWN' or data_freshness == 'UNKNOWN':
+                    reason = f"Donnée économique critique UNKNOWN ou invalide pour {symbol} (Fail-Closed)."
+                elif is_rate_stale or is_unreliable:
+                    reason = f"Donnée économique critique périmée (STALE) pour {symbol} (Fail-Closed)."
+                else:
+                    reason = econ_ctx.get('reason', 'Risque macroéconomique élevé ou incertain.')
+
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Préparation de l'ordre pour {symbol} BLOQUÉE : {reason}"
                 )
@@ -662,14 +675,27 @@ class TradeExecutionEngine:
             econ_rec = str(req_econ.get('recommendation', '')).upper()
             event_risk = str(req_econ.get('event_risk', '')).upper()
             econ_status = str(req_econ.get('status', '')).upper()
-            is_stale = bool(
-                econ_status == 'STALE'
-                or req_econ.get('data_freshness') in ('STALE', 'STALE_OR_ERROR')
-                or req_econ.get('is_rate_stale', False)
+            data_freshness = str(req_econ.get('data_freshness', '')).upper()
+            is_rate_stale = bool(req_econ.get('is_rate_stale', False))
+            is_rate_unknown = bool(req_econ.get('is_rate_unknown', False))
+
+            is_unreliable = bool(
+                econ_status in ('ERROR', 'STALE', 'UNKNOWN')
+                or data_freshness in ('STALE', 'UNKNOWN', 'ERROR', 'STALE_OR_ERROR')
+                or is_rate_stale
+                or is_rate_unknown
             )
 
-            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE') or (self.require_economic_context and is_stale):
-                reason = req_econ.get('reason', 'Gel macroéconomique, erreur ou données périmées.')
+            if is_blackout or econ_rec == 'NO_TRADE_NEWS' or event_risk in ('CRITICAL', 'HIGH') or econ_status in ('ERROR', 'STALE', 'UNKNOWN') or (self.require_economic_context and is_unreliable):
+                if is_blackout:
+                    reason = req_econ.get('reason') or f"Gel d'annonce macroéconomique ({request.get('symbol')})."
+                elif is_rate_unknown or econ_status == 'UNKNOWN' or data_freshness == 'UNKNOWN':
+                    reason = f"Donnée macroéconomique critique UNKNOWN ou invalide ({request.get('symbol')})."
+                elif is_rate_stale or is_unreliable:
+                    reason = f"Donnée macroéconomique critique périmée (STALE) ({request.get('symbol')})."
+                else:
+                    reason = req_econ.get('reason', 'Gel macroéconomique, erreur ou données périmées.')
+
                 logger.critical(
                     f"🛑 [El Economista - SÉCURITÉ INVIOLABLE] Émission MT5 avortée pour {request.get('symbol')} : {reason}"
                 )

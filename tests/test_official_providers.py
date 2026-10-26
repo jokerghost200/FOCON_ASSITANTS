@@ -29,6 +29,7 @@ from src.economic.providers.ecb_provider import ECBProvider
 from src.economic.providers.eurostat_provider import EurostatProvider
 from src.economic.macro_analyzer import MacroAnalyzer
 from src.cerebros.el_economista import ElEconomista
+from src.trading.trade_execution import TradeExecutionEngine
 
 
 # ── Fixtures ──
@@ -304,3 +305,170 @@ def test_el_economista_news_blackout_cannot_be_bypassed(mem_db):
         assert context["recommendation"] == "NO_TRADE_NEWS"
         assert "GEL ANNONCE ÉCONOMIQUE" in context["reason"]
         assert "official_indicators" in context
+
+
+def test_staleness_and_unknown_edge_cases():
+    """
+    Vérifie les cas critiques de evaluate_staleness et normalize_indicator :
+    - Une période inconnue/corrompue ne doit JAMAIS retourner OFFICIAL_CURRENT (retourne UNKNOWN).
+    - Une date future invalide ne doit pas produire un âge nul accepté (retourne UNKNOWN).
+    - Les périodes mensuelles et trimestrielles calculent un âge exact par rapport à la fin de période.
+    - Une valeur non numérique ou NaN/inf est classée UNKNOWN.
+    """
+    prov = BaseEconomicProvider(name="TEST")
+
+    # 1. Périodes inconnues ou malformées -> UNKNOWN
+    status_bad, age_bad = prov.evaluate_staleness("CPI", "INVALID_FORMAT")
+    assert status_bad == "UNKNOWN"
+    assert age_bad == 999.0
+
+    status_empty, age_empty = prov.evaluate_staleness("CPI", "")
+    assert status_empty == "UNKNOWN"
+    assert age_empty == 999.0
+
+    # 2. Dates futures invalides -> UNKNOWN (sauf taux directeurs imminents <= 7 jours)
+    status_future, age_future = prov.evaluate_staleness("CPI", "2035M01")
+    assert status_future == "UNKNOWN"
+    assert age_future == 999.0
+
+    status_future_rate, age_future_rate = prov.evaluate_staleness("DEPOSIT_FACILITY_RATE", "2035-01-01", effective_date="2035-01-01")
+    assert status_future_rate == "UNKNOWN"
+    assert age_future_rate == 999.0
+
+    # 3. Données anciennes (ex: 2023) -> STALE avec âge élevé
+    status_old, age_old = prov.evaluate_staleness("CPI", "2023M01")
+    assert status_old == "STALE"
+    assert age_old > 365.0
+
+    # 4. Association et calcul précis des âges mensuels et trimestriels
+    from datetime import date
+    today = datetime.now(timezone.utc).date()
+
+    # Mensuel BLS 2026M09 -> fin de mois 2026-09-30
+    st_m9, age_m9 = prov.evaluate_staleness("CPI", "2026M09")
+    expected_m9_age = float((today - date(2026, 9, 30)).days)
+    assert age_m9 == expected_m9_age
+
+    # Trimestriel Eurostat 2026-Q2 -> fin de trimestre 2026-06-30
+    st_q2, age_q2 = prov.evaluate_staleness("GDP_GROWTH_YOY", "2026-Q2")
+    expected_q2_age = float((today - date(2026, 6, 30)).days)
+    assert age_q2 == expected_q2_age
+    assert age_q2 > 0.0  # Ne doit plus jamais valoir 0.0 artificiellement !
+
+    # 5. Valeurs non numériques ou NaN dans normalize_indicator -> UNKNOWN
+    ind_nan = prov.normalize_indicator(
+        indicator="CPI",
+        currency_or_region="USD",
+        value=float("nan"),
+        unit="PERCENT",
+        reference_period="2026M09",
+        source_url="http://fake",
+    )
+    assert ind_nan["status"] == "UNKNOWN"
+    assert ind_nan["age_days"] == 999.0
+
+
+def test_trade_execution_engine_blocks_unknown_and_stale():
+    """
+    Vérifie que TradeExecutionEngine en mode automatique/semi-automatique bloque
+    rigoureusement les ordres si les données économiques critiques sont UNKNOWN ou STALE,
+    aussi bien au niveau de prepare_order_request() que de execute_order() avant mt5.order_send().
+    """
+    mock_mt5 = MagicMock()
+    mock_mt5.get_open_positions.return_value = []
+    mock_mt5.get_daily_profit.return_value = 0.0
+    mock_mt5.account_info.return_value = MagicMock(balance=10000.0, equity=10000.0)
+
+    mock_centinela = MagicMock()
+    mock_centinela.evaluar_seguridad.return_value = {"safe": True, "reason": "OK"}
+    mock_centinela.parada_emergencia_activa = False
+
+    engine = TradeExecutionEngine(mode="automatic", mt5_connector=mock_mt5, centinela=mock_centinela)
+
+    base_signal = {
+        "symbol": "EURUSD",
+        "decision": {
+            "action": "BUY",
+            "confidence": 0.85,
+            "lot": 0.1,
+            "stop_loss_pips": 20.0,
+            "take_profit_pips": 40.0,
+        },
+    }
+
+    # Cas 1 : Contexte économique avec status = UNKNOWN -> Rejet
+    sig_unknown = dict(base_signal)
+    sig_unknown["economic_context"] = {
+        "status": "UNKNOWN",
+        "data_freshness": "UNKNOWN",
+        "reason": "Donnée macroéconomique critique impossible à vérifier",
+    }
+    order_req = engine.prepare_order_request(sig_unknown)
+    assert order_req is None, "L'ordre aurait dû être rejeté pour contexte UNKNOWN"
+
+    # Cas 2 : Contexte économique avec data_freshness = STALE et is_rate_stale = True -> Rejet
+    sig_stale = dict(base_signal)
+    sig_stale["economic_context"] = {
+        "status": "OK",
+        "data_freshness": "STALE",
+        "is_rate_stale": True,
+        "reason": "Taux directeur non vérifié depuis > 90 jours",
+    }
+    order_req_stale = engine.prepare_order_request(sig_stale)
+    assert order_req_stale is None, "L'ordre aurait dû être rejeté pour données périmées (STALE)"
+
+    # Cas 3 : Tentative d'appel direct à execute_order avec métadonnées UNKNOWN -> Rejet avant mt5.order_send
+    direct_req = {
+        "action": 1,
+        "symbol": "EURUSD",
+        "volume": 0.1,
+        "type": 0,
+        "price": 1.1000,
+        "sl": 1.0980,
+        "tp": 1.1040,
+        "_economic_context": {
+            "status": "UNKNOWN",
+            "data_freshness": "UNKNOWN",
+            "reason": "Taux directeurs suspects ou invalides",
+        },
+    }
+    res = engine.execute_order(direct_req)
+    assert res is not None
+    assert res["success"] is False
+    assert "Sécurité macroéconomique non satisfaite" in res["reason"] or "UNKNOWN" in res["reason"]
+    # Vérification absolue que mt5.order_send n'a JAMAIS été appelé
+    mock_mt5.order_send.assert_not_called()
+
+
+def test_failed_request_preserves_stale_status_without_rejuvenation(mem_db):
+    """
+    Vérifie qu'une panne réseau ou une réponse vide ne remplace jamais une ancienne date
+    par la date courante (pas de rajeunissement artificiel en cas d'erreur).
+    """
+    # Donnée historique enregistrée en 2024
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "UNEMPLOYMENT",
+        "currency_or_region": "USD",
+        "value": 3.7,
+        "reference_period": "2024M01",
+        "published_at": "2024-02-02T13:30:00+00:00",
+        "retrieved_at": "2024-02-02T14:00:00+00:00",
+        "status": "STALE",
+    })
+
+    bls = BLSProvider(memory=mem_db, timeout_seconds=0.1)
+
+    # Simulation d'une panne réseau HTTP (ex: 500 ou timeout)
+    with patch.object(bls, "_http_request", return_value=None):
+        inds = bls.fetch_latest_indicators()
+        assert len(inds) == 0
+        assert bls.last_status == "ERROR"
+
+    # Vérification dans la base : la donnée de 2024 est toujours là avec sa date intacte
+    stored = mem_db.get_latest_official_indicator("UNEMPLOYMENT", "USD")
+    assert stored is not None
+    assert stored["reference_period"] == "2024M01"
+    assert stored["retrieved_at"] == "2024-02-02T14:00:00+00:00"
+    assert stored["status"] == "STALE"
+

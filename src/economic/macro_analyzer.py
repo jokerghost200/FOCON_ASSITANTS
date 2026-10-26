@@ -230,6 +230,7 @@ class MacroAnalyzer:
 
         # Calcul de la fraîcheur (staleness) pour les banques centrales souveraines
         is_stale = False
+        is_unknown = False
         age_days = 0.0
         try:
             verified_time = datetime.fromisoformat(str(info["last_verified_at"]).replace("Z", "+00:00"))
@@ -238,17 +239,23 @@ class MacroAnalyzer:
                 is_stale = True
         except Exception:
             is_stale = True
+            is_unknown = True
+
+        status = "UNKNOWN" if is_unknown else ("STALE" if is_stale else "OFFICIAL_CURRENT")
+        freshness = "UNKNOWN" if is_unknown else ("STALE" if is_stale else "FRESH")
 
         info["is_stale"] = is_stale
+        info["is_unknown"] = is_unknown
         info["age_days"] = round(age_days, 1)
-        info["freshness"] = "STALE" if is_stale else "FRESH"
+        info["status"] = status
+        info["freshness"] = freshness
         info["is_sovereign"] = True
         return info
 
     def calculate_interest_differential(self, symbol: str) -> Dict[str, Any]:
         """
         Calcule le différentiel de taux d'intérêt (Carry Trade) pour une paire.
-        Neutralise le biais si l'une des devises repose sur des données périmées.
+        Neutralise le biais si l'une des devises repose sur des données périmées ou inconnues.
         """
         sym = symbol.upper()
         if len(sym) >= 6:
@@ -264,12 +271,15 @@ class MacroAnalyzer:
         rate_quote = float(quote_info.get("rate", 0.0))
         diff = round(rate_base - rate_quote, 2)
 
-        # ── Contrôle de Fraîcheur des Données ──
-        if base_info.get("is_stale") or quote_info.get("is_stale"):
-            stale_curr = base if base_info.get("is_stale") else quote
+        # ── Contrôle de Fraîcheur et Validité des Données (Fail-Closed) ──
+        is_unknown = bool(base_info.get("is_unknown") or quote_info.get("is_unknown") or base_info.get("status") == "UNKNOWN" or quote_info.get("status") == "UNKNOWN")
+        is_stale = bool(base_info.get("is_stale") or quote_info.get("is_stale") or is_unknown)
+
+        if is_unknown or is_stale:
+            stale_curr = base if (base_info.get("is_stale") or base_info.get("is_unknown")) else quote
+            problem_type = "inconnu/invalide" if is_unknown else f"périmé (non vérifié depuis > {self.max_age_days} jours)"
             logger.warning(
-                f"⚠️ [Carry Trade] Taux {stale_curr} périmé (non vérifié depuis > {self.max_age_days}j). "
-                f"Biais de taux neutralisé par précaution."
+                f"⚠️ [Carry Trade] Taux {stale_curr} {problem_type}. Biais de taux neutralisé par précaution."
             )
             return {
                 "symbol": sym,
@@ -280,10 +290,12 @@ class MacroAnalyzer:
                 "differential": diff,
                 "carry_bias": "NEUTRAL",
                 "is_stale": True,
-                "freshness": "STALE",
+                "is_unknown": is_unknown,
+                "status": "UNKNOWN" if is_unknown else "STALE",
+                "freshness": "UNKNOWN" if is_unknown else "STALE",
                 "reason": (
-                    f"Taux directeurs {base} ou {quote} non vérifiés récemment "
-                    f"({stale_curr} périmé > {self.max_age_days} jours). Biais Carry Trade neutralisé par prudence."
+                    f"Taux directeurs {base} ou {quote} non fiables "
+                    f"({stale_curr} {problem_type}). Biais Carry Trade neutralisé par prudence."
                 ),
             }
 

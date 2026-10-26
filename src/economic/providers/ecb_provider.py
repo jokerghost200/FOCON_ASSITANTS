@@ -141,5 +141,10 @@ class ECBProvider(BaseEconomicProvider):
                 collected_indicators.append(ind)
                 self.memory.store_official_indicator(ind)
 
+        if not collected_indicators:
+            self.last_status = "ERROR"
+        else:
+            self.last_status = "SUCCESS"
+
         logger.info(f"🏦 [ECBProvider] {len(collected_indicators)} indicateurs BCE récupérés et validés.")
         return collected_indicators

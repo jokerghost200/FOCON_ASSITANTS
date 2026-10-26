@@ -89,6 +89,7 @@ class BLSProvider(BaseEconomicProvider):
 
         data = self._safe_json_loads(raw_bytes)
         if not data or data.get("status") != "REQUEST_SUCCEEDED":
+            self.last_status = "ERROR"
             msg = data.get("message") if data else "Aucune réponse reçue"
             logger.warning(f"🛑 [BLSProvider] Échec récupération BLS: {msg}")
             return []
