@@ -9,6 +9,7 @@ Stocke, indexe et interroge l'historique macroéconomique de FOCON ASSISTANT :
 - Réactions empiriques des prix après publication d'annonces
 Totalement local, autonome et sans aucun coût d'abonnement.
 """
+from __future__ import annotations
 
 import os
 import sqlite3
@@ -127,6 +128,29 @@ class EconomicMemory:
                     created_at TEXT NOT NULL
                 )
             """)
+
+            # 5. Indicateurs statistiques et macroéconomiques officiels (BLS, BCE, Eurostat, Fed, BoE)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS official_indicators (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,                -- 'BLS', 'ECB', 'EUROSTAT', 'FED', 'BOE'
+                    indicator TEXT NOT NULL,             -- 'CPI', 'UNEMPLOYMENT', 'PAYROLLS', 'DEPOSIT_FACILITY_RATE', 'HICP'
+                    currency_or_region TEXT NOT NULL,    -- 'USD', 'EUR', 'GBP'
+                    value REAL NOT NULL,
+                    unit TEXT,                           -- 'PERCENT', 'THOUSANDS', 'INDEX_POINTS'
+                    reference_period TEXT,               -- '2025M12', '2025Q4', '2026-01'
+                    published_at TEXT,                   -- Horodatage de publication officiel (ISO UTC)
+                    retrieved_at TEXT NOT NULL,          -- Horodatage de collecte (ISO UTC)
+                    status TEXT NOT NULL,                -- 'OFFICIAL_CURRENT', 'OFFICIAL_HISTORICAL', 'REVISED', 'STALE'
+                    is_official INTEGER DEFAULT 1,
+                    revision TEXT,                       -- 'INITIAL', 'REVISED', 'FINAL'
+                    source_url TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_source ON official_indicators(source, indicator)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_curr ON official_indicators(currency_or_region, indicator)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_retrieved ON official_indicators(retrieved_at)")
             conn.commit()
 
     # ── Gestion des Événements du Calendrier ──
@@ -368,3 +392,123 @@ class EconomicMemory:
         except Exception as e:
             logger.error(f"Erreur EconomicMemory.get_latest_macro_snapshot: {e}")
             return None
+
+    # ── Gestion des Indicateurs Économiques Officiels (BLS, BCE, Eurostat...) ──
+
+    def store_official_indicator(self, data: Dict[str, Any]) -> bool:
+        """
+        Enregistre ou met à jour un indicateur macroéconomique officiel.
+        Gère les doublons par clé primaire déterministe (source_indicator_region_period).
+        """
+        now_str = datetime.now(timezone.utc).isoformat()
+        source = str(data.get("source") or "UNKNOWN").upper().strip()
+        indicator = str(data.get("indicator") or "UNKNOWN").upper().strip()
+        region = str(data.get("currency_or_region") or data.get("currency") or "GLOBAL").upper().strip()
+        period = str(data.get("reference_period") or "LATEST").strip()
+
+        ind_id = str(data.get("id") or f"{source}_{indicator}_{region}_{period}")
+
+        value = float(data.get("value", 0.0))
+        unit = str(data.get("unit") or "")
+        published_at = data.get("published_at")
+        retrieved_at = str(data.get("retrieved_at") or now_str)
+        status = str(data.get("status") or "OFFICIAL_CURRENT").upper()
+        is_official = 1 if data.get("is_official", True) else 0
+        revision = str(data.get("revision") or "INITIAL").upper()
+        source_url = str(data.get("source_url") or "")
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO official_indicators (
+                        id, source, indicator, currency_or_region, value, unit,
+                        reference_period, published_at, retrieved_at, status,
+                        is_official, revision, source_url, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        value = excluded.value,
+                        unit = excluded.unit,
+                        reference_period = excluded.reference_period,
+                        published_at = excluded.published_at,
+                        retrieved_at = excluded.retrieved_at,
+                        status = excluded.status,
+                        is_official = excluded.is_official,
+                        revision = excluded.revision,
+                        source_url = excluded.source_url
+                """, (
+                    ind_id, source, indicator, region, value, unit,
+                    period, published_at, retrieved_at, status,
+                    is_official, revision, source_url, now_str,
+                ))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Erreur EconomicMemory.store_official_indicator: {e}")
+            return False
+
+    def get_latest_official_indicator(
+        self,
+        indicator: str,
+        currency_or_region: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Récupère la valeur officielle la plus récente pour un indicateur donné.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                query = "SELECT * FROM official_indicators WHERE UPPER(indicator) = ?"
+                params: List[Any] = [indicator.upper()]
+
+                if currency_or_region:
+                    query += " AND UPPER(currency_or_region) = ?"
+                    params.append(currency_or_region.upper())
+
+                if source:
+                    query += " AND UPPER(source) = ?"
+                    params.append(source.upper())
+
+                query += " ORDER BY published_at DESC, retrieved_at DESC LIMIT 1"
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Erreur EconomicMemory.get_latest_official_indicator: {e}")
+            return None
+
+    def get_official_indicators(
+        self,
+        currency_or_region: Optional[str] = None,
+        indicator: Optional[str] = None,
+        max_age_days: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Liste les indicateurs officiels filtrés par région, indicateur ou fraîcheur maximale.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                query = "SELECT * FROM official_indicators WHERE 1=1"
+                params: List[Any] = []
+
+                if currency_or_region:
+                    query += " AND UPPER(currency_or_region) = ?"
+                    params.append(currency_or_region.upper())
+
+                if indicator:
+                    query += " AND UPPER(indicator) = ?"
+                    params.append(indicator.upper())
+
+                if max_age_days is not None:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+                    query += " AND (published_at >= ? OR (published_at IS NULL AND retrieved_at >= ?))"
+                    params.extend([cutoff, cutoff])
+
+                query += " ORDER BY published_at DESC, retrieved_at DESC"
+                cursor.execute(query, params)
+                return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Erreur EconomicMemory.get_official_indicators: {e}")
+            return []

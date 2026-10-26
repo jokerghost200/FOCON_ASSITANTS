@@ -17,6 +17,7 @@ SÉCURITÉ ET TRAÇABILITÉ DES DONNÉES :
 - Si un taux dépasse le délai maximal de fraîcheur (TTL 90 jours sans confirmation),
   il est explicitement marqué STALE / PÉRIMÉ et le biais Carry Trade est neutralisé.
 """
+from __future__ import annotations
 
 import logging
 from typing import Dict, Any, Optional
@@ -190,6 +191,27 @@ class MacroAnalyzer:
             info["stance"] = str(mem_snap.get("monetary_stance", info["stance"]))
             if "updated_at" in mem_snap and mem_snap["updated_at"]:
                 info["last_verified_at"] = mem_snap["updated_at"]
+
+        # Consultation prioritaire des données officielles réelles en base (BCE SDMX, BLS)
+        if hasattr(self.memory, "get_latest_official_indicator"):
+            if curr == "EUR":
+                off_rate = self.memory.get_latest_official_indicator("DEPOSIT_FACILITY_RATE", "EUR")
+                if off_rate:
+                    info["rate"] = float(off_rate["value"])
+                    info["last_verified_at"] = off_rate.get("retrieved_at") or off_rate.get("published_at") or now_str
+                    info["source"] = f"BCE SDMX ({off_rate.get('source', 'ECB')})"
+                off_inf = self.memory.get_latest_official_indicator("HICP_INFLATION", "EUR")
+                if off_inf:
+                    info["inflation"] = float(off_inf["value"])
+            elif curr == "USD":
+                off_cpi = self.memory.get_latest_official_indicator("CPI_YOY", "USD")
+                if off_cpi:
+                    info["inflation"] = float(off_cpi["value"])
+                    info["last_verified_at"] = off_cpi.get("retrieved_at") or off_cpi.get("published_at") or now_str
+                    info["source"] = f"BLS Official ({off_cpi.get('source', 'BLS')})"
+                off_fed = self.memory.get_latest_official_indicator("FED_FUNDS_RATE", "USD")
+                if off_fed:
+                    info["rate"] = float(off_fed["value"])
 
         # Calcul de la fraîcheur (staleness) pour les banques centrales souveraines
         is_stale = False

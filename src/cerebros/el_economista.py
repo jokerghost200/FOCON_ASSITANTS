@@ -15,9 +15,10 @@ Composants fédérés :
 - EventImpactEngine : Écart aux prévisions et surprise économique
 - EconomicMemory : Mémoire locale SQLite des événements et des réactions de marché
 """
+from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from src.economic.economic_memory import EconomicMemory
 from src.economic.calendar_provider import CalendarProvider
@@ -25,6 +26,9 @@ from src.economic.news_collector import NewsCollector
 from src.economic.currency_strength import CurrencyStrengthEngine
 from src.economic.macro_analyzer import MacroAnalyzer
 from src.economic.event_impact import EventImpactEngine
+from src.economic.providers.bls_provider import BLSProvider
+from src.economic.providers.ecb_provider import ECBProvider
+from src.economic.providers.eurostat_provider import EurostatProvider
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,9 @@ class ElEconomista:
         currency_strength: Optional[CurrencyStrengthEngine] = None,
         macro: Optional[MacroAnalyzer] = None,
         event_impact: Optional[EventImpactEngine] = None,
+        bls_provider: Optional[BLSProvider] = None,
+        ecb_provider: Optional[ECBProvider] = None,
+        eurostat_provider: Optional[EurostatProvider] = None,
         mt5_connector=None,
     ):
         self.memory = memory or EconomicMemory()
@@ -51,6 +58,9 @@ class ElEconomista:
         self.currency_strength = currency_strength or CurrencyStrengthEngine(mt5_connector=mt5_connector)
         self.macro = macro or MacroAnalyzer(memory=self.memory)
         self.event_impact = event_impact or EventImpactEngine()
+        self.bls = bls_provider or BLSProvider(memory=self.memory)
+        self.ecb = ecb_provider or ECBProvider(memory=self.memory)
+        self.eurostat = eurostat_provider or EurostatProvider(memory=self.memory)
 
         # Initialisation du calendrier en arrière-plan
         try:
@@ -175,6 +185,10 @@ class ElEconomista:
                 },
                 "interest_rate_differential": macro_diff.get("differential", 0.0),
                 "is_rate_stale": not macro_fresh,
+                "official_indicators": {
+                    "count": len(self.memory.get_official_indicators(currency_or_region=curr)),
+                    "latest": self.memory.get_official_indicators(currency_or_region=curr, max_age_days=90.0)[:3],
+                },
                 "news_sentiment": sentiment_info.get("sentiment_label", "NEUTRAL"),
                 "reason": final_reason,
                 "recommendation": recommendation,
@@ -202,16 +216,55 @@ class ElEconomista:
         res = self.calendar.is_in_news_blackout(symbol=symbol, window_minutes=window_minutes, min_impact="HIGH")
         return bool(res.get("in_blackout", False))
 
-    def actualizar_datos_economicos(self) -> Dict[str, Any]:
+    def actualizar_indicadores_oficiales(self) -> Dict[str, Any]:
         """
-        Met à jour l'ensemble des flux économiques (Calendrier + Flux RSS).
-        Peut être exécuté périodiquement par le LearningScheduler.
+        Interroge les connecteurs officiels ouverts (BLS, BCE, Eurostat)
+        et stocke les dernières séries dans la mémoire SQLite locale.
+        """
+        logger.info("🏛️ [El Economista] Collecte des indicateurs officiels (BLS, BCE, Eurostat)...")
+        bls_inds = []
+        ecb_inds = []
+        eurostat_inds = []
+
+        try:
+            bls_inds = self.bls.fetch_latest_indicators()
+        except Exception as e:
+            logger.warning(f"Échec collecte BLS: {e}")
+
+        try:
+            ecb_inds = self.ecb.fetch_latest_indicators()
+        except Exception as e:
+            logger.warning(f"Échec collecte BCE: {e}")
+
+        try:
+            eurostat_inds = self.eurostat.fetch_latest_indicators()
+        except Exception as e:
+            logger.warning(f"Échec collecte Eurostat: {e}")
+
+        total = len(bls_inds) + len(ecb_inds) + len(eurostat_inds)
+        return {
+            "bls_count": len(bls_inds),
+            "ecb_count": len(ecb_inds),
+            "eurostat_count": len(eurostat_inds),
+            "total_indicators": total,
+            "status": "SUCCESS" if total > 0 else "PARTIAL_OR_UNAVAILABLE",
+        }
+
+    def actualizar_datos_economicos(self, fetch_official: bool = True) -> Dict[str, Any]:
+        """
+        Met à jour l'ensemble des flux économiques (Calendrier + Flux RSS + Indicateurs officiels).
+        Peut être exécuté périodiquement par le LearningScheduler en arrière-plan.
         """
         logger.info("📡 [El Economista] Rafraîchissement des flux économiques gratuits...")
         events = self.calendar.fetch_public_calendar()
         articles = self.news.collect_from_rss_feeds()
+        official_summary = {}
+        if fetch_official:
+            official_summary = self.actualizar_indicadores_oficiales()
+
         return {
             "events_loaded": len(events),
             "news_articles_loaded": len(articles),
+            "official_indicators": official_summary,
             "status": "UPDATED",
         }

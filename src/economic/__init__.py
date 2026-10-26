@@ -17,6 +17,9 @@ from src.economic.news_collector import NewsCollector
 from src.economic.currency_strength import CurrencyStrengthEngine
 from src.economic.macro_analyzer import MacroAnalyzer
 from src.economic.event_impact import EventImpactEngine
+from src.economic.providers.bls_provider import BLSProvider
+from src.economic.providers.ecb_provider import ECBProvider
+from src.economic.providers.eurostat_provider import EurostatProvider
 
 __all__ = [
     "EconomicMemory",
@@ -25,4 +28,7 @@ __all__ = [
     "CurrencyStrengthEngine",
     "MacroAnalyzer",
     "EventImpactEngine",
+    "BLSProvider",
+    "ECBProvider",
+    "EurostatProvider",
 ]
