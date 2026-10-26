@@ -69,7 +69,8 @@ class BLSProvider(BaseEconomicProvider):
         """
         now = datetime.now(timezone.utc)
         cur_year = end_year or now.year
-        st_year = start_year or (cur_year - 1)
+        # Récupère l'année courante et les 2 années précédentes pour couvrir au minimum 24 mois
+        st_year = start_year or (cur_year - 2)
 
         payload = {
             "seriesid": list(SERIES_METADATA.keys()),
@@ -130,7 +131,7 @@ class BLSProvider(BaseEconomicProvider):
                 unit=meta["unit"],
                 reference_period=ref_period,
                 source_url="https://api.bls.gov/publicAPI/v1/timeseries/data/",
-                status="OFFICIAL_CURRENT",
+                published_at=None,
                 is_official=True,
                 revision="INITIAL",
             )
@@ -153,7 +154,7 @@ class BLSProvider(BaseEconomicProvider):
                             unit="PERCENT",
                             reference_period=ref_period,
                             source_url="https://api.bls.gov/publicAPI/v1/timeseries/data/",
-                            status="OFFICIAL_CURRENT",
+                            published_at=None,
                             is_official=True,
                             revision="INITIAL",
                         )

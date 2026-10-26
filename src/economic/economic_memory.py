@@ -139,6 +139,7 @@ class EconomicMemory:
                     value REAL NOT NULL,
                     unit TEXT,                           -- 'PERCENT', 'THOUSANDS', 'INDEX_POINTS'
                     reference_period TEXT,               -- '2025M12', '2025Q4', '2026-01'
+                    effective_date TEXT,                 -- Date d'effet officiel du taux (ISO UTC)
                     published_at TEXT,                   -- Horodatage de publication officiel (ISO UTC)
                     retrieved_at TEXT NOT NULL,          -- Horodatage de collecte (ISO UTC)
                     status TEXT NOT NULL,                -- 'OFFICIAL_CURRENT', 'OFFICIAL_HISTORICAL', 'REVISED', 'STALE'
@@ -151,6 +152,12 @@ class EconomicMemory:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_source ON official_indicators(source, indicator)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_curr ON official_indicators(currency_or_region, indicator)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_retrieved ON official_indicators(retrieved_at)")
+
+            try:
+                cursor.execute("ALTER TABLE official_indicators ADD COLUMN effective_date TEXT")
+            except Exception:
+                pass
+
             conn.commit()
 
     # ── Gestion des Événements du Calendrier ──
@@ -410,6 +417,7 @@ class EconomicMemory:
 
         value = float(data.get("value", 0.0))
         unit = str(data.get("unit") or "")
+        effective_date = data.get("effective_date")
         published_at = data.get("published_at")
         retrieved_at = str(data.get("retrieved_at") or now_str)
         status = str(data.get("status") or "OFFICIAL_CURRENT").upper()
@@ -423,13 +431,14 @@ class EconomicMemory:
                 cursor.execute("""
                     INSERT INTO official_indicators (
                         id, source, indicator, currency_or_region, value, unit,
-                        reference_period, published_at, retrieved_at, status,
+                        reference_period, effective_date, published_at, retrieved_at, status,
                         is_official, revision, source_url, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         value = excluded.value,
                         unit = excluded.unit,
                         reference_period = excluded.reference_period,
+                        effective_date = excluded.effective_date,
                         published_at = excluded.published_at,
                         retrieved_at = excluded.retrieved_at,
                         status = excluded.status,
@@ -438,7 +447,7 @@ class EconomicMemory:
                         source_url = excluded.source_url
                 """, (
                     ind_id, source, indicator, region, value, unit,
-                    period, published_at, retrieved_at, status,
+                    period, effective_date, published_at, retrieved_at, status,
                     is_official, revision, source_url, now_str,
                 ))
                 conn.commit()
@@ -470,7 +479,7 @@ class EconomicMemory:
                     query += " AND UPPER(source) = ?"
                     params.append(source.upper())
 
-                query += " ORDER BY published_at DESC, retrieved_at DESC LIMIT 1"
+                query += " ORDER BY COALESCE(effective_date, published_at, reference_period) DESC, retrieved_at DESC LIMIT 1"
                 cursor.execute(query, params)
                 row = cursor.fetchone()
                 return dict(row) if row else None
@@ -503,10 +512,10 @@ class EconomicMemory:
 
                 if max_age_days is not None:
                     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-                    query += " AND (published_at >= ? OR (published_at IS NULL AND retrieved_at >= ?))"
-                    params.extend([cutoff, cutoff])
+                    query += " AND (published_at >= ? OR effective_date >= ? OR (published_at IS NULL AND effective_date IS NULL AND retrieved_at >= ?))"
+                    params.extend([cutoff, cutoff, cutoff])
 
-                query += " ORDER BY published_at DESC, retrieved_at DESC"
+                query += " ORDER BY COALESCE(effective_date, published_at, reference_period) DESC, retrieved_at DESC"
                 cursor.execute(query, params)
                 return [dict(r) for r in cursor.fetchall()]
         except Exception as e:

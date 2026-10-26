@@ -200,11 +200,13 @@ class MacroAnalyzer:
                 off_rate = self.memory.get_latest_official_indicator("DEPOSIT_FACILITY_RATE", "EUR")
                 if off_rate:
                     info["rate"] = float(off_rate["value"])
-                    # Utilise published_at ou reference_period officiel, jamais retrieved_at pour l'âge du taux
-                    official_pub = off_rate.get("published_at") or off_rate.get("reference_period")
-                    if official_pub and len(str(official_pub)) == 10 and "T" not in str(official_pub):
-                        official_pub = f"{official_pub}T00:00:00+00:00"
-                    info["last_verified_at"] = official_pub or info.get("last_verified_at")
+                    # Utilise effective_date en priorité absolue pour le taux, sinon published_at, sinon reference_period
+                    official_date = off_rate.get("effective_date") or off_rate.get("published_at") or off_rate.get("reference_period")
+                    if official_date and len(str(official_date)) == 10 and "T" not in str(official_date):
+                        official_date = f"{official_date}T00:00:00+00:00"
+                    info["last_verified_at"] = official_date or info.get("last_verified_at")
+                    info["effective_date"] = off_rate.get("effective_date")
+                    info["published_at"] = off_rate.get("published_at")
                     info["last_retrieved_at"] = off_rate.get("retrieved_at")
                     info["source"] = f"BCE SDMX ({off_rate.get('source', 'ECB')})"
                 off_inf = self.memory.get_latest_official_indicator("HICP_INFLATION", "EUR")
@@ -217,10 +219,12 @@ class MacroAnalyzer:
                 off_fed = self.memory.get_latest_official_indicator("FED_FUNDS_RATE", "USD")
                 if off_fed:
                     info["rate"] = float(off_fed["value"])
-                    official_pub = off_fed.get("published_at") or off_fed.get("reference_period")
-                    if official_pub and len(str(official_pub)) == 10 and "T" not in str(official_pub):
-                        official_pub = f"{official_pub}T00:00:00+00:00"
-                    info["last_verified_at"] = official_pub or info.get("last_verified_at")
+                    official_date = off_fed.get("effective_date") or off_fed.get("published_at") or off_fed.get("reference_period")
+                    if official_date and len(str(official_date)) == 10 and "T" not in str(official_date):
+                        official_date = f"{official_date}T00:00:00+00:00"
+                    info["last_verified_at"] = official_date or info.get("last_verified_at")
+                    info["effective_date"] = off_fed.get("effective_date")
+                    info["published_at"] = off_fed.get("published_at")
                     info["last_retrieved_at"] = off_fed.get("retrieved_at")
                     info["source"] = f"Federal Reserve ({off_fed.get('source', 'FED')})"
 

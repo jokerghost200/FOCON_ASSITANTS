@@ -109,6 +109,94 @@ class BaseEconomicProvider:
             logger.warning(f"[{self.name}] Payload JSON corrompu ou invalide: {e}")
             return None
 
+    def evaluate_staleness(
+        self,
+        indicator: str,
+        reference_period: str,
+        effective_date: Optional[str] = None,
+        published_at: Optional[str] = None,
+    ) -> tuple[str, float]:
+        """
+        Évalue objectivement la fraîcheur économique réelle selon la fréquence propre à l'indicateur.
+        Distingue une collecte HTTP récente d'une statistique économique ancienne ou en retard.
+        Retourne (status, age_days) où status vaut 'OFFICIAL_CURRENT' ou 'STALE'.
+        """
+        from datetime import date
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        ind_upper = indicator.upper()
+
+        ref_date: Optional[date] = None
+
+        # 1. Priorité à la date d'effet explicite (ex: taux directeurs de banque centrale)
+        if effective_date:
+            try:
+                ref_date = date.fromisoformat(str(effective_date)[:10])
+            except Exception:
+                pass
+
+        # 2. Date de publication officielle si disponible
+        if not ref_date and published_at:
+            try:
+                ref_date = date.fromisoformat(str(published_at)[:10])
+            except Exception:
+                pass
+
+        # 3. Parsing de la période de référence
+        if not ref_date and reference_period:
+            per = str(reference_period).strip().upper()
+            try:
+                # Format ISO YYYY-MM-DD
+                if len(per) == 10 and per[4] == "-" and per[7] == "-":
+                    ref_date = date.fromisoformat(per)
+                # Format mensuel BLS YYYYM09 ou YYYY-M09
+                elif "M" in per:
+                    parts = per.replace("-", "").split("M")
+                    y = int(parts[0])
+                    m = int(parts[1])
+                    # Dernier jour du mois approximé (28 pour fév, 30/31 pour les autres)
+                    day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
+                    ref_date = date(y, m, day)
+                # Format mensuel ISO YYYY-MM
+                elif len(per) == 7 and per[4] == "-":
+                    y = int(per[:4])
+                    m = int(per[5:7])
+                    day = 28 if m == 2 else (30 if m in (4, 6, 9, 11) else 31)
+                    ref_date = date(y, m, day)
+                # Format trimestriel YYYYQ1 ou YYYY-Q1
+                elif "Q" in per:
+                    parts = per.replace("-", "").split("Q")
+                    y = int(parts[0])
+                    q = int(parts[1])
+                    q_end_month = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+                    m, day = q_end_month.get(q, (12, 31))
+                    ref_date = date(y, m, day)
+                # Format annuel YYYY
+                elif len(per) == 4 and per.isdigit():
+                    ref_date = date(int(per), 12, 31)
+            except Exception:
+                ref_date = None
+
+        if not ref_date:
+            # Période indéterminée : conservation du statut sans garantie
+            return "OFFICIAL_CURRENT", 0.0
+
+        age_days = max(0.0, float((today - ref_date).days))
+
+        # Cadences de publication économiques standards :
+        # - Taux directeurs : réévaluation toutes les 6-8 semaines (stale si > 90 jours sans décision)
+        # - Statistiques mensuelles (CPI, Chômage, NFP, HICP) : délai usuel 2-5 semaines (stale si > 75 jours)
+        # - Statistiques trimestrielles (PIB) : délai usuel 6-8 semaines (stale si > 150 jours)
+        if any(k in ind_upper for k in ("RATE", "DFR", "MRO", "MLFR", "FED_FUNDS")):
+            max_allowed = 90.0
+        elif any(k in ind_upper for k in ("GDP", "PIB", "GROWTH")):
+            max_allowed = 150.0
+        else:
+            max_allowed = 75.0
+
+        status = "OFFICIAL_CURRENT" if age_days <= max_allowed else "STALE"
+        return status, age_days
+
     def normalize_indicator(
         self,
         indicator: str,
@@ -118,15 +206,28 @@ class BaseEconomicProvider:
         reference_period: str,
         source_url: str,
         published_at: Optional[str] = None,
-        status: str = "OFFICIAL_CURRENT",
+        effective_date: Optional[str] = None,
+        status: Optional[str] = None,
         is_official: bool = True,
         revision: str = "INITIAL",
     ) -> Dict[str, Any]:
-        """Format standard d'un indicateur macroéconomique officiel."""
+        """
+        Format standard d'un indicateur macroéconomique officiel.
+        Évalue automatiquement le statut (OFFICIAL_CURRENT vs STALE) selon l'âge réel de la donnée.
+        """
         now_str = datetime.now(timezone.utc).isoformat()
         ind_clean = indicator.upper().strip()
         reg_clean = currency_or_region.upper().strip()
         per_clean = str(reference_period).strip()
+
+        # Évaluation dynamique de la fraîcheur si le statut n'est pas forcé (ex: HISTORICAL)
+        calc_status, age_days = self.evaluate_staleness(
+            indicator=ind_clean,
+            reference_period=per_clean,
+            effective_date=effective_date,
+            published_at=published_at,
+        )
+        final_status = status or calc_status
 
         return {
             "id": f"{self.name.upper()}_{ind_clean}_{reg_clean}_{per_clean}",
@@ -136,9 +237,11 @@ class BaseEconomicProvider:
             "value": float(value),
             "unit": unit,
             "reference_period": per_clean,
+            "effective_date": effective_date,
             "published_at": published_at,
             "retrieved_at": now_str,
-            "status": status,
+            "age_days": age_days,
+            "status": final_status,
             "is_official": is_official,
             "revision": revision,
             "source_url": source_url,

@@ -120,8 +120,11 @@ class ECBProvider(BaseEconomicProvider):
 
                 ref_period = time_labels[latest_idx] if latest_idx < len(time_labels) else "LATEST"
 
-                # Date de publication estimée ou effective
-                published_iso = f"{ref_period}T00:00:00+00:00" if len(ref_period) == 10 else None
+                # Pour les taux directeurs, ref_period correspond à la date d'effet (effective_date).
+                # La date de publication réelle n'est pas fournie dans le flux FM ; on conserve None
+                # pour ne jamais fabriquer une fausse date de publication.
+                is_policy_rate = any(k in cfg["indicator"] for k in ("RATE", "DFR", "MRO", "MLFR"))
+                effective_iso = f"{ref_period}T00:00:00+00:00" if (is_policy_rate and len(ref_period) == 10) else (ref_period if is_policy_rate else None)
 
                 ind = self.normalize_indicator(
                     indicator=cfg["indicator"],
@@ -129,9 +132,9 @@ class ECBProvider(BaseEconomicProvider):
                     value=val_float,
                     unit=cfg["unit"],
                     reference_period=ref_period,
+                    effective_date=effective_iso,
+                    published_at=None,
                     source_url=url,
-                    published_at=published_iso,
-                    status="OFFICIAL_CURRENT",
                     is_official=True,
                     revision="INITIAL",
                 )

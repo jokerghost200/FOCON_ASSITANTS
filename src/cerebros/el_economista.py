@@ -120,10 +120,11 @@ class ElEconomista:
             has_news = (sent_base.get("article_count", 0) > 0) or (sent_quote.get("article_count", 0) > 0)
 
             # Sentiment relatif sur la paire : Base - Quote
+            PAIR_SENTIMENT_THRESHOLD = 0.15
             pair_rel_sentiment = round(score_base - score_quote, 2)
-            if pair_rel_sentiment >= 0.20:
+            if pair_rel_sentiment >= PAIR_SENTIMENT_THRESHOLD:
                 sent_label = "BULLISH"
-            elif pair_rel_sentiment <= -0.20:
+            elif pair_rel_sentiment <= -PAIR_SENTIMENT_THRESHOLD:
                 sent_label = "BEARISH"
             else:
                 sent_label = "NEUTRAL"
@@ -183,7 +184,7 @@ class ElEconomista:
             if is_blackout:
                 event_risk = "CRITICAL" if blackout_info.get("impact") == "CRITICAL" else "HIGH"
                 recommendation = "NO_TRADE_NEWS"
-                conf_str = blackout_info.get("calendar_confidence", "VERIFIED")
+                conf_str = blackout_info.get("calendar_confidence", "APPROXIMATE")
                 final_reason = f"🛑 [GEL ANNONCE ÉCONOMIQUE] {blackout_info['reason']}"
             else:
                 event_risk = "LOW"
@@ -214,6 +215,7 @@ class ElEconomista:
             sources_freshness = {
                 "calendar": {
                     "status": "FRESH" if self.calendar.last_fetch_time else "LOCAL_FALLBACK",
+                    "confidence": blackout_info.get("calendar_confidence", "APPROXIMATE"),
                     "last_fetch": self.calendar.last_fetch_time.isoformat() if isinstance(self.calendar.last_fetch_time, datetime) else str(self.calendar.last_fetch_time),
                     "age_seconds": _calc_age_seconds(self.calendar.last_fetch_time),
                 },
@@ -238,7 +240,12 @@ class ElEconomista:
                 },
             }
 
-            overall_freshness = "FRESH" if (self.calendar.last_fetch_time or self.bls.last_fetch_time or self.ecb.last_fetch_time) else "LOCAL_FALLBACK"
+            if not macro_fresh:
+                overall_freshness = "STALE"
+            elif (self.calendar.last_fetch_time or self.bls.last_fetch_time or self.ecb.last_fetch_time):
+                overall_freshness = "FRESH"
+            else:
+                overall_freshness = "LOCAL_FALLBACK"
 
             return {
                 "cerebro_origen": "El Economista",

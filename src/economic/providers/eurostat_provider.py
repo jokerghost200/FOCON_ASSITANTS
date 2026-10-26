@@ -95,13 +95,9 @@ class EurostatProvider(BaseEconomicProvider):
                     # Données vides pour ce code geo, tente le suivant
                     continue
 
-                time_dim = (
-                    data.get("dimension", {})
-                    .get("time", {})
-                    .get("category", {})
-                    .get("label", {})
-                )
-                time_list = list(time_dim.values())
+                category = data.get("dimension", {}).get("time", {}).get("category", {})
+                time_index = category.get("index", {})
+                time_label = category.get("label", {})
 
                 # Récupérer la dernière observation valide disponible
                 sorted_indices = sorted(values_dict.keys(), key=lambda x: int(x))
@@ -117,7 +113,14 @@ class EurostatProvider(BaseEconomicProvider):
                 except (ValueError, TypeError):
                     continue
 
-                ref_period = time_list[latest_idx] if latest_idx < len(time_list) else "LATEST"
+                # Association stricte et mathématique de la période à l'index de valeur
+                if time_index:
+                    idx_to_time = {int(v): k for k, v in time_index.items()}
+                    time_code = idx_to_time.get(latest_idx)
+                    ref_period = str(time_label.get(time_code, time_code)) if time_code else "LATEST"
+                else:
+                    time_list = list(time_label.values())
+                    ref_period = str(time_list[latest_idx]) if latest_idx < len(time_list) else "LATEST"
 
                 ind = self.normalize_indicator(
                     indicator=indicator_name,
@@ -125,8 +128,8 @@ class EurostatProvider(BaseEconomicProvider):
                     value=val_float,
                     unit=unit,
                     reference_period=ref_period,
+                    published_at=None,
                     source_url=url,
-                    status="OFFICIAL_CURRENT",
                     is_official=True,
                     revision="INITIAL",
                 )
