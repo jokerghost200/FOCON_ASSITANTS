@@ -204,6 +204,12 @@ def test_macro_analyzer_carry_trade():
     mem = EconomicMemory(db_path=db_file)
     macro = MacroAnalyzer(memory=mem)
 
+    # Enregistrement d'instantanés récents pour tester la formule mathématique en régime nominal (taux frais)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    mem.store_macro_snapshot("USD", interest_rate=5.25, updated_at=now_iso)
+    mem.store_macro_snapshot("JPY", interest_rate=0.25, updated_at=now_iso)
+    mem.store_macro_snapshot("EUR", interest_rate=3.25, updated_at=now_iso)
+
     # USD (5.25%) vs JPY (0.25%) -> Taux USD > JPY -> USDJPY Carry Trade Haussier
     usdjpy_diff = macro.calculate_interest_differential("USDJPY")
     assert usdjpy_diff["differential"] > 0

@@ -173,13 +173,21 @@ class CalendarProvider:
                 impact = "LOW"
 
             time_raw = raw.get("date") or raw.get("time") or raw.get("datetime")
-            event_time = datetime.now(timezone.utc).isoformat()
-            if time_raw:
-                try:
-                    if isinstance(time_raw, str):
-                        event_time = datetime.fromisoformat(time_raw.replace("Z", "+00:00")).isoformat()
-                except Exception:
-                    pass
+            if not time_raw:
+                logger.debug(f"[CalendarProvider] Rejet de l'événement '{title}': date manquante.")
+                return None
+
+            try:
+                if isinstance(time_raw, str):
+                    event_time = datetime.fromisoformat(time_raw.replace("Z", "+00:00")).isoformat()
+                elif isinstance(time_raw, (int, float)):
+                    event_time = datetime.fromtimestamp(time_raw, tz=timezone.utc).isoformat()
+                else:
+                    logger.debug(f"[CalendarProvider] Rejet de l'événement '{title}': format de date inconnu.")
+                    return None
+            except Exception as e:
+                logger.debug(f"[CalendarProvider] Rejet de l'événement '{title}': date invalide '{time_raw}' ({e}).")
+                return None
 
             return {
                 "title": title,
@@ -191,10 +199,11 @@ class CalendarProvider:
                 "forecast": self._to_float(raw.get("forecast")),
                 "previous": self._to_float(raw.get("previous")),
                 "source": "FINANCE_CALENDAR_PUBLIC",
-                "is_verified": True,
-                "calendar_confidence": "VERIFIED",
+                "is_verified": False,
+                "calendar_confidence": "APPROXIMATE",
             }
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[CalendarProvider] Erreur normalisation événement: {e}")
             return None
 
     @staticmethod

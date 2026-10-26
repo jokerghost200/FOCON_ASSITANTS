@@ -118,22 +118,24 @@ class MacroAnalyzer:
         self._sync_default_rates()
 
     def _sync_default_rates(self):
-        """Enregistre les taux initiaux dans la mémoire SQLite s'ils sont absents."""
-        now_str = datetime.now(timezone.utc).isoformat()
+        """Enregistre les taux initiaux dans la mémoire SQLite avec leur date de vérification réelle."""
         for curr, data in self.central_bank_rates.items():
             existing = self.memory.get_latest_macro_snapshot(curr)
             if not existing:
+                # Utiliser la date de vérification officielle certifiée, JAMAIS l'heure actuelle de démarrage du bot
+                verified_date = data.get("last_verified_at") or data.get("effective_date") or "2024-01-01T00:00:00+00:00"
                 self.memory.store_macro_snapshot(
                     currency=curr,
                     interest_rate=data["rate"],
                     inflation_rate=data["inflation"],
                     monetary_stance=data["stance"],
-                    updated_at=now_str,
+                    updated_at=verified_date,
                 )
 
     def get_central_bank_info(self, currency: str) -> Dict[str, Any]:
         """
         Retourne la fiche macroéconomique d'une devise avec son indicateur de fraîcheur.
+        Distingue strictement la date de récupération (retrieved_at) de la date d'effet officielle (published_at).
         """
         curr = currency.upper()
         now = datetime.now(timezone.utc)
@@ -192,13 +194,18 @@ class MacroAnalyzer:
             if "updated_at" in mem_snap and mem_snap["updated_at"]:
                 info["last_verified_at"] = mem_snap["updated_at"]
 
-        # Consultation prioritaire des données officielles réelles en base (BCE SDMX, BLS)
+        # Consultation prioritaire des données officielles réelles en base (BCE SDMX, BLS, Fed)
         if hasattr(self.memory, "get_latest_official_indicator"):
             if curr == "EUR":
                 off_rate = self.memory.get_latest_official_indicator("DEPOSIT_FACILITY_RATE", "EUR")
                 if off_rate:
                     info["rate"] = float(off_rate["value"])
-                    info["last_verified_at"] = off_rate.get("retrieved_at") or off_rate.get("published_at") or now_str
+                    # Utilise published_at ou reference_period officiel, jamais retrieved_at pour l'âge du taux
+                    official_pub = off_rate.get("published_at") or off_rate.get("reference_period")
+                    if official_pub and len(str(official_pub)) == 10 and "T" not in str(official_pub):
+                        official_pub = f"{official_pub}T00:00:00+00:00"
+                    info["last_verified_at"] = official_pub or info.get("last_verified_at")
+                    info["last_retrieved_at"] = off_rate.get("retrieved_at")
                     info["source"] = f"BCE SDMX ({off_rate.get('source', 'ECB')})"
                 off_inf = self.memory.get_latest_official_indicator("HICP_INFLATION", "EUR")
                 if off_inf:
@@ -207,11 +214,15 @@ class MacroAnalyzer:
                 off_cpi = self.memory.get_latest_official_indicator("CPI_YOY", "USD")
                 if off_cpi:
                     info["inflation"] = float(off_cpi["value"])
-                    info["last_verified_at"] = off_cpi.get("retrieved_at") or off_cpi.get("published_at") or now_str
-                    info["source"] = f"BLS Official ({off_cpi.get('source', 'BLS')})"
                 off_fed = self.memory.get_latest_official_indicator("FED_FUNDS_RATE", "USD")
                 if off_fed:
                     info["rate"] = float(off_fed["value"])
+                    official_pub = off_fed.get("published_at") or off_fed.get("reference_period")
+                    if official_pub and len(str(official_pub)) == 10 and "T" not in str(official_pub):
+                        official_pub = f"{official_pub}T00:00:00+00:00"
+                    info["last_verified_at"] = official_pub or info.get("last_verified_at")
+                    info["last_retrieved_at"] = off_fed.get("retrieved_at")
+                    info["source"] = f"Federal Reserve ({off_fed.get('source', 'FED')})"
 
         # Calcul de la fraîcheur (staleness) pour les banques centrales souveraines
         is_stale = False

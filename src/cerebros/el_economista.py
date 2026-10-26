@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
 
 from src.economic.economic_memory import EconomicMemory
 from src.economic.calendar_provider import CalendarProvider
@@ -81,7 +82,15 @@ class ElEconomista:
         4. Sentiment récent des actualités
         """
         sym = symbol.upper()
-        curr = "USD" if "USD" in sym or sym in ("XAUUSD", "BTCUSD", "ETHUSD") else sym[:3]
+        if sym in ("XAUUSD", "BTCUSD", "ETHUSD"):
+            base_curr = sym[:3]
+            quote_curr = "USD"
+        elif len(sym) >= 6:
+            base_curr = sym[:3]
+            quote_curr = sym[3:6]
+        else:
+            base_curr = "USD"
+            quote_curr = "USD"
 
         try:
             # 1. Vérification du calendrier et gel d'annonces
@@ -98,8 +107,26 @@ class ElEconomista:
             macro_diff = self.macro.calculate_interest_differential(sym)
             macro_fresh = not bool(macro_diff.get("is_stale", False))
 
-            # 4. Sentiment des actualités
-            sentiment_info = self.news.get_sentiment_summary(currency=curr, hours=24.0)
+            # 4. Sentiment des actualités bilatéral (Base vs Quote)
+            sent_base = self.news.get_sentiment_summary(currency=base_curr, hours=24.0)
+            sent_quote = self.news.get_sentiment_summary(currency=quote_curr, hours=24.0) if quote_curr != base_curr else {
+                "sentiment_score": 0.0,
+                "sentiment_label": "NEUTRAL",
+                "article_count": 0,
+            }
+
+            score_base = float(sent_base.get("sentiment_score", 0.0))
+            score_quote = float(sent_quote.get("sentiment_score", 0.0))
+            has_news = (sent_base.get("article_count", 0) > 0) or (sent_quote.get("article_count", 0) > 0)
+
+            # Sentiment relatif sur la paire : Base - Quote
+            pair_rel_sentiment = round(score_base - score_quote, 2)
+            if pair_rel_sentiment >= 0.20:
+                sent_label = "BULLISH"
+            elif pair_rel_sentiment <= -0.20:
+                sent_label = "BEARISH"
+            else:
+                sent_label = "NEUTRAL"
 
             # ── Synthèse Macroéconomique Globale ──
             score_bull = 0.0
@@ -128,14 +155,18 @@ class ElEconomista:
             else:
                 reasons.append("Carry Trade : " + macro_diff.get("reason", "Taux non vérifiés récemment"))
 
-            # Poids Sentiment des actualités (25%) - Uniquement si des actualités ont été trouvées
-            sent_label = sentiment_info.get("sentiment_label", "NEUTRAL")
-            if sent_label == "BULLISH":
-                score_bull += 0.25
-                reasons.append(f"Actualités favorables ({sentiment_info.get('sentiment_score', 0):+.2f}).")
-            elif sent_label == "BEARISH":
-                score_bear += 0.25
-                reasons.append(f"Actualités défavorables ({sentiment_info.get('sentiment_score', 0):+.2f}).")
+            # Poids Sentiment des actualités (25%) - Uniquement si des actualités bilatérales existent
+            if has_news:
+                if sent_label == "BULLISH":
+                    score_bull += 0.25
+                    reasons.append(f"Actualités relatives favorables à {base_curr} vs {quote_curr} ({pair_rel_sentiment:+.2f}).")
+                elif sent_label == "BEARISH":
+                    score_bear += 0.25
+                    reasons.append(f"Actualités relatives défavorables à {base_curr} vs {quote_curr} ({pair_rel_sentiment:+.2f}).")
+                else:
+                    reasons.append(f"Actualités équilibrées entre {base_curr} ({score_base:+.2f}) et {quote_curr} ({score_quote:+.2f}).")
+            else:
+                reasons.append(f"Actualités : aucune dépêche récente pour {base_curr}/{quote_curr}.")
 
             # Biais résultant
             if score_bull >= score_bear + 0.15:
@@ -166,6 +197,49 @@ class ElEconomista:
                     recommendation = "NORMAL"
                     final_reason = f"Contexte macro neutre ou équilibré ({' | '.join(reasons)})"
 
+            # Fraîcheur granulaire de chaque source
+            now_dt = datetime.now(timezone.utc)
+            def _calc_age_seconds(ts_val):
+                if not ts_val:
+                    return None
+                try:
+                    if isinstance(ts_val, datetime):
+                        dt = ts_val
+                    else:
+                        dt = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
+                    return round((now_dt - dt).total_seconds(), 1)
+                except Exception:
+                    return None
+
+            sources_freshness = {
+                "calendar": {
+                    "status": "FRESH" if self.calendar.last_fetch_time else "LOCAL_FALLBACK",
+                    "last_fetch": self.calendar.last_fetch_time.isoformat() if isinstance(self.calendar.last_fetch_time, datetime) else str(self.calendar.last_fetch_time),
+                    "age_seconds": _calc_age_seconds(self.calendar.last_fetch_time),
+                },
+                "bls": {
+                    "status": self.bls.last_status,
+                    "last_fetch": self.bls.last_fetch_time,
+                    "age_seconds": _calc_age_seconds(self.bls.last_fetch_time),
+                },
+                "ecb": {
+                    "status": self.ecb.last_status,
+                    "last_fetch": self.ecb.last_fetch_time,
+                    "age_seconds": _calc_age_seconds(self.ecb.last_fetch_time),
+                },
+                "eurostat": {
+                    "status": self.eurostat.last_status,
+                    "last_fetch": self.eurostat.last_fetch_time,
+                    "age_seconds": _calc_age_seconds(self.eurostat.last_fetch_time),
+                },
+                "currency_strength_mt5": {
+                    "status": "AVAILABLE" if cs_avail else "UNAVAILABLE",
+                    "reason": cs_info.get("reason", ""),
+                },
+            }
+
+            overall_freshness = "FRESH" if (self.calendar.last_fetch_time or self.bls.last_fetch_time or self.ecb.last_fetch_time) else "LOCAL_FALLBACK"
+
             return {
                 "cerebro_origen": "El Economista",
                 "symbol": sym,
@@ -186,13 +260,24 @@ class ElEconomista:
                 "interest_rate_differential": macro_diff.get("differential", 0.0),
                 "is_rate_stale": not macro_fresh,
                 "official_indicators": {
-                    "count": len(self.memory.get_official_indicators(currency_or_region=curr)),
-                    "latest": self.memory.get_official_indicators(currency_or_region=curr, max_age_days=90.0)[:3],
+                    "count": len(self.memory.get_official_indicators(currency_or_region=base_curr)),
+                    "latest": self.memory.get_official_indicators(currency_or_region=base_curr, max_age_days=90.0)[:3],
                 },
-                "news_sentiment": sentiment_info.get("sentiment_label", "NEUTRAL"),
+                "news_sentiment": sent_label,
+                "news_sentiment_details": {
+                    "base_currency": base_curr,
+                    "base_score": score_base,
+                    "base_articles": sent_base.get("article_count", 0),
+                    "quote_currency": quote_curr,
+                    "quote_score": score_quote,
+                    "quote_articles": sent_quote.get("article_count", 0),
+                    "relative_score": pair_rel_sentiment,
+                    "pair_sentiment_bias": sent_label,
+                },
                 "reason": final_reason,
                 "recommendation": recommendation,
-                "data_freshness": "FRESH" if self.calendar.last_fetch_time else "LOCAL_FALLBACK",
+                "data_freshness": overall_freshness,
+                "sources_freshness": sources_freshness,
             }
         except Exception as e:
             logger.error(f"🛑 [El Economista] Erreur critique analyse macro pour {symbol}: {e}")
