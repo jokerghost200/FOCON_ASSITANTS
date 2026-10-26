@@ -472,3 +472,190 @@ def test_failed_request_preserves_stale_status_without_rejuvenation(mem_db):
     assert stored["retrieved_at"] == "2024-02-02T14:00:00+00:00"
     assert stored["status"] == "STALE"
 
+
+def test_strict_risk_ceiling_enforces_monetary_budget_against_fixed_and_manual_lots():
+    """
+    Priorité 1 : Vérifie que le plafond strict de risque (strict_risk_ceiling)
+    interdit formellement à un lot fixe (ex: 0.20) ou forcé de dépasser le budget
+    monétaire autorisé, particulièrement sur petit capital.
+    """
+    from src.trading.risk_manager import RiskManager
+
+    # Cas A : Compte de 2000 $ avec risque configuré à 1.0% ($20.00) et lot fixe dangereux de 0.20 lot ($80.00)
+    rm = RiskManager(
+        default_risk_percent=1.0,
+        fixed_lot_size=0.20,
+        strict_risk_ceiling=True,
+    )
+
+    # Calcul du lot pour un trade EURUSD avec 40 pips de SL (perte de $80 pour 0.20 lot)
+    final_lot, calc_lot, risk_amt, loss_per_lot = rm.calculate_lot_size(
+        capital=2000.0,
+        risk_percent=1.0,
+        entry_price=1.0850,
+        sl_price=1.0810,  # 40 pips -> loss_per_lot = $400/lot
+        contract_size=100000.0,
+        tick_size=0.00001,
+        tick_value=1.0,
+        min_lot=0.01,
+        max_lot=10.0,
+        lot_step=0.01,
+    )
+    # Le lot fixe (0.20) a été rigoureusement plafonné au lot calculé dynamique (0.05) pour respecter le budget de $20 !
+    assert final_lot == 0.05
+    assert final_lot * loss_per_lot <= 20.0 * 1.05
+
+    # Cas B : Compte de 200 $ où même le lot minimum broker (0.01 lot = $4.00 de perte) dépasse le budget ($2.00)
+    # validate_proposal doit formellement REFUSER le trade en mode strict_risk_ceiling
+    rm_micro = RiskManager(default_risk_percent=1.0, strict_risk_ceiling=True)
+    forced_proposal = {
+        "action": "BUY",
+        "entry": 1.0850,
+        "sl": 1.0810,
+        "tp": 1.0930,
+        "confidence": 80.0,
+        "lot": 0.01,
+        "risk_percent": 1.0,
+    }
+    account_info = {"balance": 200.0, "equity": 200.0}
+    symbol_info = {"trade_tick_value": 1.0, "trade_tick_size": 0.00001, "digits": 5, "volume_min": 0.01, "volume_max": 10.0, "volume_step": 0.01}
+
+    val = rm_micro.validate_proposal(forced_proposal, account_info, symbol_info)
+    assert val["valid"] is False
+    assert "Plafond Strict de Risque" in val["reason"]
+
+
+def test_calendar_provider_2027_schedules_and_confidence_distinction(mem_db):
+    """
+    Priorité 2 : Vérifie la couverture certifiée 2027 du calendrier de secours
+    et la distinction stricte entre LIVE_FEED, LOCAL_FALLBACK et UNAVAILABLE.
+    """
+    from src.economic.calendar_provider import CalendarProvider, VERIFIED_SCHEDULES
+
+    # 1. Présence des calendriers 2027
+    assert 2027 in VERIFIED_SCHEDULES["FOMC"]
+    assert len(VERIFIED_SCHEDULES["FOMC"][2027]) == 8
+    assert 2027 in VERIFIED_SCHEDULES["ECB"]
+    assert len(VERIFIED_SCHEDULES["ECB"][2027]) == 8
+    assert 2027 in VERIFIED_SCHEDULES["BOE"]
+    assert len(VERIFIED_SCHEDULES["BOE"][2027]) == 8
+    assert 2027 in VERIFIED_SCHEDULES["BLS_NFP"]
+    assert 2027 in VERIFIED_SCHEDULES["BLS_CPI"]
+
+    cal = CalendarProvider(memory=mem_db)
+
+    # 2. Génération des événements pour 2027
+    evs_2027 = cal.generate_recurring_fallback_events(target_year=2027, target_month=1)
+    fomc_2027 = [e for e in evs_2027 if "FOMC" in e["title"] or "Fed" in e["title"]]
+    assert len(fomc_2027) >= 1
+    assert fomc_2027[0]["calendar_confidence"] == "VERIFIED"
+
+    # 3. Vérification que hors ligne (sans fetch réseau), is_in_news_blackout ne prétend pas être LIVE_FEED
+    blackout_res = cal.is_in_news_blackout("EURUSD")
+    assert blackout_res["calendar_status"] in ("LOCAL_FALLBACK", "UNAVAILABLE")
+    if not cal.last_fetch_time:
+        assert blackout_res["calendar_status"] != "OFFICIAL_LIVE_FEED"
+
+
+def test_el_economista_macro_fundamentals_and_event_impact_influence_bias(mem_db):
+    """
+    Priorité 3 : Vérifie que les indicateurs officiels (BLS, BCE, Eurostat)
+    et le moteur EventImpactEngine participent directement au calcul du biais final.
+    """
+    eco = ElEconomista(memory=mem_db)
+
+    # Insertion d'indicateurs macro : chômage USD très bas (3.8%) vs EUR élevé (6.5%)
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "UNEMPLOYMENT",
+        "currency_or_region": "USD",
+        "value": 3.8,
+        "reference_period": "2026M09",
+        "status": "OFFICIAL_CURRENT",
+    })
+    mem_db.store_official_indicator({
+        "source": "EUROSTAT",
+        "indicator": "UNEMPLOYMENT",
+        "currency_or_region": "EUR",
+        "value": 6.5,
+        "reference_period": "2026-08",
+        "status": "OFFICIAL_CURRENT",
+    })
+
+    # Évaluation des fondamentaux macro
+    macro_fund = eco._evaluate_macro_fundamentals("USD", "EUR")
+    assert macro_fund["used_indicators"] >= 1
+    assert macro_fund["is_fresh"] is True
+    assert macro_fund["bias"] == "BULLISH"  # Favorable au USD face à l'EUR
+
+    # Vérification que le contexte global EURUSD intègre ces fondamentaux
+    ctx = eco.analizar_contexto_economico("EURUSD")
+    assert "macro_fundamentals" in ctx
+    assert ctx["macro_fundamentals"]["used_indicators_count"] >= 1
+
+
+def test_trade_execution_final_pre_order_send_security_gate():
+    """
+    Priorité 4 : Audit du verrou ultime précédant mt5.order_send() dans execute_order :
+    - Rejet si Stop Loss incohérent (SL >= Prix pour un BUY)
+    - Rejet si quota de positions ouvertes atteint
+    - Rejet si risque monétaire recalculé dépasse le plafond strict
+    """
+    mock_connector = MagicMock()
+    mock_connector.get_account_info.return_value = {"balance": 1000.0, "equity": 1000.0}
+    mock_connector.get_symbol_info.return_value = {
+        "ask": 1.0855, "bid": 1.0850, "digits": 5, "trade_tick_value": 1.0, "trade_tick_size": 0.00001
+    }
+
+    engine = TradeExecutionEngine(
+        mt5_connector=mock_connector,
+        mode="auto",
+        default_risk_percent=1.0,  # 1.0% de $1000 = $10.00
+        max_open_positions=2,
+        strict_risk_ceiling=True,
+    )
+
+    valid_econ = {
+        "status": "OK", "high_impact_window": False, "event_risk": "LOW",
+        "recommendation": "NORMAL", "data_freshness": "FRESH", "is_rate_stale": False
+    }
+
+    # Cas 1 : Stop Loss incohérent sur un BUY (SL au-dessus du prix d'achat !)
+    req_bad_sl = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.05,
+        "price": 1.0855, "sl": 1.0900, "tp": 1.1000, "type": 0,
+        "_economic_context": valid_econ,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = engine.execute_order(req_bad_sl)
+        assert res["success"] is False
+        assert "Stop Loss incohérent" in res["reason"]
+        mock_send.assert_not_called()
+
+    # Cas 2 : Quota de positions ouvertes déjà atteint (2 positions)
+    mock_connector.get_open_positions.return_value = [{"ticket": 1}, {"ticket": 2}]
+    req_quota = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.01,
+        "price": 1.0855, "sl": 1.0845, "tp": 1.0900, "type": 0,
+        "_economic_context": valid_econ,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = engine.execute_order(req_quota)
+        assert res["success"] is False
+        assert "Quota maximal de positions atteint" in res["reason"]
+        mock_send.assert_not_called()
+
+    # Cas 3 : Risque excessif violant le plafond strict de risque ($50 de risque vs budget de $10.50)
+    mock_connector.get_open_positions.return_value = []
+    req_huge_risk = {
+        "symbol": "EURUSD", "action": 0, "volume": 0.10,
+        "price": 1.0855, "sl": 1.0805, "tp": 1.0950, "type": 0,  # 50 pips * 0.10 lot = $50.00
+        "_economic_context": valid_econ,
+    }
+    with patch("MetaTrader5.order_send") as mock_send:
+        res = engine.execute_order(req_huge_risk)
+        assert res["success"] is False
+        assert "dépasse le plafond strict" in res["reason"]
+        mock_send.assert_not_called()
+
+

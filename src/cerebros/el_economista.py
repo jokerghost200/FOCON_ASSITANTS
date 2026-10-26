@@ -134,35 +134,52 @@ class ElEconomista:
             score_bear = 0.0
             reasons = []
 
-            # Poids Force relative des devises (40%) - UNIQUEMENT SI LES DONNÉES RÉELLES EXISTENT
+            # 1. Poids Force relative des devises (30%) - UNIQUEMENT SI LES DONNÉES RÉELLES EXISTENT
             if cs_avail:
                 if cs_info["bias"] == "BULLISH":
-                    score_bull += 0.40
+                    score_bull += 0.30
                     reasons.append(cs_info["reason"])
                 elif cs_info["bias"] == "BEARISH":
-                    score_bear += 0.40
+                    score_bear += 0.30
                     reasons.append(cs_info["reason"])
             else:
                 reasons.append("Force devises : " + cs_info.get("reason", "Données MT5 insuffisantes"))
 
-            # Poids Différentiel de taux (35%) - UNIQUEMENT SI LES TAUX SONT CONFIRMÉS FRAIS (<90j)
+            # 2. Poids Différentiel de taux (25%) - UNIQUEMENT SI LES TAUX SONT CONFIRMÉS FRAIS (<90j)
             if macro_fresh:
                 if macro_diff["carry_bias"] == "BULLISH":
-                    score_bull += 0.35
+                    score_bull += 0.25
                     reasons.append(macro_diff["reason"])
                 elif macro_diff["carry_bias"] == "BEARISH":
-                    score_bear += 0.35
+                    score_bear += 0.25
                     reasons.append(macro_diff["reason"])
             else:
                 reasons.append("Carry Trade : " + macro_diff.get("reason", "Taux non vérifiés récemment"))
 
-            # Poids Sentiment des actualités (25%) - Uniquement si des actualités bilatérales existent
+            # 3. Poids Fondamentaux Macro Officiels (BLS, BCE, Eurostat) & Surprises (25%)
+            macro_fund = self._evaluate_macro_fundamentals(base_curr, quote_curr)
+            if macro_fund["is_fresh"] and macro_fund["used_indicators"] > 0:
+                if macro_fund["bias"] == "BULLISH":
+                    score_bull += 0.25
+                    reasons.extend(macro_fund["reasons"])
+                elif macro_fund["bias"] == "BEARISH":
+                    score_bear += 0.25
+                    reasons.extend(macro_fund["reasons"])
+                else:
+                    reasons.extend(macro_fund["reasons"])
+            else:
+                if macro_fund["reasons"]:
+                    reasons.extend(macro_fund["reasons"])
+                else:
+                    reasons.append(f"Indicateurs officiels : données macro non encore synchronisées pour {base_curr}/{quote_curr}.")
+
+            # 4. Poids Sentiment des actualités (20%) - Uniquement si des actualités bilatérales existent
             if has_news:
                 if sent_label == "BULLISH":
-                    score_bull += 0.25
+                    score_bull += 0.20
                     reasons.append(f"Actualités relatives favorables à {base_curr} vs {quote_curr} ({pair_rel_sentiment:+.2f}).")
                 elif sent_label == "BEARISH":
-                    score_bear += 0.25
+                    score_bear += 0.20
                     reasons.append(f"Actualités relatives défavorables à {base_curr} vs {quote_curr} ({pair_rel_sentiment:+.2f}).")
                 else:
                     reasons.append(f"Actualités équilibrées entre {base_curr} ({score_base:+.2f}) et {quote_curr} ({score_quote:+.2f}).")
@@ -240,7 +257,7 @@ class ElEconomista:
                 },
             }
 
-            if not macro_fresh:
+            if not macro_fresh or not macro_fund.get("is_fresh", True):
                 overall_freshness = "STALE"
             elif (self.calendar.last_fetch_time or self.bls.last_fetch_time or self.ecb.last_fetch_time):
                 overall_freshness = "FRESH"
@@ -257,7 +274,8 @@ class ElEconomista:
                 "high_impact_window": is_blackout,
                 "minutes_to_next_event": blackout_info.get("minutes_to_event", 999.0),
                 "next_event_title": blackout_info.get("event_title"),
-                "calendar_confidence": blackout_info.get("calendar_confidence", "VERIFIED"),
+                "calendar_confidence": blackout_info.get("calendar_confidence", "APPROXIMATE" if not self.calendar.last_fetch_time else "VERIFIED"),
+                "calendar_status": blackout_info.get("calendar_status", "LOCAL_FALLBACK" if not self.calendar.last_fetch_time else "OFFICIAL_LIVE_FEED"),
                 "currency_strength": {
                     "available": cs_avail,
                     "base": cs_info.get("base_strength", 50.0),
@@ -266,6 +284,13 @@ class ElEconomista:
                 },
                 "interest_rate_differential": macro_diff.get("differential", 0.0),
                 "is_rate_stale": not macro_fresh,
+                "macro_fundamentals": {
+                    "bias": macro_fund["bias"],
+                    "score": macro_fund["score"],
+                    "is_fresh": macro_fund["is_fresh"],
+                    "used_indicators_count": macro_fund["used_indicators"],
+                    "reasons": macro_fund["reasons"],
+                },
                 "official_indicators": {
                     "count": len(self.memory.get_official_indicators(currency_or_region=base_curr)),
                     "latest": self.memory.get_official_indicators(currency_or_region=base_curr, max_age_days=90.0)[:3],
@@ -300,6 +325,130 @@ class ElEconomista:
                 "reason": f"Panne critique du cerveau économique ({e}) : Sécurité Fail-Closed activée.",
                 "data_freshness": "ERROR",
             }
+
+    def _evaluate_macro_fundamentals(self, base_curr: str, quote_curr: str) -> Dict[str, Any]:
+        """
+        Évalue objectivement les fondamentaux macroéconomiques officiels (BLS, BCE, Eurostat) :
+        - Taux de chômage relatif (santé de l'emploi)
+        - Inflation CPI / IPCH annuelle vs cible de stabilité des prix (2.0%)
+        - Croissance du PIB réel YoY
+        - Surprises économiques récentes (actual vs forecast) via EventImpactEngine
+        
+        Retourne :
+        - bias : 'BULLISH', 'BEARISH' ou 'NEUTRAL'
+        - score : contribution directionnelle relative [-1.0, +1.0]
+        - is_fresh : True si les données officielles sont récentes (< 90j) et non corrompues
+        - used_indicators : nombre d'indicateurs exploités
+        - reasons : explications détaillées
+        """
+        reasons = []
+        macro_score = 0.0
+        used_indicators = 0
+        is_fresh = True
+
+        # 1. Inflation (CPI / HICP)
+        base_cpi = self.memory.get_latest_official_indicator("CPI_YOY", base_curr) or self.memory.get_latest_official_indicator("HICP_YOY", base_curr)
+        quote_cpi = self.memory.get_latest_official_indicator("CPI_YOY", quote_curr) or self.memory.get_latest_official_indicator("HICP_YOY", quote_curr)
+
+        if base_cpi and quote_cpi:
+            if base_cpi.get("status") in ("UNKNOWN", "STALE") or quote_cpi.get("status") in ("UNKNOWN", "STALE"):
+                is_fresh = False
+            else:
+                try:
+                    b_val = float(base_cpi.get("value", 0.0))
+                    q_val = float(quote_cpi.get("value", 0.0))
+                    cpi_diff = b_val - q_val
+                    if cpi_diff >= 0.5:
+                        macro_score += 0.35
+                        reasons.append(f"Inflation annuelle {base_curr} ({b_val:.1f}%) > {quote_curr} ({q_val:.1f}%) [Pression monétaire plus ferme {base_curr}].")
+                    elif cpi_diff <= -0.5:
+                        macro_score -= 0.35
+                        reasons.append(f"Inflation annuelle {base_curr} ({b_val:.1f}%) < {quote_curr} ({q_val:.1f}%) [Pression monétaire plus ferme {quote_curr}].")
+                    used_indicators += 1
+                except (ValueError, TypeError):
+                    is_fresh = False
+
+        # 2. Chômage (Unemployment) - Règle inversée : un chômage plus bas est signe de vigueur économique
+        base_unemp = self.memory.get_latest_official_indicator("UNEMPLOYMENT", base_curr)
+        quote_unemp = self.memory.get_latest_official_indicator("UNEMPLOYMENT", quote_curr)
+
+        if base_unemp and quote_unemp:
+            if base_unemp.get("status") in ("UNKNOWN", "STALE") or quote_unemp.get("status") in ("UNKNOWN", "STALE"):
+                is_fresh = False
+            else:
+                try:
+                    b_u = float(base_unemp.get("value", 0.0))
+                    q_u = float(quote_unemp.get("value", 0.0))
+                    u_diff = q_u - b_u  # Si q_u > b_u, base a moins de chômage (favorable à base)
+                    if u_diff >= 0.5:
+                        macro_score += 0.35
+                        reasons.append(f"Emploi plus solide : Chômage {base_curr} ({b_u:.1f}%) < {quote_curr} ({q_u:.1f}%).")
+                    elif u_diff <= -0.5:
+                        macro_score -= 0.35
+                        reasons.append(f"Emploi moins solide : Chômage {base_curr} ({b_u:.1f}%) > {quote_curr} ({q_u:.1f}%).")
+                    used_indicators += 1
+                except (ValueError, TypeError):
+                    is_fresh = False
+
+        # 3. Croissance du PIB réel (GDP Growth YoY)
+        base_gdp = self.memory.get_latest_official_indicator("GDP_GROWTH_YOY", base_curr)
+        quote_gdp = self.memory.get_latest_official_indicator("GDP_GROWTH_YOY", quote_curr)
+        if base_gdp and quote_gdp:
+            if base_gdp.get("status") in ("UNKNOWN", "STALE") or quote_gdp.get("status") in ("UNKNOWN", "STALE"):
+                is_fresh = False
+            else:
+                try:
+                    b_g = float(base_gdp.get("value", 0.0))
+                    q_g = float(quote_gdp.get("value", 0.0))
+                    g_diff = b_g - q_g
+                    if g_diff >= 0.5:
+                        macro_score += 0.30
+                        reasons.append(f"Croissance PIB {base_curr} ({b_g:.1f}%) > {quote_curr} ({q_g:.1f}%).")
+                    elif g_diff <= -0.5:
+                        macro_score -= 0.30
+                        reasons.append(f"Croissance PIB {base_curr} ({b_g:.1f}%) < {quote_curr} ({q_g:.1f}%).")
+                    used_indicators += 1
+                except (ValueError, TypeError):
+                    is_fresh = False
+
+        # 4. Surprises économiques récentes via EventImpactEngine
+        try:
+            recent_events = self.memory.get_upcoming_events(currency=base_curr, window_minutes=1440 * 3)
+            for ev in recent_events:
+                act = ev.get("actual")
+                fc = ev.get("forecast")
+                if act is not None and fc is not None:
+                    surprise = self.event_impact.evaluate_surprise(
+                        event_title=ev.get("title", ""),
+                        currency=base_curr,
+                        actual=act,
+                        forecast=fc,
+                        previous=ev.get("previous"),
+                    )
+                    if surprise["currency_bias"] == "BULLISH":
+                        macro_score += 0.20
+                        reasons.append(f"Surprise éco favorable {base_curr} : {surprise['reason']}")
+                    elif surprise["currency_bias"] == "BEARISH":
+                        macro_score -= 0.20
+                        reasons.append(f"Surprise éco défavorable {base_curr} : {surprise['reason']}")
+                    break
+        except Exception:
+            pass
+
+        if macro_score >= 0.25:
+            bias = "BULLISH"
+        elif macro_score <= -0.25:
+            bias = "BEARISH"
+        else:
+            bias = "NEUTRAL"
+
+        return {
+            "bias": bias,
+            "score": round(max(-1.0, min(1.0, macro_score)), 2),
+            "is_fresh": is_fresh,
+            "used_indicators": used_indicators,
+            "reasons": reasons,
+        }
 
     def es_periodo_bloqueo_noticias(self, symbol: str, window_minutes: float = 30.0) -> bool:
         """

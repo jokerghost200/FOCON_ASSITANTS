@@ -42,28 +42,33 @@ VERIFIED_SCHEDULES = {
     "FOMC": {
         2025: [(1, 29), (3, 19), (5, 7), (6, 18), (7, 30), (9, 17), (10, 29), (12, 10)],
         2026: [(1, 28), (3, 18), (5, 6), (6, 17), (7, 29), (9, 16), (10, 28), (12, 9)],
+        2027: [(1, 27), (3, 17), (5, 5), (6, 16), (7, 28), (9, 22), (10, 27), (12, 15)],
     },
     # BCE : Jeudis d'annonce de politique monétaire à 12h15 UTC (+ Conférence à 12h45 UTC)
     "ECB": {
         2025: [(1, 30), (3, 6), (4, 17), (6, 5), (7, 24), (9, 11), (10, 30), (12, 18)],
         2026: [(1, 22), (3, 5), (4, 16), (6, 4), (7, 23), (9, 10), (10, 29), (12, 17)],
+        2027: [(1, 21), (3, 4), (4, 15), (6, 3), (7, 22), (9, 9), (10, 28), (12, 16)],
     },
     # BoE : Jeudis d'annonce du MPC à 12h00 UTC
     "BOE": {
         2025: [(2, 6), (3, 20), (5, 8), (6, 19), (8, 7), (9, 18), (11, 6), (12, 18)],
         2026: [(2, 5), (3, 19), (5, 7), (6, 18), (8, 6), (9, 17), (11, 5), (12, 17)],
+        2027: [(2, 4), (3, 18), (5, 6), (6, 17), (8, 5), (9, 16), (11, 4), (12, 16)],
     },
     # Bureau of Labor Statistics (BLS) - US Employment Situation (NFP & Taux de chômage) à 08h30 ET
     # Calendrier officiel publié : https://www.bls.gov/schedule/news_release/empsit.htm
     "BLS_NFP": {
         2025: {1: 10, 2: 7, 3: 7, 4: 4, 5: 2, 6: 6, 7: 3, 8: 1, 9: 5, 10: 3, 11: 7, 12: 5},
         2026: {1: 9, 2: 6, 3: 6, 4: 3, 5: 8, 6: 5, 7: 2, 8: 7, 9: 4, 10: 2, 11: 6, 12: 4},
+        2027: {1: 8, 2: 5, 3: 5, 4: 2, 5: 7, 6: 4, 7: 2, 8: 6, 9: 3, 10: 8, 11: 5, 12: 3},
     },
     # Bureau of Labor Statistics (BLS) - US Consumer Price Index (CPI) à 08h30 ET
     # Calendrier officiel publié : https://www.bls.gov/schedule/news_release/cpi.htm
     "BLS_CPI": {
         2025: {1: 15, 2: 12, 3: 12, 4: 10, 5: 13, 6: 11, 7: 15, 8: 13, 9: 11, 10: 15, 11: 12, 12: 10},
         2026: {1: 14, 2: 11, 3: 11, 4: 14, 5: 12, 6: 10, 7: 14, 8: 12, 9: 11, 10: 14, 11: 10, 12: 11},
+        2027: {1: 13, 2: 10, 3: 10, 4: 14, 5: 12, 6: 10, 7: 14, 8: 11, 9: 15, 10: 13, 11: 10, 12: 10},
     },
 }
 
@@ -370,8 +375,27 @@ class CalendarProvider:
         ) if quote_curr != base_curr else []
 
         all_events = events_base + events_quote
-        now = datetime.now(timezone.utc)
+        # Détermination du statut de la source calendrier
+        if self.last_fetch_time:
+            calendar_status = "OFFICIAL_LIVE_FEED"
+            cal_confidence = "VERIFIED"
+            is_cal_verified = True
+        else:
+            # Vérifier si des événements existent en mémoire locale de secours
+            stored_events = self.memory.get_upcoming_events(currency=base_curr, window_minutes=1440 * 14)
+            if not stored_events and quote_curr != base_curr:
+                stored_events = self.memory.get_upcoming_events(currency=quote_curr, window_minutes=1440 * 14)
 
+            if stored_events:
+                calendar_status = "LOCAL_FALLBACK"
+                cal_confidence = "APPROXIMATE"
+                is_cal_verified = False
+            else:
+                calendar_status = "UNAVAILABLE"
+                cal_confidence = "UNKNOWN"
+                is_cal_verified = False
+
+        now = datetime.now(timezone.utc)
         for ev in all_events:
             try:
                 ev_time = datetime.fromisoformat(ev["event_time"].replace("Z", "+00:00"))
@@ -379,8 +403,8 @@ class CalendarProvider:
 
                 # Si l'événement est dans la fenêtre [-window_minutes, +window_minutes]
                 if -window_minutes <= delta_minutes <= window_minutes:
-                    is_verif = bool(ev.get("is_verified", True))
-                    conf = str(ev.get("calendar_confidence", "VERIFIED"))
+                    is_verif = bool(ev.get("is_verified", False)) and is_cal_verified
+                    conf = str(ev.get("calendar_confidence", cal_confidence))
                     return {
                         "in_blackout": True,
                         "minutes_to_event": round(delta_minutes, 1),
@@ -389,6 +413,7 @@ class CalendarProvider:
                         "impact": ev.get("impact"),
                         "is_verified": is_verif,
                         "calendar_confidence": conf,
+                        "calendar_status": calendar_status,
                         "reason": f"Publication majeure à proximité ({ev.get('title')} dans {delta_minutes:+.0f} min) [{conf}].",
                     }
             except Exception:
@@ -400,7 +425,12 @@ class CalendarProvider:
             "event_title": None,
             "currency": None,
             "impact": "NONE",
-            "is_verified": True,
-            "calendar_confidence": "VERIFIED",
-            "reason": "Aucune publication à fort impact dans la fenêtre.",
+            "is_verified": is_cal_verified,
+            "calendar_confidence": cal_confidence,
+            "calendar_status": calendar_status,
+            "reason": (
+                "Aucune publication à fort impact dans la fenêtre."
+                if calendar_status != "UNAVAILABLE"
+                else "Calendrier économique indisponible (Fail-Closed recommandé)."
+            ),
         }

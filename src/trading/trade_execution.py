@@ -20,6 +20,9 @@ class TradeExecutionEngine:
         trade_memory=None,
         centinela=None,
         require_economic_context: Optional[bool] = None,
+        default_risk_percent: float = 1.0,
+        max_open_positions: int = 3,
+        strict_risk_ceiling: bool = True,
     ):
         from src.cerebros.el_centinela import ElCentinela
         self.mt5 = mt5_connector
@@ -31,6 +34,9 @@ class TradeExecutionEngine:
         self.allowed_trade_direction = allowed_trade_direction.upper()
         self.trade_memory = trade_memory
         self.centinela = centinela if centinela is not None else ElCentinela()
+        self.default_risk_percent = float(default_risk_percent)
+        self.max_open_positions = int(max_open_positions)
+        self.strict_risk_ceiling = bool(strict_risk_ceiling)
         # En mode automatique et semi-automatique, la présence et conformité du contexte économique est obligatoire (Fail-Closed)
         if require_economic_context is not None:
             self.require_economic_context = bool(require_economic_context)
@@ -777,6 +783,60 @@ class TradeExecutionEngine:
                 return {"success": False, "reason": f"El Centinela: Métriques broker nulles ou négatives pour {req_sym}."}
 
             recalc_risk_usd = (abs(req_price - req_sl) / tick_sz) * tick_val * req_vol
+
+            # 1. Vérification stricte du sens du Stop Loss vs Ordre d'Achat/Vente
+            req_type = request.get('type')
+            is_buy = (
+                req_type in (0, 2, 4)
+                or str(request.get('action', '')).upper() in ('BUY', '0')
+                or 'BUY' in str(request.get('type_str', '')).upper()
+            )
+            is_sell = (
+                req_type in (1, 3, 5)
+                or str(request.get('action', '')).upper() in ('SELL', '1')
+                or 'SELL' in str(request.get('type_str', '')).upper()
+            )
+
+            if is_buy and req_sl >= req_price:
+                logger.critical(
+                    f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
+                    f"SL ({req_sl}) >= Prix ({req_price}) sur ordre d'achat."
+                )
+                return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre d'achat (SL >= Prix)."}
+            elif is_sell and req_sl <= req_price:
+                logger.critical(
+                    f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
+                    f"SL ({req_sl}) <= Prix ({req_price}) sur ordre de vente."
+                )
+                return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre de vente (SL <= Prix)."}
+
+            # 2. Vérification du Quota maximal de positions ouvertes
+            effective_max_positions = getattr(self, 'max_open_positions', 3)
+            if pos_cnt >= effective_max_positions:
+                logger.critical(
+                    f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
+                    f"Quota maximal de positions atteint ({pos_cnt}/{effective_max_positions})."
+                )
+                return {
+                    "success": False,
+                    "reason": f"El Centinela: Quota maximal de positions atteint ({pos_cnt}/{effective_max_positions}).",
+                }
+
+            # 3. Vérification du Plafond Strict de Risque Monétaire (Strict Risk Ceiling)
+            if getattr(self, 'strict_risk_ceiling', True):
+                max_risk_pct = getattr(self, 'default_risk_percent', 1.0)
+                allowed_risk_budget = capital * (max_risk_pct / 100.0) * 1.05
+                if recalc_risk_usd > allowed_risk_budget:
+                    actual_pct = (recalc_risk_usd / capital) * 100.0
+                    logger.critical(
+                        f"🛑 [El Centinela - PLAFOND STRICT DE RISQUE DÉPASSÉ] Émission MT5 avortée pour {req_sym} : "
+                        f"Perte réelle potentielle de ${recalc_risk_usd:.2f} ({actual_pct:.2f}%) dépasse "
+                        f"le budget autorisé de ${allowed_risk_budget:.2f} ({max_risk_pct:.1f}%)."
+                    )
+                    return {
+                        "success": False,
+                        "reason": f"El Centinela: Risque réel de ${recalc_risk_usd:.2f} dépasse le plafond strict autorisé (${allowed_risk_budget:.2f}).",
+                    }
 
             final_sec_check = self.centinela.evaluar_seguridad(
                 capital=capital,

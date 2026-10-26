@@ -5,16 +5,21 @@ class AMDEngine:
     def __init__(self, lookback_period=20):
         self.lookback = lookback_period
         
-    def detect_fvg(self, df):
+    def detect_fvg(self, df, closed_bars_only=False):
         """
         Detects Fair Value Gaps in the last few candles.
         Bullish FVG: Low of candle 3 > High of candle 1
         Bearish FVG: High of candle 3 < Low of candle 1
+
+        Parameters:
+        - closed_bars_only: If True, excludes the currently forming bar (iloc[-1])
+          and inspects the last 3 fully closed candles to avoid repainting.
         """
-        if len(df) < 3:
+        target_df = df.iloc[:-1] if (closed_bars_only and len(df) >= 4) else df
+        if len(target_df) < 3:
             return "None"
             
-        recent = df.tail(3).copy()
+        recent = target_df.tail(3).copy()
         recent.reset_index(drop=True, inplace=True)
         
         c1_high, c1_low = recent.loc[0, 'high'], recent.loc[0, 'low']
@@ -73,25 +78,38 @@ class AMDEngine:
 
         return df
 
-    def detect_bos_mss(self, df):
+    def detect_bos_mss(self, df, fresh_breakout_only=True):
         """
         Detects Break of Structure (BOS) or Market Structure Shift (MSS).
-        Did the latest close break a recent swing high/low?
+        Validates if the latest close broke a confirmed swing high/low.
+
+        Parameters:
+        - fresh_breakout_only: If True, requires the breakout to be a transition
+          (i.e. prev_close <= swing_high and last_close > swing_high) rather than
+          triggering continuously on already-broken levels from bars ago.
         """
         df_swings = self.detect_swing_points(df)
         if len(df_swings) < 10:
             return "None"
             
         last_close = df_swings['close'].iloc[-1]
+        prev_close = df_swings['close'].iloc[-2]
         
         # Get last known swing high and low
         recent_highs = df_swings['swing_high'].dropna()
         recent_lows = df_swings['swing_low'].dropna()
         
-        if not recent_highs.empty and last_close > recent_highs.iloc[-1]:
-            return "Bullish BOS/MSS"
-        if not recent_lows.empty and last_close < recent_lows.iloc[-1]:
-            return "Bearish BOS/MSS"
+        if not recent_highs.empty:
+            last_swing_high = recent_highs.iloc[-1]
+            if last_close > last_swing_high:
+                if not fresh_breakout_only or prev_close <= last_swing_high:
+                    return "Bullish BOS/MSS"
+
+        if not recent_lows.empty:
+            last_swing_low = recent_lows.iloc[-1]
+            if last_close < last_swing_low:
+                if not fresh_breakout_only or prev_close >= last_swing_low:
+                    return "Bearish BOS/MSS"
             
         return "None"
         

@@ -82,6 +82,34 @@ class TestAMDEngine(unittest.TestCase):
         for key in ("Phase", "FVG", "BOS_MSS", "Liquidity_Grab"):
             self.assertIn(key, res)
 
+    def test_fvg_closed_bars_only_ignores_forming_bar(self):
+        """Si la dernière barre en cours crée un FVG non clôturé, closed_bars_only l'ignore."""
+        # 3 barres calmes, puis une 4e barre spike artificiel (en cours)
+        closes = [1.10, 1.10, 1.10, 1.25]
+        df = make_df(closes)
+        # Par défaut avec barre en cours : détecte FVG
+        self.assertEqual(self.engine.detect_fvg(df, closed_bars_only=False), "Bullish FVG")
+        # En forçant barres fermées uniquement : ignore la 4e barre et retourne None
+        self.assertEqual(self.engine.detect_fvg(df, closed_bars_only=True), "None")
+
+    def test_bos_mss_fresh_breakout_only(self):
+        """Vérifie qu'un BOS n'est déclenché qu'au moment précis de la cassure et pas sur 10 barres successives."""
+        # Pic confirmé à 1.20 à l'indice 4
+        closes = [1.10, 1.12, 1.15, 1.18, 1.20, 1.14, 1.12, 1.10, 1.15, 1.18]
+        df = make_df(closes)
+        # Aucune cassure au début
+        self.assertEqual(self.engine.detect_bos_mss(df, fresh_breakout_only=True), "None")
+
+        # Ajout de la bougie de cassure (1.22 > 1.20)
+        df_break = make_df(closes + [1.22])
+        self.assertEqual(self.engine.detect_bos_mss(df_break, fresh_breakout_only=True), "Bullish BOS/MSS")
+
+        # Bougie suivante qui reste au-dessus (1.23) -> Ce n'est plus une nouvelle cassure (prev_close était déjà > 1.20)
+        df_stale = make_df(closes + [1.22, 1.23])
+        self.assertEqual(self.engine.detect_bos_mss(df_stale, fresh_breakout_only=True), "None")
+        # Mais si fresh_breakout_only est désactivé, elle continue de retourner Bullish BOS/MSS
+        self.assertEqual(self.engine.detect_bos_mss(df_stale, fresh_breakout_only=False), "Bullish BOS/MSS")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

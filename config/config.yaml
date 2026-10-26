@@ -48,9 +48,9 @@ order_flow:
   dom_wall_multiplier: 2.0
   cvd_window_ticks: 1000
 risk_management:
-  default_risk_percent: 2.0
-  max_daily_loss_percent: 8.0
-  max_open_positions: 5
+  default_risk_percent: 1.0
+  max_daily_loss_percent: 4.0
+  max_open_positions: 3
   exclude_closed_markets_from_quota: true
   max_positions_per_symbol: 1
   max_lot_size: 2.0
@@ -74,11 +74,11 @@ risk_management:
   max_spread_sl_ratio: 0.25
   spread_buffer_max_cap: 0.4
   risk_profile: BALANCED
-  auto_tier_enabled: false
+  auto_tier_enabled: true
   max_micro_risk_cap_percent: 4.0
-  daily_profit_target_percent: 5.0
-  fixed_lot_size: 0.2
-  manual_max_positions_override: true
+  daily_profit_target_percent: 2.5
+  fixed_lot_size: 0.0
+  manual_max_positions_override: false
   strict_risk_ceiling: true
 ai_models:
   openrouter_model: google/gemma-4-26b-a4b-it:free

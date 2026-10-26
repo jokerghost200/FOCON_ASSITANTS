@@ -135,6 +135,20 @@ class RiskManager:
         self.fixed_lot_size = float(fixed_lot_size)
         self.strict_risk_ceiling = bool(strict_risk_ceiling)
 
+        if self.strict_risk_ceiling:
+            if self.default_risk_percent > 1.5:
+                logger.warning(
+                    f"⚠️ [Strict Risk Ceiling] default_risk_percent ({self.default_risk_percent}%) réduit à 1.5% "
+                    f"pour respecter la limite infranchissable du SafetyRiskGuard."
+                )
+                self.default_risk_percent = 1.5
+            if self.max_daily_loss_percent > 4.0:
+                logger.warning(
+                    f"⚠️ [Strict Risk Ceiling] max_daily_loss_percent ({self.max_daily_loss_percent}%) réduit à 4.0% "
+                    f"pour respecter le coupe-circuit du SafetyRiskGuard."
+                )
+                self.max_daily_loss_percent = 4.0
+
     @staticmethod
     def get_account_tier(balance: float) -> dict:
         """
@@ -239,8 +253,16 @@ class RiskManager:
             
             # Use fixed lot size if configured
             if hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0:
-                final_lot = max(min_lot, min(self.fixed_lot_size, effective_max))
-                logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
+                target_fixed = max(min_lot, min(self.fixed_lot_size, effective_max))
+                if getattr(self, 'strict_risk_ceiling', False) and (target_fixed * loss_per_lot) > (risk_amount * 1.05):
+                    logger.warning(
+                        f"⚠️ [Strict Risk Ceiling] Lot fixe ({self.fixed_lot_size}) plafonné à {calculated_lot} "
+                        f"pour respecter le budget maximal de ${risk_amount:.2f}."
+                    )
+                    final_lot = max(min_lot, min(calculated_lot, effective_max))
+                else:
+                    final_lot = target_fixed
+                    logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
             else:
                 final_lot = max(min_lot, min(calculated_lot, effective_max))
             
@@ -442,7 +464,11 @@ class RiskManager:
         # --- RÈGLE D'OR : LE CALCUL DU RISQUE EST INTRANSIGEANT ---
         is_fixed_lot = (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0) or bool(proposal.get('manual_lot_override'))
 
-        if not is_fixed_lot and capital > 0:
+        # Si strict_risk_ceiling est imposé, AUCUN lot (qu'il soit fixe, forcé ou issu du minimum broker)
+        # ne peut violer le plafond de perte monétaire autorisé.
+        should_enforce_risk = (not is_fixed_lot or getattr(self, 'strict_risk_ceiling', False)) and capital > 0
+
+        if should_enforce_risk:
             actual_risk_pct = (actual_risk_amount / capital) * 100.0
 
             # Cas 1 : Paliers automatiques actifs sur petits comptes (< $250) ET strict_risk_ceiling non imposé
@@ -467,15 +493,22 @@ class RiskManager:
                         f"risque effectif de ${actual_risk_amount:.2f} ({actual_risk_pct:.1f}% du capital)."
                     )
             else:
-                # Cas 2 : Comptes standards / sans auto-tier / mode strict : le lot min broker NE DOIT JAMAIS forcer un dépassement du risque
+                # Cas 2 : Mode strict / Comptes standards / Sans auto-tier : le risque réel NE DOIT JAMAIS dépasser le budget
                 # Marge tolérée de 5% pour l'arrondi du step de volume uniquement
                 if actual_risk_amount > allowed_risk_amount * 1.05:
+                    motifs = []
+                    if is_fixed_lot:
+                        motifs.append(f"lot fixe ou forcé ({lot})")
+                    if lot == min_lot:
+                        motifs.append(f"lot minimum broker ({min_lot})")
+                    lot_cause = " / ".join(motifs) if motifs else f"lot {lot}"
+
                     return {
                         "valid": False,
                         "reason": (
-                            f"🚫 [Risque Intransigeant] Risque réel (${actual_risk_amount:.2f} avec lot min {lot}) "
-                            f"dépasse le budget maximal autorisé de ${allowed_risk_amount:.2f} ({risk_percent:.1f}%). "
-                            f"Trade refusé : interdiction d'augmenter le risque pour satisfaire le minimum du broker ({min_lot})."
+                            f"🚫 [Plafond Strict de Risque] Risque réel de ${actual_risk_amount:.2f} ({actual_risk_pct:.2f}% du capital) "
+                            f"avec {lot_cause} dépasse le budget maximal autorisé de ${allowed_risk_amount:.2f} ({risk_percent:.1f}%). "
+                            f"Trade refusé (strict_risk_ceiling actif)."
                         )
                     }
         # ---------------------------------------
