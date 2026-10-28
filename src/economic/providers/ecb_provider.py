@@ -49,11 +49,16 @@ ECB_SERIES_CONFIG = [
         "description": "ECB Marginal Lending Facility Rate",
     },
     {
-        "flow": "ICP",
-        "key": "M.U2.N.000000.4.ANR",
+        # Série active post-février 2026 : HICP (ECOICOP v2 / 2025=100)
+        # 4D0 correspond à l'indice d'ensemble (All-items HICP)
+        "flow": "HICP",
+        "key": "M.U2.N.000000.4D0.ANR",
         "indicator": "HICP_INFLATION",
         "unit": "PERCENT",
-        "description": "Euro Area HICP Annual Rate of Change",
+        "description": "Euro Area HICP Annual Rate of Change (ECOICOP v2, 2025=100)",
+        # Série historique conservée en fallback (remplacée en fév 2026)
+        "legacy_flow": "ICP",
+        "legacy_key": "M.U2.N.000000.4.ANR",
     },
 ]
 
@@ -80,84 +85,96 @@ class ECBProvider(BaseEconomicProvider):
     def fetch_latest_indicators(self, last_n_observations: int = 2) -> List[Dict[str, Any]]:
         """
         Interroge l'API SDMX de la BCE pour chaque série configurée.
+        Priorise le flux actif HICP et recourt au flux historique ICP si nécessaire.
         Retourne les indicateurs normalisés et les stocke dans EconomicMemory.
         """
         collected_indicators: List[Dict[str, Any]] = []
 
         for cfg in ECB_SERIES_CONFIG:
-            flow = cfg["flow"]
-            key = cfg["key"]
-            url = f"{ECB_BASE_URL}/{flow}/{key}?lastNObservations={last_n_observations}&format=jsondata"
+            primary_flow = cfg["flow"]
+            primary_key = cfg["key"]
+            candidate_series = [(primary_flow, primary_key)]
+            if "legacy_flow" in cfg and "legacy_key" in cfg:
+                candidate_series.append((cfg["legacy_flow"], cfg["legacy_key"]))
 
-            raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
-            if raw_bytes is None:
-                if self.last_status != "ERROR":
-                    self.record_error("NETWORK", f"Requête HTTP BCE échouée pour {key}")
-                continue
-
-            data = self._safe_json_loads(raw_bytes)
-            if not data:
-                logger.warning(f"🛑 [ECBProvider] Données indisponibles pour la série {key}")
-                continue
-
-
-            data_sets = data.get("dataSets")
-            if not data_sets or not isinstance(data_sets, list):
-                self.record_error("SCHEMA_VALIDATION", f"Structure ECB inattendue pour {key}: 'dataSets' manquant")
-                logger.warning(f"🛑 [ECBProvider] Structure inattendue pour {key}")
-                continue
-
-            # Parsing des dimensions temporelles SDMX
-            time_values = (
-                data.get("structure", {})
-                .get("dimensions", {})
-                .get("observation", [{}])[0]
-                .get("values", [])
-            )
-            time_labels = [t.get("id") or str(t.get("name")) for t in time_values]
-
-            series_dict = data_sets[0].get("series", {})
-            for _, s_info in series_dict.items():
-                observations = s_info.get("observations", {})
-                # Trier par index numérique croissant pour trouver la dernière observation
-                sorted_obs_keys = sorted(observations.keys(), key=lambda x: int(x))
-                if not sorted_obs_keys:
+            series_collected = False
+            for flow, key in candidate_series:
+                url = f"{ECB_BASE_URL}/{flow}/{key}?lastNObservations={last_n_observations}&format=jsondata"
+                raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
+                if raw_bytes is None:
                     continue
 
-                latest_idx_str = sorted_obs_keys[-1]
-                latest_idx = int(latest_idx_str)
-                obs_val_list = observations[latest_idx_str]
-
-                if not obs_val_list or obs_val_list[0] is None:
+                data = self._safe_json_loads(raw_bytes)
+                if not data:
                     continue
 
-                try:
-                    val_float = float(obs_val_list[0])
-                except (ValueError, TypeError):
+                data_sets = data.get("dataSets")
+                if not data_sets or not isinstance(data_sets, list) or len(data_sets) == 0:
+                    self.record_error("SCHEMA_VALIDATION", f"Structure ECB inattendue pour {key}: 'dataSets' manquant ou vide")
+                    logger.warning(f"🛑 [ECBProvider] Structure inattendue pour {key}")
                     continue
 
-                ref_period = time_labels[latest_idx] if latest_idx < len(time_labels) else "LATEST"
-
-                # Pour les taux directeurs, ref_period correspond à la date d'effet (effective_date).
-                # La date de publication réelle n'est pas fournie dans le flux FM ; on conserve None
-                # pour ne jamais fabriquer une fausse date de publication.
-                is_policy_rate = any(k in cfg["indicator"] for k in ("RATE", "DFR", "MRO", "MLFR"))
-                effective_iso = f"{ref_period}T00:00:00+00:00" if (is_policy_rate and len(ref_period) == 10) else (ref_period if is_policy_rate else None)
-
-                ind = self.normalize_indicator(
-                    indicator=cfg["indicator"],
-                    currency_or_region="EUR",
-                    value=val_float,
-                    unit=cfg["unit"],
-                    reference_period=ref_period,
-                    effective_date=effective_iso,
-                    published_at=None,
-                    source_url=url,
-                    is_official=True,
-                    revision="INITIAL",
+                # Parsing des dimensions temporelles SDMX
+                time_values = (
+                    data.get("structure", {})
+                    .get("dimensions", {})
+                    .get("observation", [{}])[0]
+                    .get("values", [])
                 )
-                collected_indicators.append(ind)
-                self.memory.store_official_indicator(ind)
+                time_labels = [t.get("id") or str(t.get("name")) for t in time_values]
+
+                series_dict = data_sets[0].get("series", {})
+                if not series_dict:
+                    continue
+
+                for _, s_info in series_dict.items():
+                    observations = s_info.get("observations", {})
+                    sorted_obs_keys = sorted(observations.keys(), key=lambda x: int(x))
+                    if not sorted_obs_keys:
+                        continue
+
+                    latest_idx_str = sorted_obs_keys[-1]
+                    latest_idx = int(latest_idx_str)
+                    obs_val_list = observations[latest_idx_str]
+
+                    if not obs_val_list or obs_val_list[0] is None:
+                        continue
+
+                    try:
+                        val_float = float(obs_val_list[0])
+                    except (ValueError, TypeError):
+                        continue
+
+                    ref_period = time_labels[latest_idx] if latest_idx < len(time_labels) else "LATEST"
+
+                    # Pour les taux directeurs, ref_period correspond à la date d'effet (effective_date).
+                    # La date de publication réelle n'est pas fournie dans le flux FM ; on conserve None
+                    # pour ne jamais fabriquer une fausse date de publication.
+                    is_policy_rate = any(k in cfg["indicator"] for k in ("RATE", "DFR", "MRO", "MLFR"))
+                    effective_iso = f"{ref_period}T00:00:00+00:00" if (is_policy_rate and len(ref_period) == 10) else (ref_period if is_policy_rate else None)
+
+                    ind = self.normalize_indicator(
+                        indicator=cfg["indicator"],
+                        currency_or_region="EUR",
+                        value=val_float,
+                        unit=cfg["unit"],
+                        reference_period=ref_period,
+                        effective_date=effective_iso,
+                        published_at=None,
+                        source_url=url,
+                        is_official=True,
+                        revision="INITIAL",
+                    )
+                    collected_indicators.append(ind)
+                    self.memory.store_official_indicator(ind)
+                    series_collected = True
+                    break
+
+                if series_collected:
+                    break
+
+            if not series_collected:
+                logger.warning(f"🛑 [ECBProvider] Données indisponibles pour la série {cfg['indicator']}")
 
         if collected_indicators:
             self.record_business_success(len(collected_indicators))

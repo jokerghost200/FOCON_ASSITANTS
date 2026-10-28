@@ -347,8 +347,16 @@ class ElEconomista:
         is_fresh = True
 
         # 1. Inflation (CPI / HICP)
-        base_cpi = self.memory.get_latest_official_indicator("CPI_YOY", base_curr) or self.memory.get_latest_official_indicator("HICP_YOY", base_curr)
-        quote_cpi = self.memory.get_latest_official_indicator("CPI_YOY", quote_curr) or self.memory.get_latest_official_indicator("HICP_YOY", quote_curr)
+        base_cpi = (
+            self.memory.get_latest_official_indicator("CPI_YOY", base_curr)
+            or self.memory.get_latest_official_indicator("HICP_INFLATION", base_curr)
+            or self.memory.get_latest_official_indicator("HICP_YOY", base_curr)
+        )
+        quote_cpi = (
+            self.memory.get_latest_official_indicator("CPI_YOY", quote_curr)
+            or self.memory.get_latest_official_indicator("HICP_INFLATION", quote_curr)
+            or self.memory.get_latest_official_indicator("HICP_YOY", quote_curr)
+        )
 
         if base_cpi and quote_cpi:
             if base_cpi.get("status") in ("UNKNOWN", "STALE") or quote_cpi.get("status") in ("UNKNOWN", "STALE"):
@@ -559,13 +567,28 @@ class ElEconomista:
 
             p_inds = [i for i in all_inds if str(i.get("source", "")).upper() == p_name]
             
-            # Recalcul de fraîcheur indépendant et décompte strict
+            # Regrouper par indicateur pour évaluer la fraîcheur sur la dernière observation de chaque série
+            latest_by_indicator: Dict[str, Dict[str, Any]] = {}
+            for ind in p_inds:
+                iname = str(ind.get("indicator", "UNKNOWN")).upper()
+                curr_item = latest_by_indicator.get(iname)
+                if not curr_item:
+                    latest_by_indicator[iname] = ind
+                else:
+                    d_curr = curr_item.get("effective_date") or curr_item.get("published_at") or curr_item.get("reference_period") or ""
+                    d_new = ind.get("effective_date") or ind.get("published_at") or ind.get("reference_period") or ""
+                    if str(d_new) > str(d_curr):
+                        latest_by_indicator[iname] = ind
+
+            active_inds = list(latest_by_indicator.values())
+
+            # Recalcul de fraîcheur indépendant et décompte strict sur les observations actives les plus récentes
             recomputed_current = 0
             recomputed_stale = 0
             recomputed_unknown = 0
-            validated_count = p_health.get("last_validated_indicators_count", len(p_inds))
+            validated_count = p_health.get("last_validated_indicators_count", len(active_inds))
 
-            for ind in p_inds:
+            for ind in active_inds:
                 name = ind.get("indicator", "UNKNOWN")
                 period = ind.get("reference_period")
                 eff_date = ind.get("effective_date")
@@ -585,8 +608,8 @@ class ElEconomista:
                 else:
                     recomputed_unknown += 1
 
-            total_collected = len(p_inds)
-            missing_count = max(0, len(expected_series) - total_collected)
+            total_series_available = len(active_inds)
+            missing_count = max(0, len(expected_series) - total_series_available)
 
             if p_status == "UNINITIALIZED":
                 display_status = "CACHED_SQLITE" if p_inds else "UNINITIALIZED"
@@ -594,20 +617,20 @@ class ElEconomista:
                 display_status = p_status
 
             # Règle stricte d'étiquetage : interdiction absolue de "VALIDE & FRAIS" si partiel, périmé ou en erreur
-            if p_status == "ERROR" or (last_err and total_collected == 0):
+            if p_status == "ERROR" or (last_err and total_series_available == 0):
                 summary_tag = "ERREUR RESEAU / HTTP"
             elif missing_count > 0 or (expected_series and validated_count < len(expected_series)):
-                summary_tag = f"COUVERTURE PARTIELLE ({total_collected}/{len(expected_series)})"
+                summary_tag = f"COUVERTURE PARTIELLE ({total_series_available}/{len(expected_series)})"
             elif recomputed_stale > 0:
                 summary_tag = f"DONNEES PERIMEES ({recomputed_stale} STALE)"
             elif recomputed_unknown > 0:
                 summary_tag = f"STATUT INCERTAIN ({recomputed_unknown} UNKNOWN)"
-            elif total_collected > 0 and recomputed_current == total_collected and not last_err:
+            elif total_series_available > 0 and recomputed_current == total_series_available and not last_err:
                 summary_tag = "VALIDE & FRAIS (COMPLET)"
             else:
                 summary_tag = "COUVERTURE PARTIELLE"
 
-            lines.append(f"  * {p_label:<24} : [{display_status}] {total_collected} collecté(s) | {summary_tag}")
+            lines.append(f"  * {p_label:<24} : [{display_status}] {total_series_available} série(s) | {summary_tag}")
             
             # Affichage détaillé des métriques du fournisseur
             fetch_str = str(last_fetch)[:19] if last_fetch else "Aucune"

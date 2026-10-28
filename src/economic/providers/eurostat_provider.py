@@ -28,18 +28,22 @@ EUROSTAT_BASE_URL = "https://ec.europa.eu/eurostat/api/dissemination/statistics/
 
 EUROSTAT_DATASETS = [
     {
-        "code": "prc_hicp_manr",
+        # Remplacement officiel du jeu prc_hicp_manr arrêté
+        "code": "prc_hicp_minr",
         "indicator": "HICP_INFLATION",
         "unit": "PERCENT",
-        "params": "coicop=CP00&lastTimePeriod=6",
-        "geo_candidates": ["EA", "EA21", "EA20"],
-        "description": "Euro Area HICP Monthly Inflation (Annual Rate)",
+        "params": "unit=RCH_A&coicop18=TOTAL&lastTimePeriod=6",
+        "geo_candidates": ["EA21", "EA20", "EA"],
+        "fallback_params": ["unit=RCH_A&coicop=CP00&lastTimePeriod=6"],
+        "legacy_code": "prc_hicp_manr",
+        "legacy_params": "coicop=CP00&lastTimePeriod=6",
+        "description": "Euro Area HICP Monthly Inflation (Annual Rate, replacement prc_hicp_minr)",
     },
     {
         "code": "une_rt_m",
         "indicator": "UNEMPLOYMENT",
         "unit": "PERCENT",
-        "params": "s_adj=SA&age=TOTAL&unit=PC_ACT&sex=T&sinceTimePeriod=2024-01",
+        "params": "s_adj=SA&age=TOTAL&unit=PC_ACT&sex=T&lastTimePeriod=6",
         "geo_candidates": ["EA21", "EA20", "EA"],
         "description": "Euro Area Harmonized Unemployment Rate",
     },
@@ -47,7 +51,7 @@ EUROSTAT_DATASETS = [
         "code": "namq_10_gdp",
         "indicator": "GDP_GROWTH_YOY",
         "unit": "PERCENT",
-        "params": "unit=CLV_PCH_SM&na_item=B1GQ&s_adj=SCA&sinceTimePeriod=2024-Q1",
+        "params": "unit=CLV_PCH_SM&na_item=B1GQ&s_adj=SCA&lastTimePeriod=6",
         "geo_candidates": ["EA21", "EA20", "EA"],
         "description": "Euro Area Real GDP Growth Rate (YoY)",
     },
@@ -75,6 +79,8 @@ class EurostatProvider(BaseEconomicProvider):
     def fetch_latest_indicators(self) -> List[Dict[str, Any]]:
         """
         Interroge Eurostat pour chaque indicateur configuré.
+        Supporte les jeux actifs (prc_hicp_minr avec coicop18=TOTAL) et fallbacks documentés.
+        Valide rigoureusement l'appartenance à la zone euro (EA21/EA20/EA).
         Retourne la liste des indicateurs normalisés et les stocke dans EconomicMemory.
         """
         collected_indicators: List[Dict[str, Any]] = []
@@ -83,77 +89,94 @@ class EurostatProvider(BaseEconomicProvider):
             code = ds["code"]
             indicator_name = ds["indicator"]
             unit = ds["unit"]
-            params = ds["params"]
+            primary_params = ds["params"]
+            geo_candidates = ds["geo_candidates"]
+
+            # Préparer les variantes : flux primaire, puis fallbacks si présents
+            query_variants = [(code, primary_params)]
+            for fb_p in ds.get("fallback_params", []):
+                query_variants.append((code, fb_p))
+            if "legacy_code" in ds and "legacy_params" in ds:
+                query_variants.append((ds["legacy_code"], ds["legacy_params"]))
 
             dataset_success = False
 
-            # Essaye les codes de zone euro successifs (ex: EA21, puis EA20, puis EA)
-            for geo in ds["geo_candidates"]:
-                url = f"{EUROSTAT_BASE_URL}/{code}?geo={geo}&{params}"
-                raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
-                if raw_bytes is None:
-                    if self.last_status != "ERROR":
-                        self.record_error("NETWORK", f"Requête HTTP Eurostat échouée pour {code}")
-                    continue
+            for query_code, query_params in query_variants:
+                if dataset_success:
+                    break
 
+                for geo in geo_candidates:
+                    url = f"{EUROSTAT_BASE_URL}/{query_code}?geo={geo}&{query_params}"
+                    raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
+                    if raw_bytes is None:
+                        continue
 
-                data = self._safe_json_loads(raw_bytes)
-                if not data:
-                    continue
+                    data = self._safe_json_loads(raw_bytes)
+                    if not data:
+                        continue
 
+                    if "dimension" not in data or not isinstance(data.get("dimension"), dict):
+                        self.record_error("SCHEMA_VALIDATION", f"Structure Eurostat inattendue pour {query_code}: 'dimension' manquante")
+                        logger.warning(f"🛑 [EurostatProvider] Structure inattendue pour {query_code}")
+                        continue
 
-                if "dimension" not in data or not isinstance(data.get("dimension"), dict):
-                    self.record_error("SCHEMA_VALIDATION", f"Structure Eurostat inattendue pour {code}: 'dimension' manquante")
-                    logger.warning(f"🛑 [EurostatProvider] Structure inattendue pour {code}")
-                    continue
+                    # Validation géographique stricte : la réponse DOIT cibler la zone euro
+                    geo_dim = data.get("dimension", {}).get("geo", {}).get("category", {})
+                    returned_geos = set(geo_dim.get("index", {}).keys())
+                    valid_ea_codes = {"EA", "EA21", "EA20", "EA19"}
+                    if returned_geos and not returned_geos.intersection(valid_ea_codes):
+                        reason = f"Zone géographique non Eurozone reçue ({returned_geos}) pour {query_code}"
+                        self.record_error("SCHEMA_VALIDATION", reason)
+                        logger.warning(f"🛑 [EurostatProvider] ⚠️ {reason}")
+                        continue
 
-                values_dict = data.get("value", {})
-                if not values_dict:
-                    # Données vides pour ce code geo, tente le suivant
-                    continue
+                    values_dict = data.get("value", {})
+                    if not values_dict:
+                        # Données vides pour ce code geo, tente le suivant
+                        continue
 
-                category = data.get("dimension", {}).get("time", {}).get("category", {})
-                time_index = category.get("index", {})
-                time_label = category.get("label", {})
+                    category = data.get("dimension", {}).get("time", {}).get("category", {})
+                    time_index = category.get("index", {})
+                    time_label = category.get("label", {})
 
-                # Récupérer la dernière observation valide disponible
-                sorted_indices = sorted(values_dict.keys(), key=lambda x: int(x))
-                if not sorted_indices:
-                    continue
+                    # Récupérer la dernière observation valide disponible
+                    sorted_indices = sorted(values_dict.keys(), key=lambda x: int(x))
+                    if not sorted_indices:
+                        continue
 
-                latest_idx_str = sorted_indices[-1]
-                latest_idx = int(latest_idx_str)
-                latest_val = values_dict[latest_idx_str]
+                    latest_idx_str = sorted_indices[-1]
+                    latest_idx = int(latest_idx_str)
+                    latest_val = values_dict[latest_idx_str]
 
-                try:
-                    val_float = float(latest_val)
-                except (ValueError, TypeError):
-                    continue
+                    try:
+                        val_float = float(latest_val)
+                    except (ValueError, TypeError):
+                        continue
 
-                # Association stricte et mathématique de la période à l'index de valeur
-                if time_index:
-                    idx_to_time = {int(v): k for k, v in time_index.items()}
-                    time_code = idx_to_time.get(latest_idx)
-                    ref_period = str(time_label.get(time_code, time_code)) if time_code else "LATEST"
-                else:
-                    time_list = list(time_label.values())
-                    ref_period = str(time_list[latest_idx]) if latest_idx < len(time_list) else "LATEST"
+                    # Association stricte et mathématique de la période à l'index de valeur
+                    if time_index:
+                        idx_to_time = {int(v): k for k, v in time_index.items()}
+                        time_code = idx_to_time.get(latest_idx)
+                        ref_period = str(time_label.get(time_code, time_code)) if time_code else "LATEST"
+                    else:
+                        time_list = list(time_label.values())
+                        ref_period = str(time_list[latest_idx]) if latest_idx < len(time_list) else "LATEST"
 
-                ind = self.normalize_indicator(
-                    indicator=indicator_name,
-                    currency_or_region="EUR",
-                    value=val_float,
-                    unit=unit,
-                    reference_period=ref_period,
-                    published_at=None,
-                    source_url=url,
-                    is_official=True,
-                    revision="INITIAL",
-                )
-                collected_indicators.append(ind)
-                self.memory.store_official_indicator(ind)
-                dataset_success = True
-                break
+                    ind = self.normalize_indicator(
+                        indicator=indicator_name,
+                        currency_or_region="EUR",
+                        value=val_float,
+                        unit=unit,
+                        reference_period=ref_period,
+                        published_at=None,
+                        source_url=url,
+                        is_official=True,
+                        revision="INITIAL",
+                    )
+                    collected_indicators.append(ind)
+                    self.memory.store_official_indicator(ind)
+                    dataset_success = True
+                    break
 
             if not dataset_success:
                 logger.warning(f"🛑 [EurostatProvider] Impossible d'obtenir {indicator_name} depuis Eurostat")

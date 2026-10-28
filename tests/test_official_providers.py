@@ -1009,5 +1009,387 @@ def test_generar_tabla_salud_economica_strict_rules(mem_db):
     assert "VALIDE & FRAIS (COMPLET)" not in tabla3
 
 
+# ── Tests Obligatoires Spécifiques : Vérification des Flux BCE & Eurostat ──
+
+def test_ecb_hicp_replacement_and_fallback(mem_db):
+    """
+    Vérifie la collecte HICP via le flux actif HICP (4D0) post-février 2026
+    et le fallback vers le flux historique ICP si le nouveau flux échoue.
+    """
+    provider = ECBProvider(memory=mem_db, timeout_seconds=1.0)
+
+    # Réponse simulée SDMX 1.0 JSON pour HICP/M.U2.N.000000.4D0.ANR
+    mock_hicp_sdmx = {
+        "structure": {
+            "dimensions": {
+                "observation": [
+                    {"values": [{"id": "2026-08"}, {"id": "2026-09"}]}
+                ]
+            }
+        },
+        "dataSets": [
+            {
+                "series": {
+                    "0:0:0:0": {
+                        "observations": {
+                            "0": [3.2, None, None],
+                            "1": [3.8, None, None],
+                        }
+                    }
+                }
+            }
+        ],
+    }
+
+    # 1. Cas nominal : le flux HICP répond avec succès
+    with patch.object(provider, "_http_request", return_value=json.dumps(mock_hicp_sdmx).encode("utf-8")):
+        inds = provider.fetch_latest_indicators(last_n_observations=2)
+        assert len(inds) == 4
+        hicp = mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR", source="ECB")
+        assert hicp is not None
+        assert hicp["value"] == 3.8
+        assert hicp["reference_period"] == "2026-09"
+        assert hicp["unit"] == "PERCENT"
+        assert hicp["status"] == "OFFICIAL_CURRENT"
+
+    # 2. Cas fallback : le flux HICP renvoie 404/None, puis le flux hérité ICP répond
+    def mock_ecb_fallback(url, headers=None):
+        if "HICP/" in url:
+            return None  # Échec du nouveau flux
+        elif "ICP/" in url:
+            # Succès du fallback hérité
+            legacy_sdmx = dict(mock_hicp_sdmx)
+            legacy_sdmx["dataSets"][0]["series"]["0:0:0:0"]["observations"]["1"] = [1.9, None, None]
+            return json.dumps(legacy_sdmx).encode("utf-8")
+        return json.dumps(mock_hicp_sdmx).encode("utf-8")
+
+    mem_db_fallback = EconomicMemory(db_path=":memory:")
+    provider_fallback = ECBProvider(memory=mem_db_fallback, timeout_seconds=1.0)
+    with patch.object(provider_fallback, "_http_request", side_effect=mock_ecb_fallback):
+        inds_fb = provider_fallback.fetch_latest_indicators(last_n_observations=2)
+        assert len(inds_fb) == 4
+        hicp_fb = mem_db_fallback.get_latest_official_indicator("HICP_INFLATION", "EUR", source="ECB")
+        assert hicp_fb is not None
+        assert hicp_fb["value"] == 1.9
+
+
+def test_eurostat_prc_hicp_minr_replacement_and_fallback(mem_db):
+    """
+    Vérifie le remplacement de prc_hicp_manr par prc_hicp_minr (unit=RCH_A, coicop18=TOTAL)
+    avec support du fallback coicop=CP00 / prc_hicp_manr.
+    """
+    provider = EurostatProvider(memory=mem_db, timeout_seconds=1.0)
+
+    # Réponse JSON Eurostat pour prc_hicp_minr (zone EA21, taux annuel 3.8% en 2026-09)
+    mock_minr_json = {
+        "value": {"0": 2.9, "1": 3.2, "2": 3.8},
+        "dimension": {
+            "geo": {
+                "category": {
+                    "index": {"EA21": 0},
+                    "label": {"EA21": "Euro area - 21 countries (from 2026)"}
+                }
+            },
+            "time": {
+                "category": {
+                    "index": {"2026-07": 0, "2026-08": 1, "2026-09": 2},
+                    "label": {"2026-07": "2026-07", "2026-08": "2026-08", "2026-09": "2026-09"}
+                }
+            }
+        }
+    }
+
+    with patch.object(provider, "_http_request", return_value=json.dumps(mock_minr_json).encode("utf-8")):
+        inds = provider.fetch_latest_indicators()
+        assert len(inds) == 3
+        hicp = mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR", source="EUROSTAT")
+        assert hicp is not None
+        assert hicp["value"] == 3.8
+        assert hicp["reference_period"] == "2026-09"
+        assert hicp["unit"] == "PERCENT"
+        assert hicp["status"] == "OFFICIAL_CURRENT"
+
+
+def test_provider_http_200_without_observations(mem_db):
+    """
+    Vérifie le comportement sécurisé face à une réponse HTTP 200 avec payload vide d'observations :
+    - Ne stocke aucune donnée corrompue
+    - Ne fait pas échouer l'application
+    - Signale l'anomalie de schéma
+    """
+    # 1. Test BCE HTTP 200 avec observations vides
+    ecb_empty = {
+        "structure": {"dimensions": {"observation": [{"values": [{"id": "2026-09"}]}]}},
+        "dataSets": [{"series": {"0:0:0:0": {"observations": {}}}}],
+    }
+    provider_ecb = ECBProvider(memory=mem_db, timeout_seconds=1.0)
+    with patch.object(provider_ecb, "_http_request", return_value=json.dumps(ecb_empty).encode("utf-8")):
+        inds = provider_ecb.fetch_latest_indicators()
+        assert len(inds) == 0
+        assert provider_ecb.last_error_type == "SCHEMA_VALIDATION"
+
+    # 2. Test Eurostat HTTP 200 avec dictionnaire 'value' vide
+    eurostat_empty = {
+        "value": {},
+        "dimension": {
+            "geo": {"category": {"index": {"EA20": 0}}},
+            "time": {"category": {"label": {"0": "2026-09"}}}
+        }
+    }
+    provider_euro = EurostatProvider(memory=mem_db, timeout_seconds=1.0)
+    with patch.object(provider_euro, "_http_request", return_value=json.dumps(eurostat_empty).encode("utf-8")):
+        inds_e = provider_euro.fetch_latest_indicators()
+        assert len(inds_e) == 0
+        assert provider_euro.last_error_type == "SCHEMA_VALIDATION"
+
+
+def test_provider_invalid_json_or_sdmx_payload(mem_db):
+    """
+    Vérifie la robustesse face à un payload corrompu ou non-JSON (HTML 404, XML non parsable, bytes tronqués).
+    """
+    provider = ECBProvider(memory=mem_db, timeout_seconds=1.0)
+    with patch.object(provider, "_http_request", return_value=b"<html><head><title>502 Bad Gateway</title></head></html>"):
+        inds = provider.fetch_latest_indicators()
+        assert len(inds) == 0
+        assert provider.last_error_type == "JSON_PARSE"
+        assert provider.parsing_failure_count >= 1
+
+
+def test_provider_http_and_network_errors(mem_db):
+    """
+    Vérifie la distinction stricte entre erreur HTTP (ex: 404/500) et erreur Réseau (timeout/DNS/connexion).
+    """
+    provider = BaseEconomicProvider(name="TEST_ERRORS", timeout_seconds=0.1, max_retries=1, backoff_factor=0.01)
+
+    # Erreur HTTP 404
+    http_err = urllib.error.HTTPError("https://api.test/data", 404, "Not Found", {}, None)
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        res = provider._http_request("https://api.test/data")
+        assert res is None
+        assert provider.last_error_type == "HTTP"
+        assert provider.last_http_code == 404
+
+    # Erreur Réseau (URLError timeout)
+    url_err = urllib.error.URLError("Connection timed out")
+    with patch("urllib.request.urlopen", side_effect=url_err):
+        res = provider._http_request("https://api.test/data")
+        assert res is None
+        assert provider.last_error_type == "NETWORK"
+        assert "timed out" in str(provider.last_error_reason).lower()
+
+
+def test_provider_missing_reference_period(mem_db):
+    """
+    Vérifie qu'une réponse sans période de référence est signalée comme UNKNOWN
+    et pénalisée en âge, sans jamais fabriquer une fausse date contemporaine.
+    """
+    stat, age = BaseEconomicProvider.evaluate_staleness("HICP_INFLATION", reference_period=None)
+    assert stat == "UNKNOWN"
+    assert age == 999.0
+
+    stat_empty, age_empty = BaseEconomicProvider.evaluate_staleness("HICP_INFLATION", reference_period="")
+    assert stat_empty == "UNKNOWN"
+    assert age_empty == 999.0
+
+
+def test_eurostat_wrong_geographic_zone_rejected(mem_db):
+    """
+    Vérifie qu'Eurostat refuse formellement d'ingérer des données hors zone euro
+    (ex: EU27_2020 au lieu de EA/EA21, ou pays individuel comme l'Allemagne ou les USA).
+    """
+    provider = EurostatProvider(memory=mem_db, timeout_seconds=1.0)
+
+    # Réponse avec geo=EU27_2020 (Union Européenne entière à 27 pays, non applicable à la zone euro)
+    mock_eu_json = {
+        "value": {"0": 2.5},
+        "dimension": {
+            "geo": {
+                "category": {
+                    "index": {"EU27_2020": 0},
+                    "label": {"EU27_2020": "European Union - 27 countries (from 2020)"}
+                }
+            },
+            "time": {
+                "category": {
+                    "index": {"2026-09": 0},
+                    "label": {"2026-09": "2026-09"}
+                }
+            }
+        }
+    }
+
+    with patch.object(provider, "_http_request", return_value=json.dumps(mock_eu_json).encode("utf-8")):
+        inds = provider.fetch_latest_indicators()
+        # Doit être rejeté et non stocké
+        assert len(inds) == 0
+        assert provider.last_error_type == "SCHEMA_VALIDATION"
+        assert "Zone géographique non Eurozone" in provider.last_error_reason
+        assert mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR") is None
+
+
+def test_sqlite_deduplication_and_no_duplicates(mem_db):
+    """
+    Vérifie que des collectes successives de la même période économique
+    ne génèrent aucun doublon dans SQLite et mettent à jour les champs nécessaires.
+    """
+    now_str = datetime.now(timezone.utc).isoformat()
+    ind = {
+        "source": "ECB",
+        "indicator": "HICP_INFLATION",
+        "currency_or_region": "EUR",
+        "value": 3.8,
+        "unit": "PERCENT",
+        "reference_period": "2026-09",
+        "retrieved_at": now_str,
+        "status": "OFFICIAL_CURRENT",
+    }
+
+    assert mem_db.store_official_indicator(ind) is True
+    assert mem_db.store_official_indicator(ind) is True  # Collecte répétée identique
+
+    # Modification de valeur (révision)
+    ind_updated = dict(ind)
+    ind_updated["value"] = 3.9
+    ind_updated["revision"] = "REVISED"
+    assert mem_db.store_official_indicator(ind_updated) is True
+
+    # Vérification dans SQLite : une seule ligne pour cette période
+    indicators = mem_db.get_official_indicators(currency_or_region="EUR", indicator="HICP_INFLATION")
+    assert len(indicators) == 1
+    assert indicators[0]["value"] == 3.9
+    assert indicators[0]["revision"] == "REVISED"
+
+
+def test_collection_failure_preserves_previous_valid_data(mem_db):
+    """
+    Vérifie qu'un échec de collecte ultérieur (500, timeout, payload vide)
+    ne supprime ni n'écrase JAMAIS une observation économique valide déjà présente en base.
+    """
+    # 1. Enregistrement initial valide
+    valid_ind = {
+        "source": "ECB",
+        "indicator": "HICP_INFLATION",
+        "currency_or_region": "EUR",
+        "value": 3.8,
+        "unit": "PERCENT",
+        "reference_period": "2026-09",
+        "retrieved_at": "2026-10-20T10:00:00+00:00",
+        "status": "OFFICIAL_CURRENT",
+    }
+    mem_db.store_official_indicator(valid_ind)
+
+    # 2. Nouvelle tentative de collecte en échec total (réseau hors ligne)
+    provider = ECBProvider(memory=mem_db, timeout_seconds=1.0)
+    with patch.object(provider, "_http_request", return_value=None):
+        inds = provider.fetch_latest_indicators()
+        assert len(inds) == 0
+
+    # 3. La donnée précédente en base reste 100% intacte et accessible
+    stored = mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR")
+    assert stored is not None
+    assert stored["value"] == 3.8
+    assert stored["reference_period"] == "2026-09"
+    assert stored["status"] == "OFFICIAL_CURRENT"
+
+
+def test_distinction_between_retrieved_at_and_reference_period(mem_db):
+    """
+    Vérifie qu'une observation collectée aujourd'hui mais portant sur une période ancienne
+    conserve sa date de collecte séparée et est correctement marquée STALE sans rajeunissement artificiel.
+    """
+    now_str = datetime.now(timezone.utc).isoformat()
+    provider = BaseEconomicProvider(name="ECB")
+
+    # Observation collectée MAINTENANT mais portant sur 2024-01 (très ancienne)
+    norm = provider.normalize_indicator(
+        indicator="HICP_INFLATION",
+        currency_or_region="EUR",
+        value=2.8,
+        unit="PERCENT",
+        reference_period="2024-01",
+        source_url="https://api.ecb.europa.eu/test",
+    )
+
+    assert norm["retrieved_at"] is not None
+    assert norm["reference_period"] == "2024-01"
+    assert norm["status"] == "STALE"  # Interdiction de rajeunir artificiellement !
+    assert norm["age_days"] > 300.0
+
+
+def test_el_economista_blocks_eurusd_when_data_is_unknown_or_stale(mem_db):
+    """
+    Vérifie le respect du principe Fail-Closed : si les données macro européennes
+    ou américaines sont UNKNOWN ou STALE, El Economista refuse d'octroyer un avantage directionnel.
+    """
+    eco = ElEconomista(memory=mem_db)
+
+    # Données européennes périmées (2024)
+    mem_db.store_official_indicator({
+        "source": "ECB",
+        "indicator": "HICP_INFLATION",
+        "currency_or_region": "EUR",
+        "value": 2.0,
+        "unit": "PERCENT",
+        "reference_period": "2024-01",
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "status": "STALE",
+    })
+    # Données américaines actuelles
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "CPI_YOY",
+        "currency_or_region": "USD",
+        "value": 3.0,
+        "unit": "PERCENT",
+        "reference_period": "2026M09",
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "status": "OFFICIAL_CURRENT",
+    })
+
+    fund = eco._evaluate_macro_fundamentals("EUR", "USD")
+    assert fund["is_fresh"] is False
+    assert fund["bias"] == "NEUTRAL"
+    assert fund["score"] == 0.0
+
+
+def test_live_ecb_and_eurostat_integration(mem_db):
+    """
+    Test d'intégration réel : interroge directement les API officielles de la BCE et d'Eurostat
+    si la connexion Internet est active. Si la machine est hors ligne, le test est ignoré avec skip.
+    """
+    import urllib.request
+    import ssl
+    import certifi
+
+    # Vérification préalable de la connectivité réseau
+    try:
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        req = urllib.request.Request("https://data-api.ecb.europa.eu", headers={"User-Agent": "FoconAssistant/1.0"})
+        urllib.request.urlopen(req, context=ctx, timeout=5.0)
+    except Exception as e:
+        pytest.skip(f"Connectivité Internet indisponible pour le test d'intégration réel: {e}")
+
+    # 1. Test réel BCE avec flux HICP actif
+    ecb_provider = ECBProvider(memory=mem_db, timeout_seconds=12.0)
+    ecb_inds = ecb_provider.fetch_latest_indicators(last_n_observations=2)
+    assert len(ecb_inds) >= 1
+    ecb_hicp = mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR", source="ECB")
+    assert ecb_hicp is not None
+    assert ecb_hicp["value"] > 0.0
+    assert ecb_hicp["reference_period"] is not None
+    assert ecb_hicp["unit"] == "PERCENT"
+
+    # 2. Test réel Eurostat avec prc_hicp_minr
+    eurostat_provider = EurostatProvider(memory=mem_db, timeout_seconds=15.0)
+    euro_inds = eurostat_provider.fetch_latest_indicators()
+    assert len(euro_inds) >= 1
+    euro_hicp = mem_db.get_latest_official_indicator("HICP_INFLATION", "EUR", source="EUROSTAT")
+    assert euro_hicp is not None
+    assert euro_hicp["value"] > 0.0
+    assert euro_hicp["reference_period"] is not None
+    assert euro_hicp["unit"] == "PERCENT"
+
+
+
 
 
