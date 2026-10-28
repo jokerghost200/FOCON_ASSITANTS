@@ -62,6 +62,12 @@ class ECBProvider(BaseEconomicProvider):
     """
     Connecteur officiel pour la Banque Centrale Européenne (BCE SDMX REST).
     """
+    expected_indicators = [
+        "DEPOSIT_FACILITY_RATE",
+        "MAIN_REFINANCING_RATE",
+        "MARGINAL_LENDING_RATE",
+        "HICP_INFLATION",
+    ]
 
     def __init__(
         self,
@@ -84,9 +90,21 @@ class ECBProvider(BaseEconomicProvider):
             url = f"{ECB_BASE_URL}/{flow}/{key}?lastNObservations={last_n_observations}&format=jsondata"
 
             raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
+            if raw_bytes is None:
+                if self.last_status != "ERROR":
+                    self.record_error("NETWORK", f"Requête HTTP BCE échouée pour {key}")
+                continue
+
             data = self._safe_json_loads(raw_bytes)
             if not data:
                 logger.warning(f"🛑 [ECBProvider] Données indisponibles pour la série {key}")
+                continue
+
+
+            data_sets = data.get("dataSets")
+            if not data_sets or not isinstance(data_sets, list):
+                self.record_error("SCHEMA_VALIDATION", f"Structure ECB inattendue pour {key}: 'dataSets' manquant")
+                logger.warning(f"🛑 [ECBProvider] Structure inattendue pour {key}")
                 continue
 
             # Parsing des dimensions temporelles SDMX
@@ -98,7 +116,7 @@ class ECBProvider(BaseEconomicProvider):
             )
             time_labels = [t.get("id") or str(t.get("name")) for t in time_values]
 
-            series_dict = data.get("dataSets", [{}])[0].get("series", {})
+            series_dict = data_sets[0].get("series", {})
             for _, s_info in series_dict.items():
                 observations = s_info.get("observations", {})
                 # Trier par index numérique croissant pour trouver la dernière observation
@@ -141,10 +159,11 @@ class ECBProvider(BaseEconomicProvider):
                 collected_indicators.append(ind)
                 self.memory.store_official_indicator(ind)
 
-        if not collected_indicators:
-            self.last_status = "ERROR"
+        if collected_indicators:
+            self.record_business_success(len(collected_indicators))
+            logger.info(f"🏦 [ECBProvider] {len(collected_indicators)} indicateurs BCE récupérés et validés.")
         else:
-            self.last_status = "SUCCESS"
+            if not self.last_error_reason:
+                self.record_error("SCHEMA_VALIDATION", "Aucun indicateur BCE valide extrait")
 
-        logger.info(f"🏦 [ECBProvider] {len(collected_indicators)} indicateurs BCE récupérés et validés.")
         return collected_indicators

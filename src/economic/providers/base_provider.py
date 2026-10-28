@@ -40,10 +40,23 @@ class BaseEconomicProvider:
         self.backoff_factor = backoff_factor
         self.last_fetch_time: Optional[str] = None
         self.last_status: str = "UNINITIALIZED"
-        self.last_error_reason: Optional[str] = None
+
+        # Traçabilité distincte Réseau/HTTP
         self.last_http_code: Optional[int] = None
-        self.success_count: int = 0
-        self.failure_count: int = 0
+        self.http_success_count: int = 0
+        self.http_failure_count: int = 0
+
+        # Traçabilité distincte Parsing / Validation Métier
+        self.parsing_success_count: int = 0
+        self.parsing_failure_count: int = 0
+        self.business_validation_success_count: int = 0
+        self.business_validation_failure_count: int = 0
+
+        # Motifs d'échec
+        self.last_error_type: Optional[str] = None  # "HTTP", "NETWORK", "EMPTY_PAYLOAD", "JSON_PARSE", "SCHEMA_VALIDATION"
+        self.last_error_reason: Optional[str] = None
+        self.last_error_time: Optional[str] = None
+        self.last_validated_indicators_count: int = 0
 
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Génère un contexte SSL sécurisé avec certifi si disponible."""
@@ -53,20 +66,78 @@ class BaseEconomicProvider:
         except Exception:
             return ssl.create_default_context()
 
+    def record_error(self, error_type: str, reason: str, http_code: Optional[int] = None) -> None:
+        """Enregistre un motif d'erreur détaillé et horodaté avec incrémentation des compteurs."""
+        self.last_error_type = error_type
+        self.last_error_reason = reason
+        self.last_error_time = datetime.now(timezone.utc).isoformat()
+        if http_code is not None:
+            self.last_http_code = http_code
+        self.last_status = "ERROR"
+
+        if error_type in ("HTTP", "NETWORK"):
+            self.http_failure_count += 1
+        elif error_type in ("EMPTY_PAYLOAD", "JSON_PARSE"):
+            self.parsing_failure_count += 1
+        elif error_type in ("SCHEMA_VALIDATION", "BUSINESS_VALIDATION"):
+            self.business_validation_failure_count += 1
+
+    @property
+    def failure_count(self) -> int:
+        """Nombre total d'échecs (transport + parsing + validation métier)."""
+        return self.http_failure_count + self.parsing_failure_count + self.business_validation_failure_count
+
+    @property
+    def success_count(self) -> int:
+        """Nombre total de succès métier validés."""
+        return self.business_validation_success_count
+
+    def record_http_success(self, http_code: int = 200) -> None:
+        """Enregistre le succès du transport HTTP."""
+        self.last_http_code = http_code
+        self.http_success_count += 1
+        self.last_fetch_time = datetime.now(timezone.utc).isoformat()
+
+    def record_business_success(self, count: int = 0, indicators_count: Optional[int] = None) -> None:
+        """
+        Enregistre la validation métier complète.
+        Réinitialise les erreurs uniquement après une extraction réussie de données.
+        """
+        actual_count = indicators_count if indicators_count is not None else count
+        self.last_validated_indicators_count = actual_count
+        self.business_validation_success_count += 1
+        self.parsing_success_count += 1
+        self.last_status = "OK"
+        self.last_error_type = None
+        self.last_error_reason = None
+
+
+
     def get_provider_health(self) -> Dict[str, Any]:
         """
-        Retourne le diagnostic d'intégrité réseau du fournisseur.
-        Distingue collecte HTTP, statut, code HTTP et motif d'erreur exact.
+        Retourne le diagnostic d'intégrité complet séparant :
+        1. Succès HTTP / Réseau
+        2. Parsing et extraction des données
+        3. Validation métier
         """
         return {
             "name": self.name,
             "status": self.last_status,
             "last_fetch": self.last_fetch_time,
             "last_error": self.last_error_reason,
+            "last_error_type": self.last_error_type,
+            "last_error_time": self.last_error_time,
             "last_http_code": self.last_http_code,
-            "success_count": self.success_count,
+            "http_success_count": self.http_success_count,
+            "http_failure_count": self.http_failure_count,
+            "parsing_failure_count": self.parsing_failure_count,
+            "business_validation_failure_count": self.business_validation_failure_count,
+            "business_success_count": self.business_validation_success_count,
             "failure_count": self.failure_count,
+            "last_validated_count": self.last_validated_indicators_count,
         }
+
+
 
     def _http_request(
         self,
@@ -100,51 +171,54 @@ class BaseEconomicProvider:
                     if 200 <= status < 300:
                         content = resp.read()
                         if not content or len(content) == 0:
-                            self.last_error_reason = f"Réponse HTTP {status} vide (0 octet)"
-                            logger.warning(f"[{self.name}] ⚠️ {self.last_error_reason} sur {url}")
-                            last_exception_msg = self.last_error_reason
+                            reason = f"Réponse HTTP {status} vide (0 octet)"
+                            last_exception_msg = reason
+                            if attempt == self.max_retries:
+                                logger.warning(f"[{self.name}] ⚠️ {reason} sur {url}")
+                                self.record_error("EMPTY_PAYLOAD", reason, http_code=status)
+                            else:
+                                logger.info(f"[{self.name}] 🔄 Réponse vide sur {url}, nouvel essai...")
                         else:
-                            self.last_fetch_time = datetime.now(timezone.utc).isoformat()
-                            self.last_status = "SUCCESS"
-                            self.last_error_reason = None
-                            self.success_count += 1
+                            self.record_http_success(status)
                             return content
                     else:
-                        self.last_error_reason = f"Réponse HTTP anormale {status}"
-                        logger.warning(f"[{self.name}] ⚠️ {self.last_error_reason} pour {url}")
-                        last_exception_msg = self.last_error_reason
+                        reason = f"Réponse HTTP anormale {status}"
+                        last_exception_msg = reason
+                        if attempt == self.max_retries:
+                            logger.warning(f"[{self.name}] ⚠️ {reason} pour {url}")
+                            self.record_error("HTTP", reason, http_code=status)
+
             except urllib.error.HTTPError as he:
-                self.last_http_code = he.code
-                self.last_error_reason = f"HTTP {he.code} ({he.reason})"
-                logger.warning(f"[{self.name}] ⚠️ Erreur {self.last_error_reason} sur {url}")
-                last_exception_msg = self.last_error_reason
+                reason = f"HTTP {he.code} ({he.reason})"
+                logger.warning(f"[{self.name}] ⚠️ Erreur {reason} sur {url}")
+                self.record_error("HTTP", reason, http_code=he.code)
+                last_exception_msg = reason
                 if he.code in (400, 401, 403, 404):
-                    # Pas de retry sur erreurs client définitives
                     break
             except urllib.error.URLError as ue:
-                reason = str(ue.reason)
-                self.last_error_reason = f"Échec réseau ({reason})"
-                last_exception_msg = self.last_error_reason
+                reason = f"Échec réseau ({ue.reason})"
+                last_exception_msg = reason
                 if attempt == self.max_retries:
-                    logger.warning(f"[{self.name}] ❌ Échec réseau définitif sur {url} après {self.max_retries+1} tentatives : {reason}")
+                    self.record_error("NETWORK", reason)
+                    logger.warning(f"[{self.name}] ❌ Échec réseau définitif sur {url} après {self.max_retries+1} tentatives : {ue.reason}")
                 else:
-                    logger.info(f"[{self.name}] 🔄 Tentative {attempt+1}/{self.max_retries+1} échouée ({reason}), nouvel essai...")
+                    logger.info(f"[{self.name}] 🔄 Tentative {attempt+1}/{self.max_retries+1} échouée ({ue.reason}), nouvel essai...")
             except Exception as e:
-                self.last_error_reason = f"Exception ({type(e).__name__}: {e})"
-                last_exception_msg = self.last_error_reason
+                reason = f"Exception réseau ({type(e).__name__}: {e})"
+                last_exception_msg = reason
                 if attempt == self.max_retries:
+                    self.record_error("NETWORK", reason)
                     logger.warning(f"[{self.name}] ❌ Erreur inattendue définitive sur {url} : {e}")
                 else:
                     logger.info(f"[{self.name}] 🔄 Tentative {attempt+1}/{self.max_retries+1} échouée ({e}), nouvel essai...")
+
 
             attempt += 1
             if attempt <= self.max_retries:
                 time.sleep(self.backoff_factor * (2 ** (attempt - 1)))
 
-        self.last_status = "ERROR"
-        self.failure_count += 1
         if not self.last_error_reason:
-            self.last_error_reason = last_exception_msg
+            self.record_error("NETWORK", last_exception_msg)
         return None
 
     def _safe_json_loads(self, content_bytes: Optional[bytes]) -> Optional[Any]:
@@ -154,13 +228,16 @@ class BaseEconomicProvider:
         try:
             return json.loads(content_bytes.decode("utf-8"))
         except Exception as e:
-            logger.warning(f"[{self.name}] Payload JSON corrompu ou invalide: {e}")
+            reason = f"Payload JSON corrompu ou invalide: {e}"
+            logger.warning(f"[{self.name}] ⚠️ {reason}")
+            self.record_error("JSON_PARSE", reason)
             return None
 
+    @classmethod
     def evaluate_staleness(
-        self,
+        cls,
         indicator: str,
-        reference_period: str,
+        reference_period: Optional[str] = None,
         effective_date: Optional[str] = None,
         published_at: Optional[str] = None,
     ) -> tuple[str, float]:
@@ -178,22 +255,18 @@ class BaseEconomicProvider:
         ind_upper = indicator.upper()
 
         ref_date: Optional[date] = None
+        is_rate = any(k in ind_upper for k in ("RATE", "DFR", "MRO", "MLFR", "FED_FUNDS"))
 
-        # 1. Priorité à la date d'effet explicite (ex: taux directeurs de banque centrale)
-        if effective_date:
+        # 1. Pour les taux directeurs de banque centrale, priorité absolue à la date d'effet officielle
+        if is_rate and effective_date:
             try:
                 ref_date = date.fromisoformat(str(effective_date)[:10])
             except Exception:
                 pass
 
-        # 2. Date de publication officielle si disponible
-        if not ref_date and published_at:
-            try:
-                ref_date = date.fromisoformat(str(published_at)[:10])
-            except Exception:
-                pass
 
-        # 3. Parsing de la période de référence
+        # 2. Pour les statistiques économiques (CPI, chômage, PIB, HICP), priorité absolue à la période de référence
+        # Ne jamais remplacer la période macroéconomique par un horodatage de publication ou de collecte !
         if not ref_date and reference_period:
             per = str(reference_period).strip().upper()
             try:
@@ -219,7 +292,7 @@ class BaseEconomicProvider:
                 # Format ISO complet YYYY-MM-DD
                 elif len(per) == 10 and per[:4].isdigit() and per[4] == "-" and per[5:7].isdigit() and per[7] == "-" and per[8:10].isdigit():
                     ref_date = date.fromisoformat(per)
-                # Format mensuel ISO YYYY-MM (ex: 2026-08)
+                # Format mensuel ISO YYYY-MM (ex: 2025-12, 2026-08)
                 elif len(per) == 7 and per[:4].isdigit() and per[4] == "-" and per[5:7].isdigit():
                     y = int(per[:4])
                     m = int(per[5:7])
@@ -231,6 +304,21 @@ class BaseEconomicProvider:
                     ref_date = date(int(per), 12, 31)
             except Exception:
                 ref_date = None
+
+        # 3. Repli subsidiaire sur effective_date pour tout autre indicateur
+        if not ref_date and effective_date:
+            try:
+                ref_date = date.fromisoformat(str(effective_date)[:10])
+            except Exception:
+                pass
+
+        # 4. Repli de dernier recours sur published_at UNIQUEMENT si aucune période de référence n'a pu être résolue
+        if not ref_date and published_at:
+            try:
+                ref_date = date.fromisoformat(str(published_at)[:10])
+            except Exception:
+                pass
+
 
         # Règle Fail-Closed fondamentale : Si impossible d'interpréter la période,
         # ne JAMAIS classer comme actuelle avec un âge nul. Retourner UNKNOWN avec âge pénalisant.
@@ -254,10 +342,14 @@ class BaseEconomicProvider:
         # - Taux directeurs : réévaluation toutes les 6-8 semaines (stale si > 90 jours sans décision)
         # - Statistiques mensuelles (CPI, Chômage, NFP, HICP) : délai usuel 2-5 semaines (stale si > 75 jours)
         # - Statistiques trimestrielles (PIB) : délai usuel 6-8 semaines (stale si > 150 jours)
+        # - Statistiques annuelles : publication annuelle (stale si > 370 jours)
+        is_annual = bool(reference_period and ((len(str(reference_period).strip()) == 4 and str(reference_period).strip().isdigit()) or ("ANNUAL" in str(reference_period).upper())))
         if is_rate:
             max_allowed = 90.0
         elif any(k in ind_upper for k in ("GDP", "PIB", "GROWTH")):
             max_allowed = 150.0
+        elif is_annual:
+            max_allowed = 370.0
         else:
             max_allowed = 75.0
 

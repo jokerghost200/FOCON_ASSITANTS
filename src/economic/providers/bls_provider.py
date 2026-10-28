@@ -49,6 +49,7 @@ class BLSProvider(BaseEconomicProvider):
     """
     Connecteur officiel pour le Bureau of Labor Statistics (États-Unis).
     """
+    expected_indicators = ["UNEMPLOYMENT", "CPI_INDEX", "CPI_YOY", "NONFARM_PAYROLLS"]
 
     def __init__(
         self,
@@ -86,15 +87,28 @@ class BLSProvider(BaseEconomicProvider):
             headers=headers,
             data=payload_bytes,
         )
+        if raw_bytes is None:
+            if self.last_status != "ERROR":
+                self.record_error("NETWORK", "Requête HTTP BLS échouée")
+            return []
 
         data = self._safe_json_loads(raw_bytes)
-        if not data or data.get("status") != "REQUEST_SUCCEEDED":
-            self.last_status = "ERROR"
-            msg = data.get("message") if data else "Aucune réponse reçue"
+        if not data:
+            return []
+
+
+        if data.get("status") != "REQUEST_SUCCEEDED":
+            msg = data.get("message") or "Statut BLS non conforme"
+            self.record_error("SCHEMA_VALIDATION", f"Erreur API BLS: {msg}")
             logger.warning(f"🛑 [BLSProvider] Échec récupération BLS: {msg}")
             return []
 
         series_list = data.get("Results", {}).get("series", [])
+        if not series_list:
+            self.record_error("SCHEMA_VALIDATION", "Structure BLS inattendue: 'Results.series' absent ou vide")
+            logger.warning("🛑 [BLSProvider] Structure BLS inattendue: 'Results.series' manquant")
+            return []
+
         collected_indicators: List[Dict[str, Any]] = []
 
         for s in series_list:
@@ -106,7 +120,7 @@ class BLSProvider(BaseEconomicProvider):
             data_points = s.get("data", [])
             valid_points = []
             for dp in data_points:
-                val_str = dp.get("value", "").strip()
+                val_str = str(dp.get("value", "")).strip()
                 try:
                     val_float = float(val_str)
                     valid_points.append({
@@ -162,5 +176,11 @@ class BLSProvider(BaseEconomicProvider):
                         collected_indicators.append(cpi_yoy)
                         self.memory.store_official_indicator(cpi_yoy)
 
-        logger.info(f"📊 [BLSProvider] {len(collected_indicators)} indicateurs US récupérés et validés.")
+        if collected_indicators:
+            self.record_business_success(len(collected_indicators))
+            logger.info(f"📊 [BLSProvider] {len(collected_indicators)} indicateurs US récupérés et validés.")
+        else:
+            if not self.last_error_reason:
+                self.record_error("SCHEMA_VALIDATION", "Aucun point de données BLS valide extrait")
+
         return collected_indicators

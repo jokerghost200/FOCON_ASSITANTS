@@ -272,7 +272,116 @@ class EconomicMemory:
             logger.error(f"Erreur EconomicMemory.get_upcoming_events: {e}")
             return []
 
+    def get_calendar_bounds(self) -> Dict[str, Any]:
+        """
+        Calcule les métriques de couverture du calendrier économique stocké en mémoire :
+        - Nombre total d'événements
+        - Nombre d'événements certifiés (is_verified = 1) vs estimés
+        - Période couverte [min_date, max_date]
+        - Nombre d'événements futurs et horizon de couverture en jours
+        """
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total_events,
+                        SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) as verified_count,
+                        SUM(CASE WHEN is_verified = 0 THEN 1 ELSE 0 END) as estimated_count,
+                        MIN(event_time) as min_date,
+                        MAX(event_time) as max_date
+                    FROM economic_events
+                """)
+                row = cursor.fetchone()
+
+                cursor.execute("SELECT COUNT(*) as future_count FROM economic_events WHERE event_time >= ?", (now_str,))
+                f_row = cursor.fetchone()
+                future_cnt = int(f_row["future_count"]) if f_row and f_row["future_count"] is not None else 0
+
+                total = int(row["total_events"]) if row and row["total_events"] is not None else 0
+                verif = int(row["verified_count"]) if row and row["verified_count"] is not None else 0
+                estim = int(row["estimated_count"]) if row and row["estimated_count"] is not None else 0
+                min_d = row["min_date"] if row else None
+                max_d = row["max_date"] if row else None
+
+                future_days = 0.0
+                if max_d:
+                    try:
+                        max_dt = datetime.fromisoformat(str(max_d).replace("Z", "+00:00"))
+                        if max_dt > now:
+                            future_days = max(0.0, (max_dt - now).total_seconds() / 86400.0)
+                    except Exception:
+                        pass
+
+                return {
+                    "total_events": total,
+                    "verified_count": verif,
+                    "estimated_count": estim,
+                    "min_date": min_d,
+                    "max_date": max_d,
+                    "future_events_count": future_cnt,
+                    "future_coverage_days": round(future_days, 1),
+                }
+        except Exception as e:
+            logger.error(f"Erreur EconomicMemory.get_calendar_bounds: {e}")
+            return {
+                "total_events": 0,
+                "verified_count": 0,
+                "estimated_count": 0,
+                "min_date": None,
+                "max_date": None,
+                "future_events_count": 0,
+                "future_coverage_days": 0.0,
+            }
+
+    def get_next_event(
+        self, currency: Optional[str] = None, min_impact: str = "MEDIUM"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Retourne le tout prochain événement économique planifié à partir de maintenant.
+        """
+        now_str = datetime.now(timezone.utc).isoformat()
+        impact_hierarchy = {
+            "LOW": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+            "MEDIUM": ["MEDIUM", "HIGH", "CRITICAL"],
+            "HIGH": ["HIGH", "CRITICAL"],
+            "CRITICAL": ["CRITICAL"],
+        }
+        allowed = impact_hierarchy.get(min_impact.upper(), ["MEDIUM", "HIGH", "CRITICAL"])
+        placeholders = ",".join(["?"] * len(allowed))
+
+        query = f"""
+            SELECT * FROM economic_events
+            WHERE event_time >= ?
+            AND impact IN ({placeholders})
+        """
+        params: List[Any] = [now_str] + allowed
+
+        if currency:
+            query += " AND currency = ?"
+            params.append(currency.upper())
+
+        query += " ORDER BY event_time ASC LIMIT 1"
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+                if row:
+                    d = dict(row)
+                    if "is_verified" in d:
+                        d["is_verified"] = bool(d["is_verified"])
+                    return d
+                return None
+        except Exception as e:
+            logger.error(f"Erreur EconomicMemory.get_next_event: {e}")
+            return None
+
     # ── Gestion des Actualités RSS ──
+
 
     def store_news(self, item: Dict[str, Any]) -> bool:
         """Enregistre un article de presse avec dédoublonnage."""

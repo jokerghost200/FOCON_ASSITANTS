@@ -58,6 +58,11 @@ class EurostatProvider(BaseEconomicProvider):
     """
     Connecteur officiel pour les statistiques macroéconomiques d'Eurostat.
     """
+    expected_indicators = [
+        "HICP_INFLATION",
+        "UNEMPLOYMENT",
+        "GDP_GROWTH_YOY",
+    ]
 
     def __init__(
         self,
@@ -86,8 +91,20 @@ class EurostatProvider(BaseEconomicProvider):
             for geo in ds["geo_candidates"]:
                 url = f"{EUROSTAT_BASE_URL}/{code}?geo={geo}&{params}"
                 raw_bytes = self._http_request(url, headers={"Accept": "application/json"})
+                if raw_bytes is None:
+                    if self.last_status != "ERROR":
+                        self.record_error("NETWORK", f"Requête HTTP Eurostat échouée pour {code}")
+                    continue
+
+
                 data = self._safe_json_loads(raw_bytes)
                 if not data:
+                    continue
+
+
+                if "dimension" not in data or not isinstance(data.get("dimension"), dict):
+                    self.record_error("SCHEMA_VALIDATION", f"Structure Eurostat inattendue pour {code}: 'dimension' manquante")
+                    logger.warning(f"🛑 [EurostatProvider] Structure inattendue pour {code}")
                     continue
 
                 values_dict = data.get("value", {})
@@ -141,10 +158,11 @@ class EurostatProvider(BaseEconomicProvider):
             if not dataset_success:
                 logger.warning(f"🛑 [EurostatProvider] Impossible d'obtenir {indicator_name} depuis Eurostat")
 
-        if not collected_indicators:
-            self.last_status = "ERROR"
+        if collected_indicators:
+            self.record_business_success(len(collected_indicators))
+            logger.info(f"🇪🇺 [EurostatProvider] {len(collected_indicators)} indicateurs Eurostat récupérés et validés.")
         else:
-            self.last_status = "SUCCESS"
+            if not self.last_error_reason:
+                self.record_error("SCHEMA_VALIDATION", "Aucun indicateur Eurostat valide extrait")
 
-        logger.info(f"🇪🇺 [EurostatProvider] {len(collected_indicators)} indicateurs Eurostat récupérés et validés.")
         return collected_indicators

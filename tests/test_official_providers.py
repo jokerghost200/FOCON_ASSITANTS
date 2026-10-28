@@ -735,4 +735,279 @@ def test_el_economista_generar_tabla_salud_economica(mem_db):
     eco.imprimir_tabla_salud_economica()
 
 
+def test_evaluate_staleness_monthly_quarterly_annual_rates_and_unknown():
+    """
+    Vérifie la fonction commune evaluate_staleness() pour :
+    - Dates mensuelles (2026M09, 2026-09)
+    - Dates trimestrielles (2026-Q2)
+    - Dates annuelles (2025 avec tolérance 370 jours)
+    - Taux directeurs avec effective_date (2026-09-16)
+    - Période absente ou invalide -> UNKNOWN avec pénalité 999j
+    """
+    now = datetime(2026, 10, 15, tzinfo=timezone.utc)
+    with patch("src.economic.providers.base_provider.datetime") as mock_dt:
+        mock_dt.now.return_value = now
+        mock_dt.fromisoformat = datetime.fromisoformat
+        mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+        # 1. Mensuel récent (2026M09 -> sept 2026, ~15-45j -> CURRENT)
+        status, age = BaseEconomicProvider.evaluate_staleness("CPI", reference_period="2026M09")
+        assert status == "OFFICIAL_CURRENT"
+        assert age < 75.0
+
+        # Mensuel ancien (2025M01 -> ~600j -> STALE)
+        status, age = BaseEconomicProvider.evaluate_staleness("CPI", reference_period="2025M01")
+        assert status == "STALE"
+        assert age > 500.0
+
+        # 2. Trimestriel (2026-Q2 -> fin juin 2026, ~107j -> CURRENT avec seuil 150j)
+        status, age = BaseEconomicProvider.evaluate_staleness("GDP_GROWTH_YOY", reference_period="2026-Q2")
+        assert status == "OFFICIAL_CURRENT"
+        assert age < 150.0
+
+        # Trimestriel ancien (2025-Q1 -> > 500j -> STALE)
+        status, age = BaseEconomicProvider.evaluate_staleness("GDP_GROWTH_YOY", reference_period="2025-Q1")
+        assert status == "STALE"
+
+        # 3. Annuel (2025 -> fin 2025 = 31 dec 2025, ~288j au 15 oct 2026 -> CURRENT avec seuil 370j)
+        status, age = BaseEconomicProvider.evaluate_staleness("ANNUAL_INDEX", reference_period="2025")
+        assert status == "OFFICIAL_CURRENT"
+        assert age < 370.0
+
+        # Annuel ancien (2023 -> > 650j -> STALE)
+        status, age = BaseEconomicProvider.evaluate_staleness("ANNUAL_INDEX", reference_period="2023")
+        assert status == "STALE"
+
+        # 4. Taux directeur avec effective_date (16 sept 2026 -> ~29j au 15 oct 2026 -> CURRENT)
+        status, age = BaseEconomicProvider.evaluate_staleness("DEPOSIT_FACILITY_RATE", effective_date="2026-09-16")
+        assert status == "OFFICIAL_CURRENT"
+        assert age < 90.0
+
+        # Taux directeur avec date d'effet future proche (+5 jours -> toléré pour décision de politique monétaire)
+        status, age = BaseEconomicProvider.evaluate_staleness("DEPOSIT_FACILITY_RATE", effective_date="2026-10-20")
+        assert status == "OFFICIAL_CURRENT"
+        assert age == 0.0
+
+        # 5. Période absente ou invalide -> UNKNOWN avec pénalité 999j
+        status, age = BaseEconomicProvider.evaluate_staleness("CPI", reference_period=None)
+        assert status == "UNKNOWN"
+        assert age == 999.0
+
+        status, age = BaseEconomicProvider.evaluate_staleness("CPI", reference_period="CORRUPTED_STRING_XYZ")
+        assert status == "UNKNOWN"
+        assert age == 999.0
+
+
+def test_error_traceability_distinguishes_network_json_schema_http():
+    """
+    Vérifie la traçabilité distincte des erreurs :
+    - HTTP 403 Forbidden
+    - Erreur réseau / Timeout
+    - Payload JSON vide (HTTP 200 vide)
+    - JSON malformé
+    - Structure inattendue (échec de validation métier)
+    - Préservation du dernier échec et réinitialisation sur succès réel
+    """
+    prov = BaseEconomicProvider(name="TEST_TRACE", timeout_seconds=0.1, max_retries=1)
+
+    # 1. HTTP 403
+    with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError("https://api.test", 403, "Forbidden", {}, None)):
+        res = prov._http_request("https://api.test")
+        assert res is None
+        assert prov.last_error_type == "HTTP"
+        assert prov.last_http_code == 403
+        assert prov.http_failure_count == 1
+
+    # 2. Timeout Réseau
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("DNS lookup failed")):
+        res = prov._http_request("https://api.test")
+        assert res is None
+        assert prov.last_error_type == "NETWORK"
+        assert prov.http_failure_count == 2
+        assert "DNS lookup failed" in prov.last_error_reason
+
+    # 3. Payload vide
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = b""
+    mock_resp.__enter__.return_value = mock_resp
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        res = prov._http_request("https://api.test")
+        assert res is None
+        assert prov.last_error_type == "EMPTY_PAYLOAD"
+        assert prov.parsing_failure_count == 1
+
+    # 4. JSON malformé
+    mock_resp.read.return_value = b"<html><head><title>502 Bad Gateway</title></head></html>"
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        res = prov._http_request("https://api.test")
+        json_res = prov._safe_json_loads(res)
+        assert json_res is None
+        assert prov.last_error_type == "JSON_PARSE"
+        assert prov.parsing_failure_count == 2
+
+    # 5. Échec de validation métier (structure inattendue)
+    prov.record_error(error_type="SCHEMA_VALIDATION", reason="Structure de série absente du JSON")
+    assert prov.last_error_type == "SCHEMA_VALIDATION"
+    assert prov.business_validation_failure_count == 1
+    assert "Structure de série absente" in prov.last_error_reason
+
+    # Le bilan de santé reflète les compteurs séparés
+    h = prov.get_provider_health()
+    assert h["status"] == "ERROR"
+    assert h["last_error_type"] == "SCHEMA_VALIDATION"
+    assert h["http_failure_count"] == 2
+    assert h["parsing_failure_count"] == 2
+    assert h["business_validation_failure_count"] == 1
+
+    # 6. Réinitialisation UNIQUEMENT sur succès métier réel
+    prov.record_business_success(indicators_count=4)
+    assert prov.last_status in ("OK", "SUCCESS")
+    assert prov.last_error_reason is None
+    assert prov.last_error_type is None
+    assert prov.business_validation_success_count == 1
+    assert prov.last_validated_indicators_count == 4
+
+
+
+def test_calendar_security_source_confidence_and_blackout(mem_db):
+    """
+    Vérifie la sécurité du calendrier économique :
+    - Distinction PUBLIC_UNVERIFIED vs LOCAL_FALLBACK vs OFFICIAL_LIVE_FEED
+    - Pas de confiance VERIFIED pour une date estimée
+    - Métriques de couverture (get_calendar_bounds et get_calendar_coverage_summary)
+    - Blackout empêche les faux positifs VERIFIED sur dates estimées
+    """
+    from src.economic.calendar_provider import (
+        CalendarProvider,
+        FEED_TYPE_PUBLIC_UNVERIFIED,
+        FEED_TYPE_LOCAL_FALLBACK,
+    )
+    cal = CalendarProvider(memory=mem_db, timeout_seconds=1.0)
+
+    # État initial : mémoire vide
+    cov0 = cal.get_calendar_coverage_summary()
+    assert cov0["feed_type"] == "UNAVAILABLE"
+    assert cov0["total_events"] == 0
+    assert cov0["coverage_status"] == "INSUFFICIENT"
+
+    # 1. Insertion d'un flux public (FinanceCalendar)
+    fake_public_resp = {
+        "events": [
+            {
+                "title": "US Factory Orders",
+                "currency": "USD",
+                "impact": "HIGH",
+                "date": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            }
+        ]
+    }
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = json.dumps(fake_public_resp).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        evts = cal.fetch_public_calendar()
+        assert len(evts) == 1
+        assert cal.last_feed_type == FEED_TYPE_PUBLIC_UNVERIFIED
+        assert evts[0]["is_verified"] is False
+        assert evts[0]["calendar_confidence"] == "APPROXIMATE"
+
+    # Vérification dans is_in_news_blackout : un flux public non vérifié ne doit JAMAIS donner is_verified=True
+    blk = cal.is_in_news_blackout("EURUSD", window_minutes=30.0)
+    assert blk["in_blackout"] is True
+    assert blk["is_verified"] is False
+    assert blk["calendar_confidence"] == "APPROXIMATE"
+    assert blk["calendar_status"] == FEED_TYPE_PUBLIC_UNVERIFIED
+
+    # 2. Test fallback local avec dates certifiées + heuristiques
+    cal_fallback = CalendarProvider(memory=mem_db, timeout_seconds=0.1)
+    with patch("urllib.request.urlopen", side_effect=Exception("Offline")):
+        fb_events = cal_fallback.fetch_public_calendar()
+        assert len(fb_events) > 0
+        assert cal_fallback.last_feed_type == FEED_TYPE_LOCAL_FALLBACK
+
+    cov = cal_fallback.get_calendar_coverage_summary()
+    assert cov["feed_type"] == FEED_TYPE_LOCAL_FALLBACK
+    assert cov["total_events"] > 0
+    assert cov["verified_count"] > 0
+    assert cov["coverage_status"] in ("SUFFICIENT", "PARTIAL")
+
+
+def test_generar_tabla_salud_economica_strict_rules(mem_db):
+    """
+    Vérifie les règles strictes de generar_tabla_salud_economica :
+    - Interdiction de 'VALIDE & FRAIS' si couverture partielle
+    - Détection de 'DONNEES PERIMEES' si un indicateur est STALE
+    - Affichage séparé CURRENT, STALE, UNKNOWN, collectés, validés
+    - Présence de la couverture du calendrier
+    """
+    eco = ElEconomista(memory=mem_db)
+
+    # Scénario 1 : Base vide -> COUVERTURE PARTIELLE
+    tabla1 = eco.generar_tabla_salud_economica()
+    assert "COUVERTURE PARTIELLE" in tabla1
+    assert "VALIDE & FRAIS (COMPLET)" not in tabla1
+
+    # Scénario 2 : BLS avec 2 indicateurs seulement (sur 4 attendus) -> toujours COUVERTURE PARTIELLE
+    now_str = datetime.now(timezone.utc).isoformat()
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "UNEMPLOYMENT",
+        "currency_or_region": "USD",
+        "value": 4.1,
+        "unit": "PERCENT",
+        "reference_period": "2026M09",
+        "published_at": now_str,
+        "retrieved_at": now_str,
+        "status": "OFFICIAL_CURRENT",
+    })
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "NONFARM_PAYROLLS",
+        "currency_or_region": "USD",
+        "value": 150.0,
+        "unit": "THOUSANDS",
+        "reference_period": "2026M09",
+        "published_at": now_str,
+        "retrieved_at": now_str,
+        "status": "OFFICIAL_CURRENT",
+    })
+
+    tabla2 = eco.generar_tabla_salud_economica()
+    assert "COUVERTURE PARTIELLE (2/4)" in tabla2
+    assert "VALIDE & FRAIS (COMPLET)" not in tabla2
+
+    # Scénario 3 : Ajout des 2 autres indicateurs mais l'un est STALE -> DONNEES PERIMEES
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "CPI_INDEX",
+        "currency_or_region": "USD",
+        "value": 315.0,
+        "unit": "INDEX_POINTS",
+        "reference_period": "2024M01",  # Période très ancienne
+        "published_at": "2024-02-15T00:00:00+00:00",
+        "retrieved_at": now_str,
+        "status": "STALE",
+    })
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "CPI_YOY",
+        "currency_or_region": "USD",
+        "value": 2.5,
+        "unit": "PERCENT",
+        "reference_period": "2026M09",
+        "published_at": now_str,
+        "retrieved_at": now_str,
+        "status": "OFFICIAL_CURRENT",
+    })
+
+    tabla3 = eco.generar_tabla_salud_economica()
+    assert "DONNEES PERIMEES" in tabla3
+    assert "STALE: 1" in tabla3
+    assert "VALIDE & FRAIS (COMPLET)" not in tabla3
+
+
+
 

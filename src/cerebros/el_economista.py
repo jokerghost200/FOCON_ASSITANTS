@@ -524,20 +524,21 @@ class ElEconomista:
 
     def generar_tabla_salud_economica(self) -> str:
         """
-        Génère le Tableau de santé économique complet de FOCON.
+        Génère le Tableau de santé économique complet et certifié de FOCON.
         Distingue rigoureusement :
-        - Collecte HTTP réussie (connectivité, code HTTP)
-        - Données validées (indicateurs parsés et enregistrés)
-        - Données fraîches (OFFICIAL_CURRENT vs STALE vs UNKNOWN)
-        - Couverture (nombre d'indicateurs et motifs d'échec)
+        - Diagnostic réseau & HTTP (succès/échecs, dernier code HTTP, date de collecte)
+        - Validation métier (parsing et typage des séries attendues)
+        - Fraîcheur économique réelle (statut en BD, statut recalculé, âge en jours)
+        - Couverture par fournisseur (CURRENT, STALE, UNKNOWN, manquants)
+        - Couverture temporelle et niveau de confiance du calendrier économique
         """
         lines = []
-        lines.append("=" * 105)
+        lines.append("=" * 115)
         lines.append("               TABLEAU DE SANTE ECONOMIQUE -- FOCON ASSISTANT (EL ECONOMISTA)")
-        lines.append("=" * 105)
+        lines.append("=" * 115)
 
         lines.append("1. FOURNISSEURS OFFICIELS (Statistiques Reelles sans Cle API)")
-        lines.append("-" * 105)
+        lines.append("-" * 115)
 
         providers = [
             ("BLS (Etats-Unis)", self.bls),
@@ -552,61 +553,143 @@ class ElEconomista:
             p_name = p_obj.name.upper()
             p_status = p_health.get("status", "UNINITIALIZED")
             last_err = p_health.get("last_error")
+            last_http_code = p_health.get("last_http_code")
+            last_fetch = p_health.get("last_fetch_time")
+            expected_series = getattr(p_obj, "expected_indicators", [])
 
             p_inds = [i for i in all_inds if str(i.get("source", "")).upper() == p_name]
-            current_cnt = sum(1 for i in p_inds if i.get("status") == "OFFICIAL_CURRENT")
-            stale_cnt = sum(1 for i in p_inds if i.get("status") == "STALE")
+            
+            # Recalcul de fraîcheur indépendant et décompte strict
+            recomputed_current = 0
+            recomputed_stale = 0
+            recomputed_unknown = 0
+            validated_count = p_health.get("last_validated_indicators_count", len(p_inds))
+
+            for ind in p_inds:
+                name = ind.get("indicator", "UNKNOWN")
+                period = ind.get("reference_period")
+                eff_date = ind.get("effective_date")
+                pub_date = ind.get("published_at")
+                
+                # Calcul de fraîcheur universel et indépendant
+                stat_recalc, _ = p_obj.evaluate_staleness(
+                    indicator=name,
+                    reference_period=period,
+                    effective_date=eff_date,
+                    published_at=pub_date,
+                )
+                if stat_recalc == "OFFICIAL_CURRENT":
+                    recomputed_current += 1
+                elif stat_recalc == "STALE":
+                    recomputed_stale += 1
+                else:
+                    recomputed_unknown += 1
+
+            total_collected = len(p_inds)
+            missing_count = max(0, len(expected_series) - total_collected)
 
             if p_status == "UNINITIALIZED":
                 display_status = "CACHED_SQLITE" if p_inds else "UNINITIALIZED"
             else:
                 display_status = p_status
 
-            summary_tag = "VALIDE & FRAIS" if (p_inds and current_cnt > 0 and not last_err) else ("ERREUR RESEAU" if p_status == "ERROR" else "COUVERTURE PARTIELLE")
-            lines.append(f"  * {p_label:<24} : [{display_status}] {len(p_inds)} indicateur(s) | {summary_tag}")
+            # Règle stricte d'étiquetage : interdiction absolue de "VALIDE & FRAIS" si partiel, périmé ou en erreur
+            if p_status == "ERROR" or (last_err and total_collected == 0):
+                summary_tag = "ERREUR RESEAU / HTTP"
+            elif missing_count > 0 or (expected_series and validated_count < len(expected_series)):
+                summary_tag = f"COUVERTURE PARTIELLE ({total_collected}/{len(expected_series)})"
+            elif recomputed_stale > 0:
+                summary_tag = f"DONNEES PERIMEES ({recomputed_stale} STALE)"
+            elif recomputed_unknown > 0:
+                summary_tag = f"STATUT INCERTAIN ({recomputed_unknown} UNKNOWN)"
+            elif total_collected > 0 and recomputed_current == total_collected and not last_err:
+                summary_tag = "VALIDE & FRAIS (COMPLET)"
+            else:
+                summary_tag = "COUVERTURE PARTIELLE"
+
+            lines.append(f"  * {p_label:<24} : [{display_status}] {total_collected} collecté(s) | {summary_tag}")
+            
+            # Affichage détaillé des métriques du fournisseur
+            fetch_str = str(last_fetch)[:19] if last_fetch else "Aucune"
+            code_str = str(last_http_code) if last_http_code else "N/A"
+            lines.append(
+                f"    [Bilan] Validés: {validated_count} | CURRENT: {recomputed_current} | "
+                f"STALE: {recomputed_stale} | UNKNOWN: {recomputed_unknown} | "
+                f"Dernier HTTP: {code_str} | Collecte: {fetch_str}"
+            )
             if last_err:
-                lines.append(f"    [!] Anomalie reseau : {last_err}")
+                lines.append(f"    [!] Dernière anomalie : {last_err}")
 
             if p_inds:
                 for ind in p_inds:
                     name = ind.get("indicator", "UNKNOWN")
                     val = ind.get("value")
                     unit = ind.get("unit", "")
-                    period = ind.get("reference_period") or ind.get("effective_date") or "N/A"
-                    status = ind.get("status", "UNKNOWN")
-                    stat, age_days = self.bls.evaluate_staleness(
+                    period = ind.get("reference_period") or "N/A"
+                    eff_date = ind.get("effective_date")
+                    pub_date = ind.get("published_at")
+                    retrieved_date = ind.get("retrieved_at", "N/A")
+                    status_db = ind.get("status", "UNKNOWN")
+                    
+                    stat_recalc, age_days = p_obj.evaluate_staleness(
                         indicator=name,
-                        reference_period=str(period),
-                        effective_date=ind.get("effective_date"),
-                        published_at=ind.get("published_at"),
+                        reference_period=ind.get("reference_period"),
+                        effective_date=eff_date,
+                        published_at=pub_date,
                     )
-                    icon = "[OK]   " if status == "OFFICIAL_CURRENT" else ("[STALE]" if status == "STALE" else "[ALERT]")
+                    icon = "[OK]   " if stat_recalc == "OFFICIAL_CURRENT" else ("[STALE]" if stat_recalc == "STALE" else "[ALERT]")
                     val_str = f"{val} {unit}"
                     age_str = f"{age_days:.0f}j" if age_days < 999 else "N/A"
-                    lines.append(f"    {icon} {name:<23} : {val_str:<18} | Ref: {str(period):<10} | Age: {age_str:<6} [{status}]")
+                    ref_disp = str(period) if period != "N/A" else (str(eff_date)[:10] if eff_date else "N/A")
+                    coll_disp = str(retrieved_date)[:10] if retrieved_date != "N/A" else "N/A"
+                    lines.append(
+                        f"    {icon} {name:<23} : {val_str:<16} | Ref: {ref_disp:<10} | Coll: {coll_disp:<10} | "
+                        f"Age: {age_str:<5} [BD: {status_db} | Recalc: {stat_recalc}]"
+                    )
             else:
-                lines.append("    (Aucun indicateur disponible en memoire locale)")
+                lines.append("    (Aucun indicateur disponible en mémoire locale)")
             lines.append("")
 
-        lines.append("2. CALENDRIER ECONOMIQUE & FENETRE DE GEL (News Blackout)")
-        lines.append("-" * 105)
+        lines.append("2. CALENDRIER ECONOMIQUE & COUVERTURE TEMPORELLE")
+        lines.append("-" * 115)
+        cal_summary = self.calendar.get_calendar_coverage_summary() if hasattr(self.calendar, "get_calendar_coverage_summary") else {}
         blackout_res = self.calendar.is_in_news_blackout(symbol="EURUSD", window_minutes=30.0)
-        cal_prov_status = blackout_res.get("calendar_status", "LOCAL_FALLBACK")
-        cal_conf = blackout_res.get("cal_confidence", "APPROXIMATE")
+        
+        cal_feed_type = cal_summary.get("feed_type", blackout_res.get("calendar_status", "LOCAL_FALLBACK"))
+        tot_events = cal_summary.get("total_events", 0)
+        verif_events = cal_summary.get("verified_count", 0)
+        estim_events = cal_summary.get("estimated_count", 0)
+        min_date = cal_summary.get("min_date") or "N/A"
+        max_date = cal_summary.get("max_date") or "N/A"
+        fut_days = cal_summary.get("future_coverage_days", 0.0)
+        fut_events = cal_summary.get("future_events_count", 0)
+        cov_status = cal_summary.get("coverage_status", "INSUFFICIENT")
+
+        next_ev = cal_summary.get("next_event")
+        if next_ev:
+            next_title = next_ev.get("title", "Événement inconnu")
+            next_curr = next_ev.get("currency", "USD")
+            next_time = str(next_ev.get("event_time", ""))[:16]
+            next_conf = next_ev.get("calendar_confidence", "APPROXIMATE")
+            next_str = f"{next_title} ({next_curr}) le {next_time} UTC [{next_conf}]"
+        else:
+            next_str = "Aucun événement futur enregistré"
+
         in_blk = blackout_res.get("in_blackout", False)
-        evt_title = blackout_res.get("event_title") or "Aucune annonce majeure imminente"
+        blk_event = blackout_res.get("event_title") or "Aucune annonce majeure imminente"
         mins = blackout_res.get("minutes_to_event", 999.0)
 
-        lines.append(f"  * Source Calendrier    : {cal_prov_status} (Confiance : {cal_conf})")
-        lines.append(f"  * Gel News (Blackout)  : {'[BLOQUE] ACTIF (ORDRES MT5 INTERDITS)' if in_blk else '[OK] INACTIF (Trading tolere)'}")
-        lines.append(f"  * Prochain Evenement   : {evt_title} (dans {mins:.1f} min)")
+        lines.append(f"  * Source Flux          : {cal_feed_type} (Total: {tot_events} evts | Certifiés: {verif_events} | Estimés: {estim_events})")
+        lines.append(f"  * Période Couverte     : {str(min_date)[:10]} -> {str(max_date)[:10]} (Horizon: {fut_days:.1f} jours / {fut_events} evts à venir) [{cov_status}]")
+        lines.append(f"  * Prochain Événement   : {next_str}")
+        lines.append(f"  * Fenêtre Blackout     : {'[BLOQUE] ACTIF (ORDRES INTERDITS) - ' + blk_event + f' (dans {mins:.1f} min)' if in_blk else '[OK] INACTIF (Trading toléré)'}")
         lines.append("")
 
         lines.append("3. FLUX D'ACTUALITES FINANCIERES & SENTIMENT")
-        lines.append("-" * 105)
+        lines.append("-" * 115)
         news_articles = self.memory.get_recent_news(limit=10) if hasattr(self.memory, "get_recent_news") else []
-        lines.append(f"  * Articles en memoire  : {len(news_articles)} article(s) analyse(s)")
-        lines.append("=" * 105)
+        lines.append(f"  * Articles en mémoire  : {len(news_articles)} article(s) analysé(s)")
+        lines.append("=" * 115)
         return "\n".join(lines)
 
     def imprimir_tabla_salud_economica(self) -> None:

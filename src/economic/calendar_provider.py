@@ -111,21 +111,30 @@ def get_us_release_utc(year: int, month: int, day: int, hour_et: int = 8, minute
     return datetime(year, month, day, hour_et + offset_hours, minute_et, tzinfo=timezone.utc)
 
 
+# Types de sources de calendrier économique
+FEED_TYPE_OFFICIAL_LIVE = "OFFICIAL_LIVE_FEED"       # Source officielle directe vérifiée
+FEED_TYPE_PUBLIC_UNVERIFIED = "PUBLIC_UNVERIFIED"   # Flux public web tiers (ex: FinanceCalendar), non certifié
+FEED_TYPE_LOCAL_FALLBACK = "LOCAL_FALLBACK"         # Calendrier local de secours (réunions certifiées + heuristiques)
+FEED_TYPE_UNAVAILABLE = "UNAVAILABLE"               # Aucune donnée de calendrier disponible
+
+
 class CalendarProvider:
     """
     Fournisseur autonome du calendrier économique avec tolérance totale aux pannes.
-    Associe calendrier public et calendrier officiel vérifié multi-annuel.
+    Associe calendrier public non vérifié et calendrier officiel vérifié multi-annuel.
     """
 
     def __init__(self, memory: Optional[EconomicMemory] = None, timeout_seconds: float = 5.0):
         self.memory = memory or EconomicMemory()
         self.timeout_seconds = timeout_seconds
         self.last_fetch_time: Optional[datetime] = None
+        self.last_feed_type: str = FEED_TYPE_UNAVAILABLE
 
     def fetch_public_calendar(self) -> List[Dict[str, Any]]:
         """
         Interroge un flux de calendrier économique public gratuit (sans clé API).
-        Si la connexion échoue, active automatiquement le calendrier officiel vérifié hors-ligne.
+        Marqué rigoureusement comme PUBLIC_UNVERIFIED avec confiance APPROXIMATE.
+        Si la connexion échoue, active automatiquement le calendrier officiel de secours local (LOCAL_FALLBACK).
         """
         events: List[Dict[str, Any]] = []
         url = "https://www.financecalendar.com/api/forex-calendar/"
@@ -150,12 +159,14 @@ class CalendarProvider:
                     if events:
                         self.memory.store_events_bulk(events)
                         self.last_fetch_time = datetime.now(timezone.utc)
-                        logger.info(f"📅 [El Economista] {len(events)} événements récupérés via FinanceCalendar.")
+                        self.last_feed_type = FEED_TYPE_PUBLIC_UNVERIFIED
+                        logger.info(f"📅 [El Economista] {len(events)} événements récupérés via FinanceCalendar (PUBLIC_UNVERIFIED).")
                         return events
         except Exception as e:
-            logger.warning(f"Calendrier public inaccessible ({e}). Activation du calendrier officiel vérifié local.")
+            logger.warning(f"Calendrier public inaccessible ({e}). Activation du calendrier officiel de secours local.")
 
-        # Fallback hors-ligne garanti avec dates officielles exactes
+        # Fallback hors-ligne garanti avec dates officielles de banques centrales et BLS
+        self.last_feed_type = FEED_TYPE_LOCAL_FALLBACK
         events = self.generate_recurring_fallback_events()
         self.memory.store_events_bulk(events)
         return events
@@ -163,6 +174,7 @@ class CalendarProvider:
     def _normalize_event(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Normalise la structure d'un événement externe vers le schéma standard FATI."""
         try:
+
             title = str(raw.get("title") or raw.get("name") or "")
             if not title:
                 return None
@@ -376,24 +388,27 @@ class CalendarProvider:
 
         all_events = events_base + events_quote
         # Détermination du statut de la source calendrier
-        if self.last_fetch_time:
-            calendar_status = "OFFICIAL_LIVE_FEED"
+        if self.last_feed_type == FEED_TYPE_PUBLIC_UNVERIFIED:
+            calendar_status = FEED_TYPE_PUBLIC_UNVERIFIED
+            cal_confidence = "APPROXIMATE"
+            is_cal_verified = False
+        elif self.last_feed_type == FEED_TYPE_OFFICIAL_LIVE:
+            calendar_status = FEED_TYPE_OFFICIAL_LIVE
             cal_confidence = "VERIFIED"
             is_cal_verified = True
         else:
             # Vérifier si des événements existent en mémoire locale de secours
-            stored_events = self.memory.get_upcoming_events(currency=base_curr, window_minutes=1440 * 14)
-            if not stored_events and quote_curr != base_curr:
-                stored_events = self.memory.get_upcoming_events(currency=quote_curr, window_minutes=1440 * 14)
-
-            if stored_events:
-                calendar_status = "LOCAL_FALLBACK"
+            bounds = self.memory.get_calendar_bounds()
+            if bounds.get("total_events", 0) > 0:
+                calendar_status = FEED_TYPE_LOCAL_FALLBACK
                 cal_confidence = "APPROXIMATE"
                 is_cal_verified = False
+                self.last_feed_type = FEED_TYPE_LOCAL_FALLBACK
             else:
-                calendar_status = "UNAVAILABLE"
+                calendar_status = FEED_TYPE_UNAVAILABLE
                 cal_confidence = "UNKNOWN"
                 is_cal_verified = False
+                self.last_feed_type = FEED_TYPE_UNAVAILABLE
 
         now = datetime.now(timezone.utc)
         for ev in all_events:
@@ -403,8 +418,17 @@ class CalendarProvider:
 
                 # Si l'événement est dans la fenêtre [-window_minutes, +window_minutes]
                 if -window_minutes <= delta_minutes <= window_minutes:
-                    is_verif = bool(ev.get("is_verified", False)) and is_cal_verified
-                    conf = str(ev.get("calendar_confidence", cal_confidence))
+                    # Sécurité stricte : une date estimée ou un flux public non vérifié ne doit JAMAIS être considérée comme certifiée
+                    ev_is_verified = bool(ev.get("is_verified", False))
+                    ev_conf = str(ev.get("calendar_confidence", "APPROXIMATE"))
+
+                    if not ev_is_verified or calendar_status != FEED_TYPE_OFFICIAL_LIVE:
+                        is_verif = False
+                        if ev_conf == "VERIFIED":
+                            ev_conf = "APPROXIMATE"
+                    else:
+                        is_verif = True
+
                     return {
                         "in_blackout": True,
                         "minutes_to_event": round(delta_minutes, 1),
@@ -412,9 +436,9 @@ class CalendarProvider:
                         "currency": ev.get("currency"),
                         "impact": ev.get("impact"),
                         "is_verified": is_verif,
-                        "calendar_confidence": conf,
+                        "calendar_confidence": ev_conf,
                         "calendar_status": calendar_status,
-                        "reason": f"Publication majeure à proximité ({ev.get('title')} dans {delta_minutes:+.0f} min) [{conf}].",
+                        "reason": f"Publication majeure à proximité ({ev.get('title')} dans {delta_minutes:+.0f} min) [{ev_conf}].",
                     }
             except Exception:
                 continue
@@ -430,7 +454,45 @@ class CalendarProvider:
             "calendar_status": calendar_status,
             "reason": (
                 "Aucune publication à fort impact dans la fenêtre."
-                if calendar_status != "UNAVAILABLE"
+                if calendar_status != FEED_TYPE_UNAVAILABLE
                 else "Calendrier économique indisponible (Fail-Closed recommandé)."
             ),
         }
+
+    def get_calendar_coverage_summary(self) -> Dict[str, Any]:
+        """
+        Calcule et retourne le bilan complet de couverture du calendrier économique :
+        - Type de flux actuel (OFFICIAL_LIVE_FEED, PUBLIC_UNVERIFIED, LOCAL_FALLBACK, UNAVAILABLE)
+        - Période temporelle couverte [min_date, max_date]
+        - Événements totaux, certifiés, estimés
+        - Prochain événement connu à partir de maintenant
+        - Statut de couverture future (SUFFICIENT si >= 14 jours, PARTIAL si > 0, INSUFFICIENT sinon)
+        """
+        bounds = self.memory.get_calendar_bounds()
+        next_ev = self.memory.get_next_event()
+        future_days = float(bounds.get("future_coverage_days", 0.0))
+
+        if bounds.get("total_events", 0) == 0 or future_days <= 0.0:
+            coverage_status = "INSUFFICIENT"
+        elif future_days < 14.0:
+            coverage_status = "PARTIAL"
+        else:
+            coverage_status = "SUFFICIENT"
+
+        feed_type = self.last_feed_type
+        if feed_type == FEED_TYPE_UNAVAILABLE and bounds.get("total_events", 0) > 0:
+            feed_type = FEED_TYPE_LOCAL_FALLBACK
+
+        return {
+            "feed_type": feed_type,
+            "total_events": bounds.get("total_events", 0),
+            "verified_count": bounds.get("verified_count", 0),
+            "estimated_count": bounds.get("estimated_count", 0),
+            "min_date": bounds.get("min_date"),
+            "max_date": bounds.get("max_date"),
+            "future_events_count": bounds.get("future_events_count", 0),
+            "future_coverage_days": future_days,
+            "coverage_status": coverage_status,
+            "next_event": next_ev,
+        }
+
