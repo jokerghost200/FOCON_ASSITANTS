@@ -112,6 +112,11 @@ class FATIBrain:
         self.scheduler.register_task("refresh_economic_data", self._scheduled_economic_refresh)
 
         logger.info("🧠 [FATI] Los 6 Cerebros Autónomos inicializados con éxito.")
+        if hasattr(self, "economista") and self.economista:
+            try:
+                self.economista.imprimir_tabla_salud_economica()
+            except Exception as _ite:
+                logger.debug(f"[FATI] Erreur affichage initial santé économique: {_ite}")
 
     def observe_and_decide(
         self,

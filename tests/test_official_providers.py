@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import urllib.error
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
@@ -657,5 +658,81 @@ def test_trade_execution_final_pre_order_send_security_gate():
         assert res["success"] is False
         assert "dépasse le plafond strict" in res["reason"]
         mock_send.assert_not_called()
+
+
+def test_base_provider_health_diagnostics_and_network_reasons():
+    """Vérifie que BaseEconomicProvider enregistre le motif exact d'erreur et son bilan de santé."""
+    provider = BaseEconomicProvider(name="TEST_PROV", timeout_seconds=1.0, max_retries=1)
+
+    # État initial
+    initial_health = provider.get_provider_health()
+    assert initial_health["name"] == "TEST_PROV"
+    assert initial_health["status"] == "UNINITIALIZED"
+    assert initial_health["last_error"] is None
+
+    # Simulation d'un timeout ou erreur de connexion
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timed out")):
+        res = provider._http_request("https://fake.economic.api/test")
+        assert res is None
+        assert provider.last_status == "ERROR"
+        assert "timed out" in provider.last_error_reason
+        assert provider.failure_count == 1
+
+    # Simulation d'une erreur HTTP 403
+    with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError("https://fake.url", 403, "Forbidden", {}, None)):
+        res = provider._http_request("https://fake.economic.api/test")
+        assert res is None
+        assert provider.last_http_code == 403
+        assert "HTTP 403" in provider.last_error_reason
+        assert provider.failure_count == 2
+
+    health = provider.get_provider_health()
+    assert health["status"] == "ERROR"
+    assert health["failure_count"] == 2
+    assert health["last_http_code"] == 403
+
+
+def test_el_economista_generar_tabla_salud_economica(mem_db):
+    """Vérifie la génération et l'affichage complet du Tableau de santé économique."""
+    now_str = datetime.now(timezone.utc).isoformat()
+    # Insertion d'indicateurs de test
+    mem_db.store_official_indicator({
+        "source": "BLS",
+        "indicator": "UNEMPLOYMENT",
+        "currency_or_region": "USD",
+        "value": 4.1,
+        "unit": "PERCENT",
+        "reference_period": "2026M09",
+        "published_at": now_str,
+        "retrieved_at": now_str,
+        "status": "OFFICIAL_CURRENT",
+    })
+    mem_db.store_official_indicator({
+        "source": "ECB",
+        "indicator": "HICP_INFLATION",
+        "currency_or_region": "EUR",
+        "value": 1.9,
+        "unit": "PERCENT",
+        "reference_period": "2025-12",
+        "published_at": now_str,
+        "retrieved_at": now_str,
+        "status": "STALE",
+    })
+
+    eco = ElEconomista(memory=mem_db)
+    tabla = eco.generar_tabla_salud_economica()
+
+    assert "TABLEAU DE SANTE ECONOMIQUE" in tabla
+    assert "BLS (Etats-Unis)" in tabla
+    assert "BCE (Zone euro)" in tabla
+    assert "UNEMPLOYMENT" in tabla
+    assert "4.1 PERCENT" in tabla
+    assert "HICP_INFLATION" in tabla
+    assert "[STALE]" in tabla
+    assert "CALENDRIER ECONOMIQUE" in tabla
+
+    # Vérification que l'impression console s'exécute sans UnicodeEncodeError
+    eco.imprimir_tabla_salud_economica()
+
 
 

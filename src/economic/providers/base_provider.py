@@ -40,6 +40,10 @@ class BaseEconomicProvider:
         self.backoff_factor = backoff_factor
         self.last_fetch_time: Optional[str] = None
         self.last_status: str = "UNINITIALIZED"
+        self.last_error_reason: Optional[str] = None
+        self.last_http_code: Optional[int] = None
+        self.success_count: int = 0
+        self.failure_count: int = 0
 
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Génère un contexte SSL sécurisé avec certifi si disponible."""
@@ -48,6 +52,21 @@ class BaseEconomicProvider:
             return ssl.create_default_context(cafile=certifi.where())
         except Exception:
             return ssl.create_default_context()
+
+    def get_provider_health(self) -> Dict[str, Any]:
+        """
+        Retourne le diagnostic d'intégrité réseau du fournisseur.
+        Distingue collecte HTTP, statut, code HTTP et motif d'erreur exact.
+        """
+        return {
+            "name": self.name,
+            "status": self.last_status,
+            "last_fetch": self.last_fetch_time,
+            "last_error": self.last_error_reason,
+            "last_http_code": self.last_http_code,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+        }
 
     def _http_request(
         self,
@@ -59,6 +78,7 @@ class BaseEconomicProvider:
         """
         Effectue une requête HTTP sécurisée avec gestion des timeouts et retries.
         Ne lève jamais d'exception non interceptée.
+        Consigne explicitement les causes réseau (timeout, DNS, SSL, refus).
         """
         req_headers = {
             "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) FoconAssistant/1.0 ({self.name})",
@@ -69,34 +89,62 @@ class BaseEconomicProvider:
 
         ctx = self._get_ssl_context()
         attempt = 0
+        last_exception_msg = "Unknown error"
 
         while attempt <= self.max_retries:
             try:
                 req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
                 with urllib.request.urlopen(req, context=ctx, timeout=self.timeout_seconds) as resp:
                     status = getattr(resp, "status", 200)
+                    self.last_http_code = status
                     if 200 <= status < 300:
                         content = resp.read()
-                        self.last_fetch_time = datetime.now(timezone.utc).isoformat()
-                        self.last_status = "SUCCESS"
-                        return content
+                        if not content or len(content) == 0:
+                            self.last_error_reason = f"Réponse HTTP {status} vide (0 octet)"
+                            logger.warning(f"[{self.name}] ⚠️ {self.last_error_reason} sur {url}")
+                            last_exception_msg = self.last_error_reason
+                        else:
+                            self.last_fetch_time = datetime.now(timezone.utc).isoformat()
+                            self.last_status = "SUCCESS"
+                            self.last_error_reason = None
+                            self.success_count += 1
+                            return content
                     else:
-                        logger.warning(f"[{self.name}] Réponse HTTP anormale {status} pour {url}")
+                        self.last_error_reason = f"Réponse HTTP anormale {status}"
+                        logger.warning(f"[{self.name}] ⚠️ {self.last_error_reason} pour {url}")
+                        last_exception_msg = self.last_error_reason
             except urllib.error.HTTPError as he:
-                logger.warning(f"[{self.name}] Erreur HTTP {he.code} ({he.reason}) sur {url}")
+                self.last_http_code = he.code
+                self.last_error_reason = f"HTTP {he.code} ({he.reason})"
+                logger.warning(f"[{self.name}] ⚠️ Erreur {self.last_error_reason} sur {url}")
+                last_exception_msg = self.last_error_reason
                 if he.code in (400, 401, 403, 404):
                     # Pas de retry sur erreurs client définitives
                     break
             except urllib.error.URLError as ue:
-                logger.debug(f"[{self.name}] Échec connexion (tentative {attempt+1}/{self.max_retries+1}): {ue.reason}")
+                reason = str(ue.reason)
+                self.last_error_reason = f"Échec réseau ({reason})"
+                last_exception_msg = self.last_error_reason
+                if attempt == self.max_retries:
+                    logger.warning(f"[{self.name}] ❌ Échec réseau définitif sur {url} après {self.max_retries+1} tentatives : {reason}")
+                else:
+                    logger.info(f"[{self.name}] 🔄 Tentative {attempt+1}/{self.max_retries+1} échouée ({reason}), nouvel essai...")
             except Exception as e:
-                logger.debug(f"[{self.name}] Erreur inattendue requête (tentative {attempt+1}/{self.max_retries+1}): {e}")
+                self.last_error_reason = f"Exception ({type(e).__name__}: {e})"
+                last_exception_msg = self.last_error_reason
+                if attempt == self.max_retries:
+                    logger.warning(f"[{self.name}] ❌ Erreur inattendue définitive sur {url} : {e}")
+                else:
+                    logger.info(f"[{self.name}] 🔄 Tentative {attempt+1}/{self.max_retries+1} échouée ({e}), nouvel essai...")
 
             attempt += 1
             if attempt <= self.max_retries:
                 time.sleep(self.backoff_factor * (2 ** (attempt - 1)))
 
         self.last_status = "ERROR"
+        self.failure_count += 1
+        if not self.last_error_reason:
+            self.last_error_reason = last_exception_msg
         return None
 
     def _safe_json_loads(self, content_bytes: Optional[bytes]) -> Optional[Any]:

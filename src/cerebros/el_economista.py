@@ -488,13 +488,19 @@ class ElEconomista:
             "ecb_count": len(ecb_inds),
             "eurostat_count": len(eurostat_inds),
             "total_indicators": total,
+            "providers_health": {
+                "bls": self.bls.get_provider_health(),
+                "ecb": self.ecb.get_provider_health(),
+                "eurostat": self.eurostat.get_provider_health(),
+            },
             "status": "SUCCESS" if total > 0 else "PARTIAL_OR_UNAVAILABLE",
         }
 
-    def actualizar_datos_economicos(self, fetch_official: bool = True) -> Dict[str, Any]:
+    def actualizar_datos_economicos(self, fetch_official: bool = True, print_table: bool = True) -> Dict[str, Any]:
         """
         Met à jour l'ensemble des flux économiques (Calendrier + Flux RSS + Indicateurs officiels).
         Peut être exécuté périodiquement par le LearningScheduler en arrière-plan.
+        Affiche le Tableau de santé économique formaté si print_table=True.
         """
         logger.info("📡 [El Economista] Rafraîchissement des flux économiques gratuits...")
         events = self.calendar.fetch_public_calendar()
@@ -503,9 +509,112 @@ class ElEconomista:
         if fetch_official:
             official_summary = self.actualizar_indicadores_oficiales()
 
+        if print_table:
+            try:
+                self.imprimir_tabla_salud_economica()
+            except Exception as _pe:
+                logger.debug(f"Erreur affichage tableau santé économique: {_pe}")
+
         return {
             "events_loaded": len(events),
             "news_articles_loaded": len(articles),
             "official_indicators": official_summary,
             "status": "UPDATED",
         }
+
+    def generar_tabla_salud_economica(self) -> str:
+        """
+        Génère le Tableau de santé économique complet de FOCON.
+        Distingue rigoureusement :
+        - Collecte HTTP réussie (connectivité, code HTTP)
+        - Données validées (indicateurs parsés et enregistrés)
+        - Données fraîches (OFFICIAL_CURRENT vs STALE vs UNKNOWN)
+        - Couverture (nombre d'indicateurs et motifs d'échec)
+        """
+        lines = []
+        lines.append("=" * 105)
+        lines.append("               TABLEAU DE SANTE ECONOMIQUE -- FOCON ASSISTANT (EL ECONOMISTA)")
+        lines.append("=" * 105)
+
+        lines.append("1. FOURNISSEURS OFFICIELS (Statistiques Reelles sans Cle API)")
+        lines.append("-" * 105)
+
+        providers = [
+            ("BLS (Etats-Unis)", self.bls),
+            ("BCE (Zone euro)", self.ecb),
+            ("Eurostat (Zone euro)", self.eurostat),
+        ]
+
+        all_inds = self.memory.get_official_indicators() if hasattr(self.memory, "get_official_indicators") else []
+
+        for p_label, p_obj in providers:
+            p_health = p_obj.get_provider_health() if hasattr(p_obj, "get_provider_health") else {}
+            p_name = p_obj.name.upper()
+            p_status = p_health.get("status", "UNINITIALIZED")
+            last_err = p_health.get("last_error")
+
+            p_inds = [i for i in all_inds if str(i.get("source", "")).upper() == p_name]
+            current_cnt = sum(1 for i in p_inds if i.get("status") == "OFFICIAL_CURRENT")
+            stale_cnt = sum(1 for i in p_inds if i.get("status") == "STALE")
+
+            if p_status == "UNINITIALIZED":
+                display_status = "CACHED_SQLITE" if p_inds else "UNINITIALIZED"
+            else:
+                display_status = p_status
+
+            summary_tag = "VALIDE & FRAIS" if (p_inds and current_cnt > 0 and not last_err) else ("ERREUR RESEAU" if p_status == "ERROR" else "COUVERTURE PARTIELLE")
+            lines.append(f"  * {p_label:<24} : [{display_status}] {len(p_inds)} indicateur(s) | {summary_tag}")
+            if last_err:
+                lines.append(f"    [!] Anomalie reseau : {last_err}")
+
+            if p_inds:
+                for ind in p_inds:
+                    name = ind.get("indicator", "UNKNOWN")
+                    val = ind.get("value")
+                    unit = ind.get("unit", "")
+                    period = ind.get("reference_period") or ind.get("effective_date") or "N/A"
+                    status = ind.get("status", "UNKNOWN")
+                    stat, age_days = self.bls.evaluate_staleness(
+                        indicator=name,
+                        reference_period=str(period),
+                        effective_date=ind.get("effective_date"),
+                        published_at=ind.get("published_at"),
+                    )
+                    icon = "[OK]   " if status == "OFFICIAL_CURRENT" else ("[STALE]" if status == "STALE" else "[ALERT]")
+                    val_str = f"{val} {unit}"
+                    age_str = f"{age_days:.0f}j" if age_days < 999 else "N/A"
+                    lines.append(f"    {icon} {name:<23} : {val_str:<18} | Ref: {str(period):<10} | Age: {age_str:<6} [{status}]")
+            else:
+                lines.append("    (Aucun indicateur disponible en memoire locale)")
+            lines.append("")
+
+        lines.append("2. CALENDRIER ECONOMIQUE & FENETRE DE GEL (News Blackout)")
+        lines.append("-" * 105)
+        blackout_res = self.calendar.is_in_news_blackout(symbol="EURUSD", window_minutes=30.0)
+        cal_prov_status = blackout_res.get("calendar_status", "LOCAL_FALLBACK")
+        cal_conf = blackout_res.get("cal_confidence", "APPROXIMATE")
+        in_blk = blackout_res.get("in_blackout", False)
+        evt_title = blackout_res.get("event_title") or "Aucune annonce majeure imminente"
+        mins = blackout_res.get("minutes_to_event", 999.0)
+
+        lines.append(f"  * Source Calendrier    : {cal_prov_status} (Confiance : {cal_conf})")
+        lines.append(f"  * Gel News (Blackout)  : {'[BLOQUE] ACTIF (ORDRES MT5 INTERDITS)' if in_blk else '[OK] INACTIF (Trading tolere)'}")
+        lines.append(f"  * Prochain Evenement   : {evt_title} (dans {mins:.1f} min)")
+        lines.append("")
+
+        lines.append("3. FLUX D'ACTUALITES FINANCIERES & SENTIMENT")
+        lines.append("-" * 105)
+        news_articles = self.memory.get_recent_news(limit=10) if hasattr(self.memory, "get_recent_news") else []
+        lines.append(f"  * Articles en memoire  : {len(news_articles)} article(s) analyse(s)")
+        lines.append("=" * 105)
+        return "\n".join(lines)
+
+    def imprimir_tabla_salud_economica(self) -> None:
+        """Affiche le Tableau de santé économique dans les logs INFO et la console."""
+        tabla = self.generar_tabla_salud_economica()
+        try:
+            print("\n" + tabla + "\n")
+        except UnicodeEncodeError:
+            import sys
+            sys.stdout.buffer.write(("\n" + tabla + "\n").encode("utf-8", errors="replace"))
+        logger.info(f"\n{tabla}")
