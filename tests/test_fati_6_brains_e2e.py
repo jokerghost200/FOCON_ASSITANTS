@@ -106,14 +106,15 @@ def test_1_confidence_cap_and_score_separation():
     dec_veto = estratega.decidir(
         symbol="EURUSD",
         timeframe="M15",
-        tech_features=dict(tech, trend="Bearish"),
-        amd_context={"phase": "DISTRIBUTION", "bias": "Bearish", "fvg": [{"type": "BEARISH", "top": 1.1055, "bottom": 1.1045}]},
-        boomerang_data={"decision": "VALID", "direction": "SELL", "score": 82},
+        tech_features=dict(tech, trend="Bearish", close=1.0970, ema_50=1.0990, ema_200=1.1020, macd=-0.0005, macd_hist=-0.0002),
+        amd_context={"phase": "DISTRIBUTION", "bias": "Bearish", "fvg": [{"type": "BEARISH", "top": 1.0980, "bottom": 1.0965}]},
+        boomerang_data={"decision": "VALID", "direction": "SELL", "score": 82, "entry": 1.0970, "sl": 1.0995, "tp": 1.0920, "rr": 2.0},
         htf_trend="Bearish",
         observation=veto_obs,
     )
     assert dec_veto["action"] == "WAIT"
     assert dec_veto["confidence"] == 0
+    assert "Veto Visuel El Observador" in dec_veto["reason"]
 
 
 def test_2_order_flow_status_strictness():
