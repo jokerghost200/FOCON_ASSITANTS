@@ -179,7 +179,9 @@ class AIOrchestrator:
         #    annule l'essentiel de l'ATR disponible → trade perdant dès l'ouverture.
         #  - Trie par ATR/Price (volatilité RELATIVE) pour ne pas favoriser les
         #    paires exotiques à grande valeur nominale (USDRUB, USDIDR…).
-        MAX_SPREAD_ATR_RATIO = 0.20  # le spread ne doit pas dépasser 20 % de l'ATR
+        MAX_SPREAD_ATR_RATIO = 0.20  # le spread ne doit pas dépasser 20 % de l'ATR sur Forex (38 % sur Crypto)
+        CRYPTO_MAX_SPREAD_ATR_RATIO = 0.38
+        EXOTIC_BLOCKLIST = {"USDSEK", "USDCNH", "USDNOK", "USDTRY", "USDZAR", "USDMXN", "USDPLN", "USDHUF", "EURSEK", "EURNOK", "EURTRY"}
         MIN_VOLATILITY_ATR_REL = 0.0006 # Écarte les marchés morts (< 0.06% de volatilité relative)
         MAX_MARKETS_FOR_AI = 15
 
@@ -187,6 +189,11 @@ class AIOrchestrator:
         spread_rejected = []
         low_vol_rejected = []
         for sym, f in tech_summaries.items():
+            sym_clean = str(sym).upper()[:6]
+            if sym_clean in EXOTIC_BLOCKLIST:
+                spread_rejected.append(f"{sym} (Paire exotique à haut risque exclue)")
+                continue
+
             atr = float(f.get('atr_14') or 0)
             close_price = float(f.get('close') or 1)
             atr_rel = (atr / close_price) if close_price > 0 else 0
@@ -201,7 +208,10 @@ class AIOrchestrator:
             f['_spread_price'] = spread_price
             f['_spread_ratio'] = spread_ratio
 
-            if spread_ratio > MAX_SPREAD_ATR_RATIO:
+            is_crypto_sym = hasattr(self.mt5, 'is_crypto') and self.mt5.is_crypto(sym)
+            eff_max_spread = CRYPTO_MAX_SPREAD_ATR_RATIO if is_crypto_sym else MAX_SPREAD_ATR_RATIO
+
+            if spread_ratio > eff_max_spread:
                 spread_rejected.append(
                     f"{sym} (spread={spread_price:.5f}, ATR={atr:.5f}, ratio={spread_ratio:.1%})"
                 )
@@ -320,13 +330,14 @@ class AIOrchestrator:
             logger.warning(f"Sélection IA indisponible ({e}) -> Cerveau Local : scoring par confluences SMC et volatilité.")
             # Fallback Cerveau Local : trie par confluences institutionnelles et volatilité
             sorted_setups = sorted(tech_summaries.keys(), key=_score_setup, reverse=True)
-            # Ne prendre que ceux avec un score décent (>= 30) pour éviter les marchés moyens
-            selected_symbols = [s for s in sorted_setups if _score_setup(s) >= 30][:3]
+            # En mode 100% Cerveaux Locaux (instantané, sans latence réseau), les 6 Cerveaux analysent jusqu'à 8 candidats A+
+            max_local_candidates = 8 if not has_ai else 3
+            selected_symbols = [s for s in sorted_setups if _score_setup(s) >= 25][:max_local_candidates]
             
             if selected_symbols:
-                _emit(f"🧠 [Cerveau Local] Marchés de haute qualité retenus : {', '.join(selected_symbols)}")
+                _emit(f"🧠 [Les 6 Cerveaux FATI] Marchés retenus pour analyse complète : {', '.join(selected_symbols)}")
             else:
-                _emit("🧠 [Cerveau Local] Aucun marché ne remplit les critères d'exigence minimaux.")
+                _emit("🧠 [Les 6 Cerveaux FATI] Aucun marché ne remplit les critères d'exigence minimaux.")
             
         if not selected_symbols:
             _emit("Aucune opportunité évidente trouvée lors du scan de surface. Soyez patient.")
@@ -357,9 +368,15 @@ class AIOrchestrator:
                 results.append(res)
 
         if self.order_block_scan_enabled:
-            _emit("Scan Order Blocks actifs...")
+            _emit("Scan Order Blocks actifs (soumis au vote des 6 Cerveaux)...")
+            # Exclure les symboles que les 6 Cerveaux viennent déjà d'analyser (pour ne JAMAIS contredire un WAIT des 6 Cerveaux)
+            already_analyzed = set(selected_symbols)
+            clean_scan_symbols = [
+                s for s in (list(filtered_summaries.keys()) if filtered_summaries else list(tech_summaries.keys()))
+                if s not in already_analyzed
+            ]
             try:
-                ob_symbols = open_markets if open_markets else list(tech_summaries.keys())
+                ob_symbols = clean_scan_symbols
                 ob_results = self.scan_for_order_blocks(
                     ob_symbols,
                     timeframe,
@@ -367,38 +384,9 @@ class AIOrchestrator:
                     stop_event=stop_event,
                 )
                 results.extend(ob_results)
-                _emit(f"Order Blocks valides: {len(ob_results)}")
+                _emit(f"Order Blocks validés par les 6 Cerveaux: {len(ob_results)}")
             except Exception:
                 logger.exception("Order Block scan failed")
-
-            # Scan for PENDING Order Block zones (non-retested, for limit orders)
-            _emit("Scan zones OB en attente (Pending Orders)...")
-            try:
-                pending_ob_results = self.scan_for_pending_ob_orders(
-                    ob_symbols,
-                    timeframe,
-                    direction_filter=dir_filter_upper,
-                    stop_event=stop_event,
-                )
-                results.extend(pending_ob_results)
-                _emit(f"📌 Zones OB pour ordres limites: {len(pending_ob_results)}")
-            except Exception:
-                logger.exception("Pending Order Block scan failed")
-
-            # Scan for PENDING CRT (Candle Range Theory + SMC Limit Orders)
-            _emit("Scan zones CRT universel en attente (Pending Limits)...")
-            try:
-                crt_symbols = open_markets if open_markets else list(tech_summaries.keys())
-                pending_crt_results = self.scan_for_crt_pending_orders(
-                    crt_symbols,
-                    timeframe,
-                    direction_filter=dir_filter_upper,
-                    stop_event=stop_event,
-                )
-                results.extend(pending_crt_results)
-                _emit(f"🎯 Setups CRT Pending Limits validés: {len(pending_crt_results)}")
-            except Exception:
-                logger.exception("Pending CRT scan failed")
             
         if closed_markets:
             results.append({
@@ -718,6 +706,29 @@ class AIOrchestrator:
                             "decision": wait_decision,
                         }
 
+                    # Vérification Veto Visuel 50 Bougies (El Observador) même en mode Pro Trader
+                    if self.observador and hasattr(self.observador, "analizar_accion_del_precio_velas"):
+                        cv = self.observador.analizar_accion_del_precio_velas(df, atr=atr_p)
+                        p_dir = str(pro_signal.direction).upper()
+                        if (p_dir == "SELL" and cv.get("veto_sell")) or (p_dir == "BUY" and cv.get("veto_buy")):
+                            logger.info(f"👁️ [El Observador] Signal Pro Trader {p_dir} sur {symbol} bloqué par Veto Visuel 50 bougies : {cv.get('label')}")
+                            return {
+                                "status": "WAIT",
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "tech_features": tech_features,
+                                "amd_context": amd_context,
+                                "news_context": news_context,
+                                "decision": {
+                                    "action": "WAIT",
+                                    "confidence": 0,
+                                    "entry": close_p,
+                                    "sl": 0.0,
+                                    "tp": 0.0,
+                                    "reason": f"Veto Visuel El Observador (50 bougies) : {cv.get('label')}",
+                                },
+                            }
+
                     logger.info(
                         f"👑 [Copie {pro_signal.trader}] Signal {pro_signal.direction} validé sur {symbol} "
                         f"(Mode {active_mode.upper()}). Entry={pro_signal.entry}, SL={pro_signal.sl}, TP={pro_signal.tp}"
@@ -747,6 +758,24 @@ class AIOrchestrator:
                     if not val['valid']:
                         logger.warning(f"👑 [Copie {pro_signal.trader}] Risque MT5 rejeté : {val['reason']}")
                         return {"error": f"Risk validation failed: {val['reason']}"}
+
+                    if self.centinela and hasattr(self.centinela, "verificar_correlacion_divisas"):
+                        bal_c = float((account_info or {}).get("balance", 0.0) or 0.0)
+                        corr_c = self.centinela.verificar_correlacion_divisas(
+                            symbol=symbol,
+                            action=pro_signal.direction,
+                            open_positions=self.mt5.get_open_positions() or [],
+                            max_same_currency_exposure=1 if bal_c < 250.0 else 2,
+                        )
+                        if not corr_c.get("safe", True):
+                            logger.info(f"🛡️ [El Centinela] Signal Pro Trader rejeté : {corr_c.get('reason')}")
+                            return {"status": "WAIT", "symbol": symbol, "timeframe": timeframe, "decision": {"action": "WAIT", "confidence": 0, "reason": corr_c.get("reason")}}
+
+                    if self.sabio:
+                        try:
+                            val['proposal']['fati_decision_id'] = self.sabio.registrar_decision(val['proposal'], is_executed=True)
+                        except Exception:
+                            pass
 
                     return {
                         "status": "SIGNAL",
@@ -1112,6 +1141,22 @@ class AIOrchestrator:
                 decision['action'] = 'WAIT'
                 decision['reason'] = f"Tendance HTF contraire ({htf_trend}). Vente contre-tendance rejetée."
 
+            # 3b. Filtre Anti-Contre-Momentum LTF (Bougie courante + ZigZag M15)
+            elif proposed_action == 'SELL' and float(last_row['close']) > float(last_row['open']) and (
+                (float(last_row['high']) - float(last_row['low'])) <= 0 or
+                ((float(last_row['high']) - float(last_row['close'])) / (float(last_row['high']) - float(last_row['low']))) < 0.40
+            ):
+                logger.warning(f"[Anti-Bull-Candle] {symbol}: Rejet SELL car la bougie actuelle monte (bougie verte sans rejet >= 40%). Forcé en WAIT.")
+                decision['action'] = 'WAIT'
+                decision['reason'] = "Protection Anti-Hausse : Le marché pousse à la hausse (bougie verte active sans mèche de rejet). Attente d'une bougie rouge de confirmation."
+            elif proposed_action == 'BUY' and float(last_row['close']) < float(last_row['open']) and (
+                (float(last_row['high']) - float(last_row['low'])) <= 0 or
+                ((float(last_row['close']) - float(last_row['low'])) / (float(last_row['high']) - float(last_row['low']))) < 0.40
+            ):
+                logger.warning(f"[Anti-Bear-Candle] {symbol}: Rejet BUY car la bougie actuelle chute (bougie rouge sans rejet >= 40%). Forcé en WAIT.")
+                decision['action'] = 'WAIT'
+                decision['reason'] = "Protection Anti-Chute : Le marché pousse à la baisse (bougie rouge active sans mèche de rejet). Attente d'une bougie verte de confirmation."
+
             # 4. Filtre de confluence institutionnelle (exige un vrai setup avant d'entrer)
             else:
                 has_strong_confluence = (
@@ -1331,11 +1376,15 @@ class AIOrchestrator:
         list[dict]  — signaux prets a etre executes (meme format que analyze_symbol)
         """
         results = []
+        batch_virtual_positions = list(self.mt5.get_open_positions() or [])
+        exotic_blocklist = {"USDSEK", "USDCNH", "USDNOK", "USDTRY", "USDZAR", "USDMXN", "USDPLN", "USDHUF", "EURSEK", "EURNOK", "EURTRY"}
         for symbol in symbols:
             time.sleep(0.02) # Yield GIL
             if stop_event and stop_event.is_set():
                 break
             try:
+                if str(symbol).upper()[:6] in exotic_blocklist:
+                    continue
                 if not self.mt5.is_market_open(symbol):
                     continue
                 df = self.market_data.get_dataframe(symbol, timeframe)
@@ -1386,9 +1435,9 @@ class AIOrchestrator:
                     logger.info(f"[OB Rescan] {symbol}: Rejet SELL contre tendance HTF ({htf_trend})")
                     continue
 
-                # 2b. Filtre Anti-Chute Libre / Anti-Couteau qui tombe (Anti-Falling Knife)
-                # Si le marché s'effondre avec des bougies baissières successives sans réaction haussière,
-                # ne jamais exécuter d'ordre marché BUY aveugle !
+                # 2b. Filtre Anti-Contre-Impulsion & Confirmation Bougie + ZigZag (Anti-Falling Knife / Anti-Bull Rally)
+                # Interdiction formelle de VENDRE pendant que le marché monte (bougie verte ou jambe ZigZag haussière > EMA 50 sans rejet rouge),
+                # et interdiction d'ACHETER pendant que le marché chute (bougie rouge ou jambe ZigZag baissière < EMA 50 sans rejet vert).
                 if len(df) >= 3:
                     last_c = df.iloc[-1]
                     prev_c = df.iloc[-2]
@@ -1396,22 +1445,30 @@ class AIOrchestrator:
                     c_prev, o_prev = float(prev_c['close']), float(prev_c['open'])
                     h_last, l_last = float(last_c['high']), float(last_c['low'])
                     rng_last = h_last - l_last
+                    ema50_val = float(last_c.get('EMA_50', c_last) or c_last)
+                    zz_trend = float(last_c.get('zigzag_trend', 0) or 0)
 
                     if best_ob.direction == 'BUY':
-                        is_bear_run = (c_last < o_last) and (c_prev < o_prev)
                         lower_wick = (c_last - l_last) if c_last < o_last else (o_last - l_last)
-                        has_wick_rejection = rng_last > 0 and (lower_wick / rng_last) >= 0.30
-                        has_reaction = (c_last > o_last) or has_wick_rejection or getattr(best_ob, 'has_rejection', False)
-                        if is_bear_run and not has_reaction:
-                            logger.info(f"[OB Rescan] {symbol}: Rejet BUY — Marché en chute libre (bougies rouges consécutives sans rejet haussier). Attente de stabilisation.")
+                        has_strong_wick = rng_last > 0 and (lower_wick / rng_last) >= 0.40
+                        # 1. Si la bougie actuelle est rouge sans forte mèche basse (>= 40%), on n'achète jamais un couteau qui tombe
+                        if c_last < o_last and not has_strong_wick:
+                            logger.info(f"[OB Rescan] {symbol}: Rejet BUY — Bougie courante baissière (rouge) sans mèche de rejet. Attente de clôture verte.")
+                            continue
+                        # 2. Si le ZigZag M15 pointe en bas sous l'EMA 50, on exige une vraie bougie verte de retournement (c_last > o_last et c_last > c_prev)
+                        if zz_trend < 0 and c_last < ema50_val and not (c_last > o_last and c_last > o_prev):
+                            logger.info(f"[OB Rescan] {symbol}: Rejet BUY — Flux M15 baissier (ZigZag DOWN < EMA50) sans englobante/rebond haussier confirmé.")
                             continue
                     elif best_ob.direction == 'SELL':
-                        is_bull_run = (c_last > o_last) and (c_prev > o_prev)
                         upper_wick = (h_last - c_last) if c_last > o_last else (h_last - o_last)
-                        has_wick_rejection = rng_last > 0 and (upper_wick / rng_last) >= 0.30
-                        has_reaction = (c_last < o_last) or has_wick_rejection or getattr(best_ob, 'has_rejection', False)
-                        if is_bull_run and not has_reaction:
-                            logger.info(f"[OB Rescan] {symbol}: Rejet SELL — Marché en forte hausse sans rejet baissier. Attente de stabilisation.")
+                        has_strong_wick = rng_last > 0 and (upper_wick / rng_last) >= 0.40
+                        # 1. Si la bougie actuelle est verte sans forte mèche haute (>= 40%), on ne vend jamais un train haussier en marche !
+                        if c_last > o_last and not has_strong_wick:
+                            logger.info(f"[OB Rescan] {symbol}: Rejet SELL — Bougie courante haussière (verte) en pleine montée. Attente d'un rejet rouge.")
+                            continue
+                        # 2. Si le ZigZag M15 pointe en haut au-dessus de l'EMA 50 (exactement comme sur USDCAD M15), on exige une vraie bougie rouge de rejet
+                        if zz_trend > 0 and c_last > ema50_val and not (c_last < o_last and c_last < o_prev):
+                            logger.info(f"[OB Rescan] {symbol}: Rejet SELL — Rallye M15 haussier actif (ZigZag UP > EMA50) sans retournement baissier confirmé.")
                             continue
 
                 # 3. Filtre RSI anti-surachat / survente
@@ -1426,6 +1483,7 @@ class AIOrchestrator:
 
                 # 4. Filtre de spread : Le SL doit être suffisamment éloigné du spread pour ne pas être fauché
                 symbol_info = self.mt5.get_symbol_info(symbol)
+                spread_val = 0.0
                 if symbol_info:
                     s_pts = float(symbol_info.get('spread', 0) or 0)
                     p_pt = float(symbol_info.get('point', 0.00001) or 0.00001)
@@ -1435,7 +1493,65 @@ class AIOrchestrator:
                         logger.info(f"[OB Rescan] {symbol}: Rejet car SL trop serré par rapport au spread ({sl_dist:.5f} < 2.5x {spread_val:.5f})")
                         continue
 
-                logger.info(f"[OB Rescan] {symbol}: {best_ob.ob_type} validé (score {best_ob.score:.0f}, HTF {htf_trend})")
+                economic_context = None
+                if self.economista:
+                    try:
+                        economic_context = self.economista.analizar_contexto_economico(symbol)
+                    except Exception as _ece:
+                        logger.warning(f"[OB Rescan] Erreur analyse économique pour {symbol}: {_ece}")
+
+                # 5. VALIDATION OBLIGATOIRE PAR LES CERVEAUX (El Observador + El Estratega + El Sabio)
+                # Aucun Order Block ne peut contourner le vote des 6 Cerveaux !
+                if self.observador and self.estratega:
+                    try:
+                        tech_feat = self.tech.extract_latest_features(df)
+                        amd_ctx = self.market_data.analyze_amd(df)
+                        obs_rep = self.observador.observar_mercado(
+                            df=df,
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            tech_features=tech_feat,
+                            spread_price=spread_val,
+                            htf_trend=htf_trend,
+                            h4_trend=htf_trend,
+                        )
+                        brain_dec = self.estratega.decidir(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            tech_features=tech_feat,
+                            amd_context=amd_ctx,
+                            boomerang_data={"decision": "INVALID", "direction": "NONE", "score": 0},
+                            order_blocks=obs,
+                            crt_setup=None,
+                            htf_trend=htf_trend,
+                            spread_price=spread_val,
+                            direction_filter=direction_filter,
+                            observation=obs_rep,
+                            ai_advice=None,
+                            economic_context=economic_context,
+                        )
+                        brain_action = str(brain_dec.get("action", "WAIT")).upper()
+                        if brain_action != best_ob.direction:
+                            logger.info(
+                                f"🧠 [OB Rescan / Cerveaux FATI] {symbol}: Order Block {best_ob.direction} rejeté par El Estratega & El Observador "
+                                f"(Décision Cerveaux = {brain_action} : {brain_dec.get('reason', '')})"
+                            )
+                            continue
+                        # Affinité historique par paire & session via El Sabio
+                        if self.sabio and hasattr(self.sabio, "evaluar_afinidad_simbolo"):
+                            import datetime
+                            ch = datetime.datetime.now(datetime.timezone.utc).hour
+                            curr_sess = "ASIA" if ch < 8 else ("LONDON" if ch < 13 else ("NEW_YORK_LONDON_OVERLAP" if ch < 17 else "NEW_YORK"))
+                            aff = self.sabio.evaluar_afinidad_simbolo(symbol=symbol, session=curr_sess)
+                            aff_bonus = float(aff.get("confidence_bonus", 0.0) or 0.0)
+                            if (best_ob.score + aff_bonus) < getattr(self.risk, "min_confidence", 60.0):
+                                logger.info(f"🧠 [OB Rescan / El Sabio] {symbol} rejeté pour affinité négative ({aff.get('tier')}).")
+                                continue
+                    except Exception as _be:
+                        logger.warning(f"[OB Rescan] Erreur validation Cerveaux FATI sur {symbol}: {_be}")
+                        continue
+
+                logger.info(f"[OB Rescan] {symbol}: {best_ob.ob_type} validé par les 6 Cerveaux (score {best_ob.score:.0f}, HTF {htf_trend})")
 
                 # Construire un 'decision' compatible avec le risk manager
                 decision = {
@@ -1444,7 +1560,7 @@ class AIOrchestrator:
                     "entry": best_ob.entry,
                     "sl": best_ob.sl,
                     "tp": best_ob.tp,
-                    "reason": f"ORDER BLOCK {best_ob.ob_type} (Score {best_ob.score:.0f}/100) | {best_ob.bars_ago} bougies | Impulsion {best_ob.impulse_strength:.1f}x ATR | R:R {best_ob.rr}",
+                    "reason": f"ORDER BLOCK {best_ob.ob_type} [Validé par les 6 Cerveaux] (Score {best_ob.score:.0f}/100) | {best_ob.bars_ago} bougies | Impulsion {best_ob.impulse_strength:.1f}x ATR | R:R {best_ob.rr}",
                     "ob_type": best_ob.ob_type,
                     "ob_zone_low": best_ob.ob_low,
                     "ob_zone_high": best_ob.ob_high,
@@ -1460,18 +1576,57 @@ class AIOrchestrator:
                     logger.warning(f"[OB Rescan] {symbol}: Risk validation failed — {validation['reason']}")
                     continue
 
-                economic_context = None
-                if self.economista:
+                # Filtrage Macroéconomique (El Economista) : gel d'annonce et rejet contre-courant fort
+                if economic_context and isinstance(economic_context, dict):
+                    if economic_context.get("high_impact_window") or economic_context.get("recommendation") == "NO_TRADE_NEWS":
+                        logger.info(f"🛑 [OB Rescan / El Economista] {symbol} bloqué pour annonce économique : {economic_context.get('reason')}")
+                        continue
+                    econ_rec = economic_context.get("recommendation", "NORMAL")
+                    if best_ob.direction == "SELL" and econ_rec == "FAVOR_BUY" and best_ob.score < 99:
+                        logger.info(f"⚖️ [OB Rescan / El Economista] {symbol}: Rejet SELL car contexte macro FAVOR_BUY.")
+                        continue
+                    if best_ob.direction == "BUY" and econ_rec == "FAVOR_SELL" and best_ob.score < 99:
+                        logger.info(f"⚖️ [OB Rescan / El Economista] {symbol}: Rejet BUY car contexte macro FAVOR_SELL.")
+                        continue
+
+                # Filtrage Anti-Corrélation des Devises (El Centinela)
+                if self.centinela and hasattr(self.centinela, "verificar_correlacion_divisas"):
+                    bal = float(account_info.get('balance', 0.0) or 0.0)
+                    max_ccy_exp = 1 if bal < 250.0 else 2
+                    corr_check = self.centinela.verificar_correlacion_divisas(
+                        symbol=symbol,
+                        action=best_ob.direction,
+                        open_positions=batch_virtual_positions,
+                        max_same_currency_exposure=max_ccy_exp,
+                    )
+                    if not corr_check.get("safe", True):
+                        logger.info(f"🛡️ [OB Rescan / El Centinela] {symbol} rejeté : {corr_check.get('reason')}")
+                        continue
+
+                # Protection Plafond Risque en Dollars sur Micro-Compte (évite un trade à 20$ de risque sur 80$ de capital)
+                prop = validation['proposal']
+                bal = float(account_info.get('balance', 80.0) or 80.0)
+                risk_usd_val = float(prop.get('risk_amount_usd', 0.0) or 0.0)
+                if bal > 0 and risk_usd_val > (bal * 0.10):
+                    logger.warning(
+                        f"🛡️ [OB Rescan] {symbol}: Risque trop élevé (${risk_usd_val:.2f} > 10% du capital ${bal:.2f}). Rejeté par sécurité."
+                    )
+                    continue
+
+                batch_virtual_positions.append({"symbol": symbol, "type": best_ob.direction})
+
+                if self.sabio:
                     try:
-                        economic_context = self.economista.analizar_contexto_economico(symbol)
-                    except Exception as _ece:
-                        logger.warning(f"[OB Rescan] Erreur analyse économique pour {symbol}: {_ece}")
+                        dec_id = self.sabio.registrar_decision(prop, is_executed=True)
+                        prop["fati_decision_id"] = dec_id
+                    except Exception:
+                        pass
 
                 results.append({
                     "status": "OB_SIGNAL",
                     "symbol": symbol,
                     "timeframe": timeframe,
-                    "decision": validation['proposal'],
+                    "decision": prop,
                     "economic_context": economic_context,
                     "ob_summary": best_ob.summary(),
                 })
@@ -1496,11 +1651,15 @@ class AIOrchestrator:
         - symbol, timeframe, ob_data (OrderBlock), decision (validated proposal)
         """
         results = []
+        batch_virtual_positions = list(self.mt5.get_open_positions() or [])
+        exotic_blocklist = {"USDSEK", "USDCNH", "USDNOK", "USDTRY", "USDZAR", "USDMXN", "USDPLN", "USDHUF", "EURSEK", "EURNOK", "EURTRY"}
         for symbol in symbols:
             time.sleep(0.02) # Yield GIL
             if stop_event and stop_event.is_set():
                 break
             try:
+                if str(symbol).upper()[:6] in exotic_blocklist:
+                    continue
                 if not self.mt5.is_market_open(symbol):
                     continue
                 

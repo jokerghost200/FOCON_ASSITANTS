@@ -133,12 +133,29 @@ class FATIBrain:
         observation: Optional[Dict[str, Any]] = None,
         ai_advice: Optional[Dict[str, Any]] = None,
         economic_context: Optional[Dict[str, Any]] = None,
+        df: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
-        Cycle Pilier 1, 2 & 6 : El Observador, El Estratega & El Economista.
-        Intègre le contexte macroéconomique et journalise la décision via El Sabio pour la postérité statistique.
+        Cycle Pilier 1, 2, 3 & 6 : El Observador, El Estratega, El Sabio & El Economista.
+        Intègre l'observation complète (50 bougies, ZigZag/Fractals, OTE, Liquidité, VSA, MTF, Crypto Week-End),
+        le contexte macroéconomique, l'affinité historique et journalise la décision via El Sabio.
         """
-        # Consultation automatique d'El Economista si non injecté préalablement
+        # 1. Observation complète automatique via El Observador si df fourni et observation absente
+        if observation is None and df is not None and hasattr(self, "observador") and self.observador:
+            try:
+                observation = self.observador.observar_mercado(
+                    df=df,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    tech_features=tech_features,
+                    spread_price=spread_price,
+                    htf_trend=htf_trend,
+                    h4_trend=htf_trend,
+                )
+            except Exception as _oe:
+                logger.debug(f"[FATI] Erreur observation automatique pour {symbol}: {_oe}")
+
+        # 2. Consultation automatique d'El Economista si non injecté préalablement
         if economic_context is None and hasattr(self, "economista") and self.economista:
             try:
                 economic_context = self.economista.analizar_contexto_economico(symbol)

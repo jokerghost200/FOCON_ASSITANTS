@@ -588,6 +588,272 @@ class ElObservador:
             "label": label,
         }
 
+    def analizar_accion_del_precio_velas(
+        self,
+        df: pd.DataFrame,
+        atr: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Vision des Bougies Japonaises & Price Action Immédiat (comme l'œil d'un trader humain) :
+        Analyse les 6 dernières bougies pour détecter :
+        1. L'anatomie de la bougie courante et précédente (Marubozu Haussier/Baissier, Corps vs Mèches).
+        2. Les figures de retournement japonaises (Englobante Haussière/Baissière, Pin Bar / Marteau / Étoile Filante).
+        3. L'escalier de momentum sur 6 bougies (Bullish Staircase vs Bearish Cascade : somme des corps verts vs rouges),
+           afin de ne jamais se faire piéger par une toute petite bougie de respiration au milieu d'un rallye.
+        4. Droit de VETO visuel (veto_buy / veto_sell) si les bougies poussent violemment dans le sens opposé.
+        """
+        if df is None or len(df) < 6:
+            return {
+                "candles_analyzed": 0,
+                "macro_50_wave": "NEUTRAL",
+                "swing_15_state": "NEUTRAL",
+                "pattern": "NONE",
+                "momentum_state": "NEUTRAL",
+                "veto_buy": False,
+                "veto_sell": False,
+                "buy_bonus": 0.0,
+                "sell_bonus": 0.0,
+                "label": "Price Action neutre",
+            }
+
+        w50 = df.tail(min(50, len(df))).reset_index(drop=True)
+        n_candles = len(w50)
+        recent15 = w50.tail(min(15, n_candles))
+        recent6 = w50.tail(min(6, n_candles))
+        last = w50.iloc[-1]
+        prev = w50.iloc[-2]
+
+        o_last, c_last = float(last["open"]), float(last["close"])
+        h_last, l_last = float(last["high"]), float(last["low"])
+        rng_last = max(h_last - l_last, 1e-9)
+        body_last = abs(c_last - o_last)
+        body_ratio_last = body_last / rng_last
+        u_wick_last = (h_last - c_last) if c_last >= o_last else (h_last - o_last)
+        l_wick_last = (o_last - l_last) if c_last >= o_last else (c_last - l_last)
+
+        o_prev, c_prev = float(prev["open"]), float(prev["close"])
+        h_prev, l_prev = float(prev["high"]), float(prev["low"])
+        rng_prev = max(h_prev - l_prev, 1e-9)
+        body_prev = abs(c_prev - o_prev)
+
+        eff_atr = atr if atr > 0 else float((w50["high"] - w50["low"]).mean() or 1e-4)
+
+        buy_bonus = 0.0
+        sell_bonus = 0.0
+        veto_buy = False
+        veto_sell = False
+        labels = []
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COUCHE 1 : PANORAMA DES 50 DERNIÈRES BOUGIES (Vue complète de l'écran MT5)
+        # ═══════════════════════════════════════════════════════════════════════
+        high_50 = float(w50["high"].max())
+        low_50 = float(w50["low"].min())
+        range_50 = max(high_50 - low_50, 1e-9)
+        pos_50_pct = ((c_last - low_50) / range_50) * 100.0
+        idx_high_50 = int(w50["high"].idxmax())
+        idx_low_50 = int(w50["low"].idxmin())
+
+        macro_50_wave = "RANGE_50"
+        if idx_low_50 > idx_high_50 and pos_50_pct >= 55.0:
+            macro_50_wave = "V_REVERSAL_BULL_50" if pos_50_pct >= 70.0 else "RECOVERY_BULL_50"
+            buy_bonus += 4.0
+            sell_bonus -= 6.0
+            labels.append(f"Vue 50B: Reprise en V Haussiere ({pos_50_pct:.0f}% du range 50B)")
+        elif idx_low_50 < idx_high_50 and idx_high_50 >= (n_candles - 15) and pos_50_pct >= 65.0:
+            macro_50_wave = "UPTREND_BREAKOUT_50"
+            buy_bonus += 5.0
+            sell_bonus -= 8.0
+            labels.append(f"Vue 50B: Tendance/Breakout Haussier ({pos_50_pct:.0f}% du range 50B)")
+        elif idx_high_50 > idx_low_50 and pos_50_pct <= 45.0:
+            macro_50_wave = "V_REVERSAL_BEAR_50" if pos_50_pct <= 30.0 else "DROP_BEAR_50"
+            sell_bonus += 4.0
+            buy_bonus -= 6.0
+            labels.append(f"Vue 50B: Retournement Baissier ({pos_50_pct:.0f}% du range 50B)")
+        elif idx_high_50 < idx_low_50 and idx_low_50 >= (n_candles - 15) and pos_50_pct <= 35.0:
+            macro_50_wave = "DOWNTREND_BREAKDOWN_50"
+            sell_bonus += 5.0
+            buy_bonus -= 8.0
+            labels.append(f"Vue 50B: Tendance/Cassure Baissiere ({pos_50_pct:.0f}% du range 50B)")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COUCHE 2 : LA JAMBE ACTIVE SUR LES 15 DERNIÈRES BOUGIES (Vague Swing)
+        # ═══════════════════════════════════════════════════════════════════════
+        open_15 = float(recent15["open"].iloc[0])
+        net_move_15 = c_last - open_15
+        bull_body_15 = 0.0
+        bear_body_15 = 0.0
+        bull_cnt_15 = 0
+        bear_cnt_15 = 0
+        for _, r15 in recent15.iterrows():
+            ro, rc = float(r15["open"]), float(r15["close"])
+            if rc > ro:
+                bull_cnt_15 += 1
+                bull_body_15 += (rc - ro)
+            elif rc < ro:
+                bear_cnt_15 += 1
+                bear_body_15 += (ro - rc)
+
+        swing_15_state = "NEUTRAL"
+        if net_move_15 >= 1.5 * eff_atr and bull_body_15 >= max(bear_body_15 * 1.45, 1.2 * eff_atr):
+            swing_15_state = "RALLY_15_BULL"
+            buy_bonus += 4.0
+            sell_bonus -= 10.0
+        elif net_move_15 <= -1.5 * eff_atr and bear_body_15 >= max(bull_body_15 * 1.45, 1.2 * eff_atr):
+            swing_15_state = "DROP_15_BEAR"
+            sell_bonus += 4.0
+            buy_bonus -= 10.0
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # COUCHE 3 : ZOOM SUR LES 6 DERNIÈRES BOUGIES (Acheteurs vs Vendeurs)
+        # ═══════════════════════════════════════════════════════════════════════
+        bull_count = 0
+        bear_count = 0
+        bull_body_sum = 0.0
+        bear_body_sum = 0.0
+        for _, r in recent6.iterrows():
+            ro, rc = float(r["open"]), float(r["close"])
+            if rc > ro:
+                bull_count += 1
+                bull_body_sum += (rc - ro)
+            elif rc < ro:
+                bear_count += 1
+                bear_body_sum += (ro - rc)
+
+        # 4. Détection des figures de bougies (Candlestick Patterns)
+        pattern = "STANDARD"
+
+        # Englobantes (Engulfing)
+        is_bull_engulfing = (
+            c_prev < o_prev
+            and c_last > o_last
+            and c_last >= o_prev
+            and o_last <= c_prev
+            and body_last > body_prev * 1.05
+        )
+        is_bear_engulfing = (
+            c_prev > o_prev
+            and c_last < o_last
+            and c_last <= o_prev
+            and o_last >= c_prev
+            and body_last > body_prev * 1.05
+        )
+
+        # Pin Bars (Marteau / Étoile filante)
+        is_bull_pinbar = (
+            rng_last >= 0.45 * eff_atr
+            and (l_wick_last / rng_last) >= 0.50
+            and (u_wick_last / rng_last) <= 0.25
+            and c_last >= (l_last + 0.60 * rng_last)
+        )
+        is_bear_pinbar = (
+            rng_last >= 0.45 * eff_atr
+            and (u_wick_last / rng_last) >= 0.50
+            and (l_wick_last / rng_last) <= 0.25
+            and c_last <= (h_last - 0.60 * rng_last)
+        )
+
+        # Marubozu / Grande Bougie Impulsive Pleine
+        is_bull_marubozu = (
+            c_last > o_last
+            and body_ratio_last >= 0.60
+            and body_last >= 0.50 * eff_atr
+            and (u_wick_last / rng_last) < 0.25
+        )
+        is_bear_marubozu = (
+            c_last < o_last
+            and body_ratio_last >= 0.60
+            and body_last >= 0.50 * eff_atr
+            and (l_wick_last / rng_last) < 0.25
+        )
+
+        if is_bull_engulfing:
+            pattern = "BULLISH_ENGULFING"
+            buy_bonus += 7.0
+            sell_bonus -= 12.0
+            veto_sell = True
+            labels.append("Englobante Haussiere")
+        elif is_bear_engulfing:
+            pattern = "BEARISH_ENGULFING"
+            sell_bonus += 7.0
+            buy_bonus -= 12.0
+            veto_buy = True
+            labels.append("Englobante Baissiere")
+        elif is_bull_pinbar:
+            pattern = "BULLISH_PINBAR"
+            buy_bonus += 6.0
+            sell_bonus -= 10.0
+            veto_sell = True
+            labels.append("Pin Bar / Marteau Haussier")
+        elif is_bear_pinbar:
+            pattern = "BEARISH_SHOOTING_STAR"
+            sell_bonus += 6.0
+            buy_bonus -= 10.0
+            veto_buy = True
+            labels.append("Etoile Filante / Pin Bar Baissier")
+        elif is_bull_marubozu:
+            pattern = "BULLISH_MARUBOZU"
+            buy_bonus += 5.0
+            sell_bonus -= 15.0
+            veto_sell = True
+            labels.append("Bougie Impulsive Verte Pleine (Marubozu)")
+        elif is_bear_marubozu:
+            pattern = "BEARISH_MARUBOZU"
+            sell_bonus += 5.0
+            buy_bonus -= 15.0
+            veto_buy = True
+            labels.append("Bougie Impulsive Rouge Pleine (Marubozu)")
+        else:
+            # Même une bougie verte simple sans mèche haute de rejet (>= 40%) interdit de vendre au marché
+            if c_last > o_last and (u_wick_last / rng_last) < 0.40:
+                veto_sell = True
+                sell_bonus -= 8.0
+                labels.append("Bougie verte haussiere active")
+            elif c_last < o_last and (l_wick_last / rng_last) < 0.40:
+                veto_buy = True
+                buy_bonus -= 8.0
+                labels.append("Bougie rouge baissiere active")
+
+        # 5. Synthèse Escalier Haussier / Cascade Baissière (6 bougies + 15 bougies + 50 bougies)
+        momentum_state = "NEUTRAL"
+        has_bear_reversal = pattern in ("BEARISH_ENGULFING", "BEARISH_SHOOTING_STAR", "BEARISH_MARUBOZU")
+        has_bull_reversal = pattern in ("BULLISH_ENGULFING", "BULLISH_PINBAR", "BULLISH_MARUBOZU")
+
+        if (bull_count >= 4 and bull_body_sum >= max(bear_body_sum * 1.8, 0.8 * eff_atr)) or swing_15_state == "RALLY_15_BULL":
+            momentum_state = "BULLISH_STAIRCASE"
+            buy_bonus += 4.0
+            # Tant qu'il n'y a pas une Englobante Baissière ou Étoile Filante franche, interdiction formelle de vendre ce rallye !
+            if not has_bear_reversal:
+                veto_sell = True
+                sell_bonus -= 15.0
+                labels.append(f"Rallye Haussier 15B/6B ({bull_cnt_15}/15 et {bull_count}/6 vertes)")
+        elif (bear_count >= 4 and bear_body_sum >= max(bull_body_sum * 1.8, 0.8 * eff_atr)) or swing_15_state == "DROP_15_BEAR":
+            momentum_state = "BEARISH_CASCADE"
+            sell_bonus += 4.0
+            # Tant qu'il n'y a pas une Englobante Haussière ou Pin Bar franc, interdiction formelle d'acheter cette chute !
+            if not has_bull_reversal:
+                veto_buy = True
+                buy_bonus -= 15.0
+                labels.append(f"Cascade Baissiere 15B/6B ({bear_cnt_15}/15 et {bear_count}/6 rouges)")
+
+        return {
+            "candles_analyzed": n_candles,
+            "macro_50_wave": macro_50_wave,
+            "pos_50_pct": round(pos_50_pct, 1),
+            "swing_15_state": swing_15_state,
+            "pattern": pattern,
+            "momentum_state": momentum_state,
+            "bull_candles_15": bull_cnt_15,
+            "bear_candles_15": bear_cnt_15,
+            "bull_candles_6": bull_count,
+            "bear_candles_6": bear_count,
+            "veto_buy": veto_buy,
+            "veto_sell": veto_sell,
+            "buy_bonus": round(buy_bonus, 1),
+            "sell_bonus": round(sell_bonus, 1),
+            "label": " + ".join(labels) if labels else "Price Action equilibre sur 50 bougies",
+        }
+
     def observar_mercado(
         self,
         df: pd.DataFrame,
@@ -627,6 +893,7 @@ class ElObservador:
         )
         zigzag_fractal = self.analizar_estructura_zigzag_fractal(df, tech_features=tech_features)
         crypto_weekend = self.analizar_contexto_crypto_weekend(df, symbol=symbol, atr=atr_val)
+        candle_vision = self.analizar_accion_del_precio_velas(df, atr=atr_val)
 
         # Microstructure et Order Flow
         of_confluence = self.order_flow_engine.evaluate_setup_confluence(
@@ -653,5 +920,6 @@ class ElObservador:
             "mtf_alignment": mtf_alignment,
             "zigzag_fractal": zigzag_fractal,
             "crypto_weekend": crypto_weekend,
+            "candle_vision": candle_vision,
             "es_hachado_o_toxico": regime.get("regime") == MarketRegimeType.CHOPPY_ILLIQUID,
         }

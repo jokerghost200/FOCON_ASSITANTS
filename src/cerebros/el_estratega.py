@@ -118,6 +118,7 @@ class ElEstratega:
         mtf_info = None
         zz_frac_info = None
         crypto_info = None
+        candle_info = None
         if observation:
             tech_features = observation.get("tech_features", tech_features)
             amd_context = observation.get("amd", amd_context)
@@ -128,6 +129,7 @@ class ElEstratega:
             mtf_info = observation.get("mtf_alignment")
             zz_frac_info = observation.get("zigzag_fractal")
             crypto_info = observation.get("crypto_weekend")
+            candle_info = observation.get("candle_vision")
             if "regimen" in observation and htf_trend == "Unknown":
                 htf_trend = observation.get("regimen_diagnostic", {}).get("bias", htf_trend)
 
@@ -259,7 +261,30 @@ class ElEstratega:
                     total_obs_mod += zz_mod
                     obs_tags.append(zz_frac_info.get("label", "ZigZag/Fractal"))
 
-            # 5g. Cerveau Spécialiste Crypto Week-End ('El Criptógrafo')
+            # 5g. Vision des Bougies Japonaises & Price Action Immédiat (Veto Visuel d'El Observador)
+            if candle_info and isinstance(candle_info, dict):
+                c_label = candle_info.get("label", "Price Action")
+                if act_dir == "SELL" and candle_info.get("veto_sell"):
+                    logger.info(f"👁️ [El Observador -> El Estratega] Veto SELL sur {symbol} : {c_label}")
+                    decision["action"] = "WAIT"
+                    decision["confidence"] = 0
+                    decision["reason"] = f"Veto Visuel El Observador (Bougies) : Interdiction de vendre en pleine poussée haussière ({c_label})."
+                    decision["cerebro_origen"] = "El Estratega"
+                    return decision
+                elif act_dir == "BUY" and candle_info.get("veto_buy"):
+                    logger.info(f"👁️ [El Observador -> El Estratega] Veto BUY sur {symbol} : {c_label}")
+                    decision["action"] = "WAIT"
+                    decision["confidence"] = 0
+                    decision["reason"] = f"Veto Visuel El Observador (Bougies) : Interdiction d'acheter en pleine poussée baissière ({c_label})."
+                    decision["cerebro_origen"] = "El Estratega"
+                    return decision
+
+                c_mod = float(candle_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if c_mod != 0.0:
+                    total_obs_mod += c_mod
+                    obs_tags.append(c_label)
+
+            # 5h. Cerveau Spécialiste Crypto Week-End ('El Criptógrafo')
             if crypto_info and isinstance(crypto_info, dict) and crypto_info.get("active"):
                 cr_mod = float(crypto_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
                 if cr_mod != 0.0:
@@ -287,6 +312,11 @@ class ElEstratega:
             if total_obs_mod != 0.0:
                 new_conf = max(10.0, min(98.0, float(decision.get("confidence", 50.0) or 50.0) + total_obs_mod))
                 decision["confidence"] = round(new_conf, 1)
+                if new_conf < 60.0:
+                    decision["action"] = "WAIT"
+                    decision["reason"] = f"Confiance insuffisante après diagnostic El Observador ({new_conf:.1f}% < 60%) [{' | '.join(obs_tags)}]"
+                    decision["cerebro_origen"] = "El Estratega"
+                    return decision
             if obs_tags:
                 decision["reason"] = f"{decision.get('reason', '')} [{' | '.join(obs_tags)}]"
 

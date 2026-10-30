@@ -407,16 +407,23 @@ class TradeManager:
                 if tick:
                     bid = float(tick.get('bid') or 0.0)
                     ask = float(tick.get('ask') or 0.0)
+                    if not hasattr(self, '_pending_approached'):
+                        self._pending_approached = set()
 
-                    # Invalidation 1 : Le TP a été touché avant l'entrée
-                    if o_type == 'BUY' and tp > 0 and bid >= tp:
-                        should_cancel = True
-                        reason = f"Cible TP ({tp}) atteinte avant déclenchement de l'entrée ({price_open})"
-                    elif o_type == 'SELL' and tp > 0 and ask <= tp:
-                        should_cancel = True
-                        reason = f"Cible TP ({tp}) atteinte avant déclenchement de l'entrée ({price_open})"
+                    tp_span = abs(tp - price_open) if (tp > 0 and price_open > 0) else 0.0
+                    cur_mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else (bid or ask)
+                    if tp_span > 0 and cur_mid > 0 and abs(cur_mid - price_open) <= (tp_span * 0.45):
+                        self._pending_approached.add(ticket)
 
-                    # Invalidation 2 : Le marché a cassé le SL avant l'entrée (invalidation du sweep)
+                    # Invalidation 1 : Le TP a été touché après un quasi-retest de la zone d'entrée
+                    if o_type == 'BUY' and tp > 0 and bid >= tp and ticket in self._pending_approached:
+                        should_cancel = True
+                        reason = f"Cible TP ({tp}) atteinte après quasi-retest sans déclenchement de l'entrée ({price_open})"
+                    elif o_type == 'SELL' and tp > 0 and ask <= tp and ticket in self._pending_approached:
+                        should_cancel = True
+                        reason = f"Cible TP ({tp}) atteinte après quasi-retest sans déclenchement de l'entrée ({price_open})"
+
+                    # Invalidation 2 : Le marché a cassé le SL avant l'entrée (invalidation du sweep / OB traversé)
                     elif o_type == 'BUY' and sl > 0 and bid <= sl:
                         should_cancel = True
                         reason = f"Setup invalidé : cours passé sous le SL ({sl})"

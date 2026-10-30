@@ -2810,10 +2810,12 @@ class MainWindow(QMainWindow):
                     return -50.0
                 
                 score = 0.0
-                if status == "OB_SIGNAL":
-                    score += 100.0  # OB institutionnel retesté
+                if status == "SIGNAL":
+                    score += 110.0  # Décision officielle complète des 6 Cerveaux (Priorité absolue)
+                elif status == "OB_SIGNAL":
+                    score += 95.0   # OB institutionnel retesté et validé par les 6 Cerveaux
                 elif status in ("PENDING_CRT", "MARKET_CRT"):
-                    score += 95.0   # Setup CRT institutionnel
+                    score += 90.0   # Setup CRT institutionnel
                     of_data = r.get("order_flow")
                     if of_data:
                         is_conf = getattr(of_data, 'is_confirmed', False) or (isinstance(of_data, dict) and of_data.get('is_confirmed'))
@@ -2828,9 +2830,7 @@ class MainWindow(QMainWindow):
                         elif dq == 'DEGRADED_STALE':
                             score -= 10.0  # Pénalité stricte de données périmées
                 elif status == "PENDING_OB":
-                    score += 85.0
-                elif status == "SIGNAL":
-                    score += 90.0
+                    score += 80.0
 
                 dec = r.get("decision", {})
                 if isinstance(dec, dict):

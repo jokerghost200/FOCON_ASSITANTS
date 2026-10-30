@@ -134,8 +134,8 @@ class OrderBlockDetector:
             if ob.is_retested:
                 self._calc_levels(ob, atr, current_price)
 
-        # 4. Sélection des OB valides (retestés et score suffisant)
-        valid_obs = [ob for ob in obs if ob.is_retested and ob.score >= OB_SCORE_VALID]
+        # 4. Sélection des OB valides (retestés, avec confirmation de rejet bougie, et score suffisant)
+        valid_obs = [ob for ob in obs if ob.is_retested and ob.has_rejection and ob.score >= OB_SCORE_VALID]
         valid_obs.sort(key=lambda x: x.score, reverse=True)
         logger.info(f"[OB] {symbol} {timeframe}: {len(valid_obs)} OB valides retestes sur {len(obs)} detectes")
         return valid_obs
@@ -223,6 +223,24 @@ class OrderBlockDetector:
                             has_rejection = True
 
         is_retested = in_zone_now or retested_recently
+
+        # Protection Anti-Impulsion Contraire sur la bougie courante (ne jamais vendre une bougie verte pleine ni acheter une bougie rouge pleine)
+        if not df.empty:
+            last_row = df.iloc[-1]
+            l_open, l_close = float(last_row['open']), float(last_row['close'])
+            l_high, l_low = float(last_row['high']), float(last_row['low'])
+            l_rng = l_high - l_low
+            if direction == 'SELL':
+                u_wick = (l_high - l_close) if l_close > l_open else (l_high - l_open)
+                # Si la bougie actuelle monte franchement (verte) sans grande mèche haute de rejet (>= 40%), interdiction de valider le rejet baissier
+                if l_close > l_open and (l_rng <= 0 or (u_wick / l_rng) < 0.40):
+                    has_rejection = False
+            else:  # BUY
+                d_wick = (l_close - l_low) if l_close < l_open else (l_open - l_low)
+                # Si la bougie actuelle chute franchement (rouge) sans grande mèche basse de rejet (>= 40%), interdiction de valider le rejet haussier
+                if l_close < l_open and (l_rng <= 0 or (d_wick / l_rng) < 0.40):
+                    has_rejection = False
+
         return is_retested, has_rejection
 
     def _is_ob_invalidated(self, df: pd.DataFrame, ob: OrderBlock, direction: str, atr: float) -> bool:
@@ -285,6 +303,27 @@ class OrderBlockDetector:
         if 0.2 * atr <= zone_size <= 2.5 * atr:
             score += 10.0
             reasons.append("Zone OB calibrée: +10pts")
+
+        # 6. Filtre de structure locale LTF (ZigZag + EMA 50) : pénalise les ventes en plein rallye haussier M15
+        if not df.empty:
+            last_r = df.iloc[-1]
+            c_now, o_now = float(last_r['close']), float(last_r['open'])
+            ema50 = float(last_r.get('EMA_50', c_now) or c_now)
+            zz_trend = float(last_r.get('zigzag_trend', 0) or 0)
+            if ob.direction == 'SELL' and zz_trend > 0 and c_now > ema50:
+                if c_now >= o_now:
+                    score -= 30.0
+                    reasons.append("Rallye haussier LTF actif (ZigZag UP + Prix > EMA50 + Bougie verte): -30pts")
+                else:
+                    score -= 10.0
+                    reasons.append("Contre-flux ZigZag LTF haussier: -10pts")
+            elif ob.direction == 'BUY' and zz_trend < 0 and c_now < ema50:
+                if c_now <= o_now:
+                    score -= 30.0
+                    reasons.append("Chute baissière LTF active (ZigZag DOWN + Prix < EMA50 + Bougie rouge): -30pts")
+                else:
+                    score -= 10.0
+                    reasons.append("Contre-flux ZigZag LTF baissier: -10pts")
 
         ob.score = min(100.0, max(0.0, score))
         ob.reasons = reasons
@@ -422,7 +461,7 @@ class OrderBlockDetector:
                 continue
             
             # Calculate entry/SL/TP levels for the pending zone
-            self._calc_pending_levels(ob, atr)
+            self._calc_pending_levels(ob, atr, current_price=current_price)
             
             if ob.entry and ob.sl and ob.tp and ob.rr and ob.rr >= 1.5:
                 pending_obs.append(ob)
@@ -434,19 +473,24 @@ class OrderBlockDetector:
         )
         return pending_obs
 
-    def _calc_pending_levels(self, ob: 'OrderBlock', atr: float):
+    def _calc_pending_levels(self, ob: 'OrderBlock', atr: float, current_price: float = 0.0):
         """
         Calcule les niveaux Entry/SL/TP pour un OB en attente (pending order).
         
-        L'entrée est positionnée au milieu de la zone OB (là où le prix
-        a la plus forte probabilité de réagir).
+        Vérifie que la zone OB est du bon côté du prix actuel pour un ordre LIMIT,
+        à une distance raisonnable (<= 3.5 ATR), et que le TP dépasse le prix actuel
+        afin d'éviter une annulation immédiate par le TradeManager.
         """
         buf = self.sl_buffer_mult * atr
         min_sl_dist = self.min_sl_atr_mult * atr
 
         if ob.direction == 'BUY':
-            # Entry: au milieu-bas de la zone (meilleur prix d'entrée)
             entry = (ob.ob_mid + ob.ob_low) / 2
+            if current_price > 0:
+                # Pour un BUY LIMIT, l'entrée doit être sous le prix actuel et à <= 3.5 ATR
+                if entry >= current_price or (current_price - entry) > (3.5 * atr):
+                    ob.entry = None
+                    return
             raw_sl = ob.ob_low - buf
             sl_dist = entry - raw_sl
             if sl_dist < min_sl_dist:
@@ -454,10 +498,17 @@ class OrderBlockDetector:
                 sl_dist = min_sl_dist
             ob.entry = round(entry, 5)
             ob.sl = round(raw_sl, 5)
-            ob.tp = round(ob.entry + sl_dist * self.tp_rr_mult, 5)
+            base_tp = ob.entry + sl_dist * self.tp_rr_mult
+            if current_price > 0 and base_tp <= current_price:
+                base_tp = current_price + max(0.5 * atr, sl_dist * 0.5)
+            ob.tp = round(base_tp, 5)
         else:
-            # Sell: entry au milieu-haut de la zone
             entry = (ob.ob_mid + ob.ob_high) / 2
+            if current_price > 0:
+                # Pour un SELL LIMIT, l'entrée doit être au-dessus du prix actuel et à <= 3.5 ATR
+                if entry <= current_price or (entry - current_price) > (3.5 * atr):
+                    ob.entry = None
+                    return
             raw_sl = ob.ob_high + buf
             sl_dist = raw_sl - entry
             if sl_dist < min_sl_dist:
@@ -465,7 +516,10 @@ class OrderBlockDetector:
                 sl_dist = min_sl_dist
             ob.entry = round(entry, 5)
             ob.sl = round(raw_sl, 5)
-            ob.tp = round(ob.entry - sl_dist * self.tp_rr_mult, 5)
+            base_tp = ob.entry - sl_dist * self.tp_rr_mult
+            if current_price > 0 and base_tp >= current_price:
+                base_tp = current_price - max(0.5 * atr, sl_dist * 0.5)
+            ob.tp = round(base_tp, 5)
 
         sl_dist = abs(ob.entry - ob.sl)
         tp_dist = abs(ob.tp - ob.entry)
