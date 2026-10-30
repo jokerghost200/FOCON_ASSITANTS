@@ -61,7 +61,7 @@ class MarketRegimeDetector:
         ema200 = float(tech.get("ema_200") or close)
         rsi = float(tech.get("rsi_14") or 50.0)
         atr = float(tech.get("atr_14") or 0.001)
-        adx = float(tech.get("adx") or 0.0)
+        adx = float(tech.get("adx_14") or tech.get("adx") or 0.0)
         trend_label = str(tech.get("trend") or "NEUTRAL").upper()
         phase = str(amd.get("Phase", "")).upper()
 

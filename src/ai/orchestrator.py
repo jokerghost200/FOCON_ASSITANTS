@@ -955,6 +955,33 @@ class AIOrchestrator:
         ai_advice = decision if (decision and isinstance(decision, dict) and "action" in decision) else None
         
         # ─── ÉVALUATION PAR LE DÉCIDEUR OFFICIEL UNIQUE : EL ESTRATEGA ───
+        obs_report = None
+        if self.observador and hasattr(self.observador, "observar_mercado"):
+            try:
+                h4_trend_val = htf_trend
+                if timeframe.upper() == "M15":
+                    h4_df_tmp = self.market_data.get_dataframe(symbol, "H4", num_bars=220)
+                    if h4_df_tmp is not None and not h4_df_tmp.empty:
+                        h4_df_tmp = self.tech.add_all_indicators(h4_df_tmp)
+                        h4_trend_val = self.tech.extract_latest_features(h4_df_tmp).get("trend", htf_trend)
+                obs_report = self.observador.observar_mercado(
+                    df=df,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    tech_features=tech_features,
+                    ticks_df=ticks_df,
+                    dom_data=dom_snapshot,
+                    spread_price=spread_price,
+                    htf_trend=htf_trend,
+                    h4_trend=h4_trend_val,
+                )
+            except Exception as _obe:
+                logger.debug(f"[El Observador] Fallback killzone only: {_obe}")
+                try:
+                    obs_report = {"killzone": self.observador.evaluar_killzone_horaria()}
+                except Exception:
+                    obs_report = None
+
         decision = self.estratega.decidir(
             symbol=symbol,
             timeframe=timeframe,
@@ -966,9 +993,32 @@ class AIOrchestrator:
             htf_trend=htf_trend,
             spread_price=spread_price,
             direction_filter=dir_filter_upper,
+            observation=obs_report,
             ai_advice=ai_advice,
             economic_context=economic_context,
         )
+
+        # ─── AFFINITÉ PAR PAIRE & SESSION : EL SABIO ───
+        if self.sabio and hasattr(self.sabio, "evaluar_afinidad_simbolo") and decision.get("action") in ("BUY", "SELL"):
+            try:
+                import datetime
+                ch = datetime.datetime.now(datetime.timezone.utc).hour
+                curr_sess = "ASIA" if ch < 8 else ("LONDON" if ch < 13 else ("NEW_YORK_LONDON_OVERLAP" if ch < 17 else "NEW_YORK"))
+                affinity = self.sabio.evaluar_afinidad_simbolo(symbol=symbol, session=curr_sess)
+                aff_bonus = float(affinity.get("confidence_bonus", 0.0) or 0.0)
+                if aff_bonus != 0.0:
+                    old_c = float(decision.get("confidence", 50.0) or 50.0)
+                    new_c = round(max(10.0, min(98.0, old_c + aff_bonus)), 1)
+                    decision["confidence"] = new_c
+                    decision["reason"] = (
+                        f"{decision.get('reason', '')} [El Sabio {affinity.get('tier')}: "
+                        f"Winrate {affinity.get('win_rate')}% ({aff_bonus:+.0f}% conf)]"
+                    )
+                    if new_c < getattr(self.risk, "min_confidence", 60.0):
+                        logger.info(f"🧠 [El Sabio] {symbol} bloqué car affinité négative réduit la confiance à {new_c}%.")
+                        decision["action"] = "WAIT"
+            except Exception as _ae:
+                logger.debug(f"[El Sabio] Erreur affinité symbole {symbol}: {_ae}")
 
         # ─── PHASE 2: OVERRIDE RISK WITH STRATEGY ENGINE ───
         if decision and decision.get("action") in ("BUY", "SELL") and proposals:
@@ -1132,6 +1182,29 @@ class AIOrchestrator:
             if not sec.get('safe', False):
                 logger.critical(f"🛑 [El Centinela] Ordre bloqué pour {symbol} : {sec.get('reason')}")
                 return {"error": f"El Centinela safety rejection: {sec.get('reason')}"}
+
+            # Vérification Anti-Corrélation des Devises (El Centinela)
+            if hasattr(self.centinela, "verificar_correlacion_divisas"):
+                open_pos_list = self.mt5.get_open_positions() or []
+                max_ccy_exp = 1 if capital < 250.0 else 2
+                corr_check = self.centinela.verificar_correlacion_divisas(
+                    symbol=symbol,
+                    action=proposal.get("action", "WAIT"),
+                    open_positions=open_pos_list,
+                    max_same_currency_exposure=max_ccy_exp,
+                )
+                if not corr_check.get("safe", True):
+                    logger.info(f"🛡️ [El Centinela] {corr_check.get('reason')}")
+                    return {
+                        "status": "WAIT",
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "decision": {
+                            "action": "WAIT",
+                            "confidence": 0,
+                            "reason": corr_check.get("reason"),
+                        },
+                    }
 
         # ─── ENREGISTREMENT AU JOURNAL STATISTIQUE : EL SABIO ───
         if self.sabio:

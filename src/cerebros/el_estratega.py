@@ -111,10 +111,20 @@ class ElEstratega:
                 }
 
         # 1. Extraction si observation structurée d'El Observador est injectée
+        killzone_info = None
+        pd_info = None
+        liq_info = None
+        vsa_info = None
+        mtf_info = None
         if observation:
             tech_features = observation.get("tech_features", tech_features)
             amd_context = observation.get("amd", amd_context)
-            if "regimen" in observation:
+            killzone_info = observation.get("killzone")
+            pd_info = observation.get("premium_discount")
+            liq_info = observation.get("liquidity_pools")
+            vsa_info = observation.get("vsa_volume")
+            mtf_info = observation.get("mtf_alignment")
+            if "regimen" in observation and htf_trend == "Unknown":
                 htf_trend = observation.get("regimen_diagnostic", {}).get("bias", htf_trend)
 
         # 2. Évaluation de base par le DecisionEngine (Règles SMC + CRT + Boomerang + E(R))
@@ -193,6 +203,56 @@ class ElEstratega:
                 elif econ_bias == "BEARISH":
                     decision["confidence"] = min(98.0, current_conf + 5.0)
                     decision["reason"] += " [Confluence macroéconomique baissière validée]."
+
+        # 5. Modulation par les diagnostics avancés d'El Observador (Killzones, Premium/Discount, Liquidité, VSA, MTF)
+        act_dir = decision.get("action")
+        if act_dir in ("BUY", "SELL"):
+            obs_tags = []
+            total_obs_mod = 0.0
+
+            # 5a. Killzone horaire
+            if killzone_info and isinstance(killzone_info, dict):
+                kz_bonus = float(killzone_info.get("score_bonus", 0.0) or 0.0)
+                kz_label = killzone_info.get("label", "")
+                if kz_bonus != 0.0:
+                    total_obs_mod += kz_bonus
+                    if kz_label:
+                        obs_tags.append(kz_label)
+
+            # 5b. Zone Premium / Discount & OTE Fibonacci
+            if pd_info and isinstance(pd_info, dict):
+                pd_mod = float(pd_info.get("buy_mod" if act_dir == "BUY" else "sell_mod", 0.0) or 0.0)
+                pd_zone = pd_info.get("zone", "EQUILIBRIUM")
+                if pd_mod != 0.0:
+                    total_obs_mod += pd_mod
+                    obs_tags.append(f"Zone {pd_zone} ({pd_info.get('position_pct', 50):.0f}%)")
+
+            # 5c. Piscines de Liquidité (PDH/PDL & Equal Highs/Lows Sweeps)
+            if liq_info and isinstance(liq_info, dict):
+                liq_mod = float(liq_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if liq_mod != 0.0:
+                    total_obs_mod += liq_mod
+                    obs_tags.append(liq_info.get("label", "Liquidity Pool"))
+
+            # 5d. Volume Tick Relatif (RVOL & VSA)
+            if vsa_info and isinstance(vsa_info, dict):
+                vsa_mod = float(vsa_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if vsa_mod != 0.0:
+                    total_obs_mod += vsa_mod
+                    obs_tags.append(f"RVOL {vsa_info.get('rvol', 1.0):.1f}x")
+
+            # 5e. Alignement Fractal Multi-Timeframe (M15 + H1 + H4)
+            if mtf_info and isinstance(mtf_info, dict):
+                mtf_mod = float(mtf_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if mtf_mod != 0.0:
+                    total_obs_mod += mtf_mod
+                    obs_tags.append(mtf_info.get("state", "MTF"))
+
+            if total_obs_mod != 0.0:
+                new_conf = max(10.0, min(98.0, float(decision.get("confidence", 50.0) or 50.0) + total_obs_mod))
+                decision["confidence"] = round(new_conf, 1)
+            if obs_tags:
+                decision["reason"] = f"{decision.get('reason', '')} [{' | '.join(obs_tags)}]"
 
         decision["cerebro_origen"] = "El Estratega"
         return decision

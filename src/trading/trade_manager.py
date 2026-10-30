@@ -18,9 +18,13 @@ class TradeManager:
 
         self.break_even_enabled = rm.get('break_even_enabled', True)
         self.break_even_ratio = float(rm.get('break_even_ratio', 0.45))
+        self.partial_tp_enabled = bool(rm.get('partial_tp_enabled', True))
         self.trailing_stop_enabled = rm.get('trailing_stop_enabled', True)
         self.trailing_stop_atr_mult = float(rm.get('trailing_stop_atr_mult', 1.5))
         self.min_profit_to_close_ratio = float(rm.get('min_profit_to_close_ratio', 0.50))
+
+        # Tickets ayant déjà encaissé 50% en prise de profit partielle à TP1
+        self._partial_closed_tickets = set()
 
         # ── Verrou de profit en dollars (Dollar Peak Drawdown Lock) ──
         self.dollar_trailing_enabled = rm.get('dollar_trailing_enabled', rm.get('dollar_profit_lock_enabled', True))
@@ -134,11 +138,35 @@ class TradeManager:
 
             digits = int(info.get('digits', 5) or 5)
 
-            # ── 1. Break-Even Automatique ─────────────────────────────────────────
+            # ── 1. Prise de Profit Partielle (50% à TP1) + Break-Even Automatique ──
             if self.break_even_enabled and tp > 0:
+                import math
+                vol = float(pos.get('volume', 0.01) or 0.01)
+                profit_now = float(pos.get('profit', 0.0) or 0.0)
+                tp_dist = (tp - price_open) if pos_type == 'BUY' else (price_open - tp)
+                gain = (current_price - price_open) if pos_type == 'BUY' else (price_open - current_price)
+
+                if tp_dist > 0 and gain >= (tp_dist * self.break_even_ratio):
+                    # 1a. Prise de profit partielle de 50% dès TP1 (si volume >= 0.02 lot)
+                    if (
+                        self.partial_tp_enabled
+                        and ticket not in self._partial_closed_tickets
+                        and vol >= 0.02
+                        and profit_now >= 0.50
+                    ):
+                        half_vol = round(math.floor((vol / 2.0) / 0.01 + 1e-9) * 0.01, 2)
+                        if 0.01 <= half_vol < vol:
+                            try:
+                                if self.mt5.close_position(ticket, symbol, pos_type, half_vol, current_price):
+                                    self._partial_closed_tickets.add(ticket)
+                                    logger.info(
+                                        f"💰 [{symbol}] PRISE PARTIELLE TP1 (50%) : {half_vol:.2f}/{vol:.2f} lot encaissé "
+                                        f"sur ticket #{ticket} (+{profit_now/2.0:.2f}$ sécurisés, reste {vol - half_vol:.2f} lot en course) !"
+                                    )
+                            except Exception as _pe:
+                                logger.debug(f"Prise partielle #{ticket} ignorée: {_pe}")
+
                 if pos_type == 'BUY':
-                    tp_dist = tp - price_open
-                    gain = current_price - price_open
                     if tp_dist > 0 and gain >= (tp_dist * self.break_even_ratio):
                         # Déplace le SL au-dessus du prix d'ouverture (+ spread/marge de sécurité)
                         target_be_sl = round(price_open + max(min_dist, spread * 1.5), digits)
@@ -156,8 +184,6 @@ class TradeManager:
                                     logger.warning(f"🛡️ [{symbol}] Échec modification MT5 Break-Even (#{ticket})")
 
                 elif pos_type == 'SELL':
-                    tp_dist = price_open - tp
-                    gain = price_open - current_price
                     if tp_dist > 0 and gain >= (tp_dist * self.break_even_ratio):
                         target_be_sl = round(price_open - max(min_dist, spread * 1.5), digits)
                         if (sl <= 0 or sl > target_be_sl) and target_be_sl > (current_price + min_dist):

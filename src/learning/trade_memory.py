@@ -386,3 +386,68 @@ class TradeMemoryEngine:
             "trades_count": len(filtered_trades),
             "win_rate": round(win_rate * 100, 1)
         }
+
+    def get_symbol_affinity(self, symbol: str, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Calcule l'affinité statistique du robot avec une paire (et sa session horaire)
+        d'après l'historique réel des trades clôturés :
+        - Booste (+6% confiance) les paires "Championnes" (Winrate >= 60%, PnL > 0, >= 3 trades)
+        - Pénalise (-12% confiance) les paires "Toxiques" (Winrate <= 30%, PnL < 0, >= 3 trades)
+        """
+        closed = self.get_closed_trades(limit=500)
+        sym_upper = str(symbol or "").upper()
+        sym_trades = [t for t in closed if str(t.get("symbol", "")).upper() == sym_upper]
+
+        if len(sym_trades) < 3:
+            return {
+                "symbol": symbol,
+                "tier": "NEUTRAL",
+                "confidence_bonus": 0.0,
+                "win_rate": 0.0,
+                "net_profit_usd": 0.0,
+                "trades_count": len(sym_trades),
+            }
+
+        profits = [float(t.get("final_profit_usd", 0.0) or 0.0) for t in sym_trades]
+        wins = [p for p in profits if p > 0.05]
+        win_rate = (len(wins) / len(sym_trades)) * 100.0
+        net_pnl = sum(profits)
+
+        bonus = 0.0
+        tier = "NEUTRAL"
+        if win_rate >= 60.0 and net_pnl > 0:
+            bonus = 6.0
+            tier = "CHAMPION"
+        elif win_rate >= 52.0 and net_pnl > 0:
+            bonus = 3.0
+            tier = "FAVORABLE"
+        elif win_rate <= 30.0 and net_pnl < 0:
+            bonus = -12.0
+            tier = "TOXIC"
+        elif win_rate < 42.0 and net_pnl < 0:
+            bonus = -6.0
+            tier = "WEAK"
+
+        # Affinage par session horaire si disponible
+        if session:
+            sess_trades = [
+                t for t in sym_trades
+                if str((t.get("snapshot") or {}).get("session", "")).upper() == str(session).upper()
+            ]
+            if len(sess_trades) >= 3:
+                s_profits = [float(t.get("final_profit_usd", 0.0) or 0.0) for t in sess_trades]
+                s_wins = [p for p in s_profits if p > 0.05]
+                s_wr = (len(s_wins) / len(sess_trades)) * 100.0
+                if s_wr >= 65.0 and sum(s_profits) > 0:
+                    bonus += 2.0
+                elif s_wr <= 25.0 and sum(s_profits) < 0:
+                    bonus -= 4.0
+
+        return {
+            "symbol": symbol,
+            "tier": tier,
+            "confidence_bonus": round(bonus, 1),
+            "win_rate": round(win_rate, 1),
+            "net_profit_usd": round(net_pnl, 2),
+            "trades_count": len(sym_trades),
+        }

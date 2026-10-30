@@ -175,3 +175,22 @@ class ElSabio:
     def detectar_patrones_toxicos(self, min_sample: int = 5, max_win_rate: float = 0.30) -> List[Dict[str, Any]]:
         """Identifie les contextes récurrents où le robot perd de l'argent afin de les proscrire."""
         return self.experience.detect_toxic_patterns(min_sample=min_sample, max_win_rate=max_win_rate)
+
+    def evaluar_afinidad_simbolo(self, symbol: str, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Évalue l'affinité statistique du robot avec une paire et une session horaire
+        via la mémoire épisodique (TradeMemoryEngine).
+        """
+        if self.trade_memory and hasattr(self.trade_memory, "get_symbol_affinity"):
+            try:
+                return self.trade_memory.get_symbol_affinity(symbol=symbol, session=session)
+            except Exception as e:
+                logger.debug(f"[El Sabio] Erreur evaluar_afinidad_simbolo pour {symbol}: {e}")
+        return {
+            "symbol": symbol,
+            "tier": "NEUTRAL",
+            "confidence_bonus": 0.0,
+            "win_rate": 0.0,
+            "net_profit_usd": 0.0,
+            "trades_count": 0,
+        }
