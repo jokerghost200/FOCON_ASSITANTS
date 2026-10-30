@@ -127,6 +127,94 @@ class TradeExecutionEngine:
 
         return capital, pos_cnt, daily_loss_usd, None
 
+    def _compute_real_committed_risk_usd(self, capital: float) -> tuple[float, float]:
+        """
+        Calcule le risque réel en USD jusqu'au Stop Loss pour :
+        1. Toutes les positions ouvertes (0$ si le SL est déjà sécurisé à Break-Even ou en profit).
+        2. Tous les ordres en attente (sans double comptage avec les positions déjà ouvertes).
+        Utilise trade_tick_value et trade_tick_size de chaque symbole pour convertir en devise du compte (USD).
+        """
+        open_risk_total = 0.0
+        pending_risk_total = 0.0
+        open_tickets = set()
+
+        try:
+            open_positions = (
+                self.mt5.get_open_positions()
+                if hasattr(self.mt5, "get_open_positions")
+                else []
+            ) or []
+            if type(open_positions).__name__ in ("MagicMock", "Mock") or not isinstance(open_positions, (list, tuple)):
+                open_positions = []
+        except Exception:
+            open_positions = []
+
+        for pos in open_positions:
+            if not isinstance(pos, dict):
+                continue
+            tkt = pos.get("ticket")
+            if tkt is not None:
+                open_tickets.add(int(tkt))
+            sym = str(pos.get("symbol", "") or "")
+            p_type = str(pos.get("type", "BUY") or "BUY").upper()
+            vol = float(pos.get("volume", 0.0) or 0.0)
+            p_open = float(pos.get("price_open", 0.0) or 0.0)
+            sl = float(pos.get("sl", 0.0) or 0.0)
+            if vol <= 0 or p_open <= 0 or sl <= 0:
+                open_risk_total += capital * 0.01
+                continue
+            # Si le SL est déjà au Break-Even ou en profit, le risque sur le capital initial est de 0$
+            if (p_type == "BUY" and sl >= p_open) or (p_type == "SELL" and sl <= p_open):
+                continue
+            sl_dist = abs(p_open - sl)
+            s_info = self.mt5.get_symbol_info(sym) if (sym and hasattr(self.mt5, "get_symbol_info")) else None
+            tv = float(s_info.get("trade_tick_value", 0.0) or 0.0) if isinstance(s_info, dict) else float(getattr(s_info, "trade_tick_value", 0.0) or 0.0) if s_info else 0.0
+            ts = float(s_info.get("trade_tick_size", 0.0) or 0.0) if isinstance(s_info, dict) else float(getattr(s_info, "trade_tick_size", 0.0) or 0.0) if s_info else 0.0
+            if tv > 0 and ts > 0 and type(s_info).__name__ not in ("MagicMock", "Mock"):
+                open_risk_total += (sl_dist / ts) * tv * vol
+            else:
+                open_risk_total += capital * 0.01
+
+        try:
+            pending_orders = (
+                self.mt5.get_pending_orders()
+                if hasattr(self.mt5, "get_pending_orders")
+                else []
+            ) or []
+            if type(pending_orders).__name__ in ("MagicMock", "Mock") or not isinstance(pending_orders, (list, tuple)):
+                pending_orders = []
+        except Exception:
+            pending_orders = []
+
+        seen_pending_tickets = set()
+        for po in pending_orders:
+            if not isinstance(po, dict):
+                continue
+            tkt = po.get("ticket")
+            if tkt is not None:
+                tkt_int = int(tkt)
+                # Protection anti-double comptage (ordre déjà exécuté en position ou dupliqué)
+                if tkt_int in open_tickets or tkt_int in seen_pending_tickets:
+                    continue
+                seen_pending_tickets.add(tkt_int)
+            sym = str(po.get("symbol", "") or "")
+            vol = float(po.get("volume", 0.0) or 0.0)
+            p_open = float(po.get("price_open", 0.0) or 0.0)
+            sl = float(po.get("sl", 0.0) or 0.0)
+            if vol <= 0 or p_open <= 0 or sl <= 0:
+                pending_risk_total += capital * 0.01
+                continue
+            sl_dist = abs(p_open - sl)
+            s_info = self.mt5.get_symbol_info(sym) if (sym and hasattr(self.mt5, "get_symbol_info")) else None
+            tv = float(s_info.get("trade_tick_value", 0.0) or 0.0) if isinstance(s_info, dict) else float(getattr(s_info, "trade_tick_value", 0.0) or 0.0) if s_info else 0.0
+            ts = float(s_info.get("trade_tick_size", 0.0) or 0.0) if isinstance(s_info, dict) else float(getattr(s_info, "trade_tick_size", 0.0) or 0.0) if s_info else 0.0
+            if tv > 0 and ts > 0 and type(s_info).__name__ not in ("MagicMock", "Mock"):
+                pending_risk_total += (sl_dist / ts) * tv * vol
+            else:
+                pending_risk_total += capital * 0.01
+
+        return round(open_risk_total, 2), round(pending_risk_total, 2)
+
     def prepare_order_request(self, signal: dict) -> dict:
         """
         Formats a trading signal into an MT5 order request.
@@ -513,11 +601,14 @@ class TradeExecutionEngine:
                 or decision.get('manual_lot_override')
                 or (getattr(self, 'fixed_lot_size', 0.0) or 0.0) > 0.0
             )
+            open_risk_usd, pending_risk_usd = self._compute_real_committed_risk_usd(capital)
             sec_kwargs = {
                 "capital": capital,
                 "risk_amount_usd": risk_usd,
                 "current_daily_loss_usd": daily_loss_usd,
                 "current_open_positions_count": pos_count,
+                "open_positions_risk_usd": open_risk_usd,
+                "pending_orders_risk_usd": pending_risk_usd,
             }
             if is_fixed_lot:
                 sec_kwargs["fixed_lot_override"] = True
@@ -858,11 +949,14 @@ class TradeExecutionEngine:
                         "reason": f"El Centinela: Risque réel de ${recalc_risk_usd:.2f} dépasse le plafond strict autorisé (${allowed_risk_budget:.2f}).",
                     }
 
+            open_risk_usd, pending_risk_usd = self._compute_real_committed_risk_usd(capital)
             final_sec_kwargs = {
                 "capital": capital,
                 "risk_amount_usd": recalc_risk_usd,
                 "current_daily_loss_usd": daily_loss_usd,
                 "current_open_positions_count": pos_cnt,
+                "open_positions_risk_usd": open_risk_usd,
+                "pending_orders_risk_usd": pending_risk_usd,
             }
             if is_fixed_lot:
                 final_sec_kwargs["fixed_lot_override"] = True

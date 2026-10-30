@@ -491,6 +491,13 @@ class TradeManager:
                     rsn = "SL_HIT" if ("sl" in comm or p_val < 0) else "TP_HIT"
                     if self.trade_memory:
                         self.trade_memory.record_exit(tkt, p_price, p_val, exit_reason=rsn)
+                    if self.orchestrator and getattr(self.orchestrator, "sabio", None):
+                        try:
+                            self.orchestrator.sabio.aprender_de_trade(
+                                ticket=tkt, exit_price=p_price, pnl_usd=p_val, exit_reason=rsn
+                            )
+                        except Exception as _se:
+                            logger.debug(f"[El Sabio] Erreur synchronisation clôture #{tkt}: {_se}")
                     if hasattr(self.orchestrator, 'set_symbol_cooldown') and sym:
                         if p_val < 0 or rsn == "SL_HIT":
                             self.orchestrator.set_symbol_cooldown(

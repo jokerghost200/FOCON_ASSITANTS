@@ -147,15 +147,20 @@ class ElInvestigador:
         report["hypotheses_generated"] = len(hypotheses)
         logger.info(f"💡 [El Investigador] {len(hypotheses)} hypothèse(s) formulée(s) (ordre chronologique strict).")
 
-        # 3. Test des hypothèses sur le jeu de données si suffisant
+        # 3. Test des hypothèses sur le jeu de données si suffisant (séparation stricte In-Sample / Out-of-Sample)
         if len(trades) >= 20:
+            split_idx = max(10, len(trades) // 2)
+            in_sample_trades = trades[:split_idx]
+            out_of_sample_trades = trades[split_idx:]
             for hyp in hypotheses[:2]:  # Test ciblé des meilleures hypothèses
-                variant_trades = []
+                variant_in_sample = []
+                variant_all_chronological = []
                 disallowed = hyp.parameter_modifications.get("disallowed_regimes", [])
                 min_conf = float(hyp.parameter_modifications.get("min_confidence", 0.0) or 0.0)
                 min_rr = float(hyp.parameter_modifications.get("min_rr", 0.0) or 0.0)
+                friction_r = float(hyp.parameter_modifications.get("friction_penalty_r", 0.0) or 0.0)
 
-                for tr in trades:
+                for idx_t, tr in enumerate(trades):
                     # Simulation honnête et symétrique (AUCUN cherry-picking rétrospectif) :
                     # Si une règle exclut un contexte, elle exclut TOUS les trades de ce contexte (gains ET pertes)
                     if disallowed and tr.get("regime") in disallowed:
@@ -166,16 +171,19 @@ class ElInvestigador:
                         continue
 
                     v_tr = dict(tr)
-                    # Application d'un coût de friction réaliste (spread / slippage additionnel) si spécifié
-                    friction_r = float(hyp.parameter_modifications.get("friction_penalty_r", 0.0) or 0.0)
                     if friction_r > 0:
                         v_tr["pnl_r"] = round(float(v_tr.get("pnl_r", 0.0) or 0.0) - friction_r, 4)
 
-                    variant_trades.append(v_tr)
+                    variant_all_chronological.append(v_tr)
+                    if idx_t < split_idx:
+                        variant_in_sample.append(v_tr)
 
-                exp_result = self.ejecutar_experimento(hyp, trades, variant_trades)
-                wf_result = self.validar_walk_forward(variant_trades)
+                # Sélection/évaluation d'expérience sur In-Sample, validation aveugle Walk-Forward chronologique
+                exp_result = self.ejecutar_experimento(hyp, in_sample_trades, variant_in_sample)
+                wf_result = self.validar_walk_forward(variant_all_chronological)
                 report["experiments_run"] += 1
+                report["in_sample_size"] = len(in_sample_trades)
+                report["out_of_sample_size"] = len(out_of_sample_trades)
 
                 cand_ver = f"v_{hyp.hypothesis_id}_{uuid.uuid4().hex[:4]}"
                 if centinela and hasattr(centinela, "verificar_promocion"):
