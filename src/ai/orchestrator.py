@@ -1101,6 +1101,7 @@ class AIOrchestrator:
         # ─── GARDE-FOU ALGORITHMIQUE DÉTERMINISTE (ANTI-FOMO / QUALITÉ D'ENTRÉE) ───
         proposed_action = str(decision.get('action', 'WAIT')).upper()
         if proposed_action in ('BUY', 'SELL'):
+            last_row = df.iloc[-1] if (df is not None and not df.empty) else {"open": close_p, "high": close_p, "low": close_p, "close": close_p}
             # 0. Filtre Directionnel configuré par l'utilisateur (BUY_ONLY / SELL_ONLY)
             if dir_filter_upper == "BUY_ONLY" and proposed_action == "SELL":
                 logger.info(f"[Direction Filter] {symbol}: Rejet SELL car politique configurée sur BUY_ONLY.")
