@@ -1227,10 +1227,16 @@ class AIOrchestrator:
             capital = min(bal, eq) if eq > 0 else bal
             daily_loss = min(0.0, float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0))
             open_pos_raw = self.mt5.get_open_positions() or []
+            pending_raw = (
+                self.mt5.get_pending_orders()
+                if hasattr(self.mt5, "get_pending_orders")
+                else []
+            ) or []
             open_count = len(open_pos_raw)
             risk_usd = float(proposal.get('risk_amount_usd', 0.0) or (capital * 0.01))
-            # Estimation du risque latent cumulé sur les positions déjà ouvertes
+            # Calcul du risque engagé sur les positions ouvertes + ordres en attente
             open_risk_usd = open_count * max(risk_usd, capital * 0.01)
+            pending_risk_usd = len(pending_raw) * max(risk_usd, capital * 0.01)
             is_fixed_lot = bool(
                 proposal.get('fixed_lot_override')
                 or proposal.get('manual_lot_override')
@@ -1242,6 +1248,7 @@ class AIOrchestrator:
                 "current_daily_loss_usd": daily_loss,
                 "current_open_positions_count": open_count,
                 "open_positions_risk_usd": open_risk_usd,
+                "pending_orders_risk_usd": pending_risk_usd,
             }
             if is_fixed_lot:
                 sec_kwargs["fixed_lot_override"] = True

@@ -56,10 +56,13 @@ class ElCentinela:
         current_open_positions_count: int,
         fixed_lot_override: bool = False,
         open_positions_risk_usd: float = 0.0,
+        pending_orders_risk_usd: float = 0.0,
+        max_portfolio_risk_pct: float = 0.06,
     ) -> Dict[str, Any]:
         """
         Vérification absolue de sécurité niveau 0 avant l'ouverture de toute position.
-        Inclut également le plafond de risque cumulé du portefeuille (open_positions_risk_usd + risk_amount_usd).
+        Calcule R_total = R_positions_ouvertes + R_ordres_en_attente + R_nouveau_trade
+        et bloque tout dépassement du plafond de risque cumulé du portefeuille (6% par défaut).
         """
         res = self.risk_guard.validate_proposal_safety(
             capital=capital,
@@ -71,17 +74,18 @@ class ElCentinela:
         if not res.get("safe", False):
             return res
 
-        # Contrôle du risque cumulé simultané sur toutes les positions ouvertes (plafond 12% du capital)
-        if capital > 0 and open_positions_risk_usd > 0 and not fixed_lot_override:
-            total_portfolio_risk = float(open_positions_risk_usd) + float(max(0.0, risk_amount_usd))
-            max_portfolio_risk_pct = 0.12  # 12% max d'exposition simultanée totale
-            if (total_portfolio_risk / capital) > max_portfolio_risk_pct:
+        # Contrôle du risque cumulé simultané (positions ouvertes + ordres en attente + nouveau trade <= 6% du capital)
+        committed_risk = float(max(0.0, open_positions_risk_usd)) + float(max(0.0, pending_orders_risk_usd))
+        if capital > 0 and (committed_risk > 0 or risk_amount_usd > 0) and not fixed_lot_override:
+            total_portfolio_risk = committed_risk + float(max(0.0, risk_amount_usd))
+            ceiling_pct = float(max_portfolio_risk_pct or 0.06)
+            if (total_portfolio_risk / capital) > ceiling_pct:
                 return {
                     "safe": False,
                     "reason": (
                         f"Plafond de risque cumulé portefeuille dépassé : "
                         f"${total_portfolio_risk:.2f} / ${capital:.2f} "
-                        f"({(total_portfolio_risk / capital) * 100:.1f}% > {max_portfolio_risk_pct * 100:.0f}%)."
+                        f"({(total_portfolio_risk / capital) * 100:.1f}% > {ceiling_pct * 100:.0f}%)."
                     ),
                 }
         return res

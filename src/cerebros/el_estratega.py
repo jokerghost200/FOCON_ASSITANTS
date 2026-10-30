@@ -328,6 +328,18 @@ class ElEstratega:
 
         if observation and isinstance(observation, dict):
             decision["order_flow_status"] = observation.get("order_flow_status", "ORDER_FLOW_UNAVAILABLE")
+            of_obj = observation.get("order_flow")
+            raw_dq = (
+                of_obj.get("data_quality")
+                if isinstance(of_obj, dict)
+                else getattr(of_obj, "data_quality", "STANDARD_OHLCV")
+            )
+            decision["data_quality"] = str(getattr(raw_dq, "value", raw_dq) or "STANDARD_OHLCV")
+        else:
+            decision.setdefault("order_flow_status", "ORDER_FLOW_UNAVAILABLE")
+            decision.setdefault("data_quality", "STANDARD_OHLCV")
+
+        decision["technical_score"] = round(float(decision.get("confidence", 0.0) or 0.0), 1)
         decision["probability_status"] = (
             "CALIBRATED" if decision.get("calibrated_win_prob") is not None else "UNCALIBRATED_HEURISTIC"
         )
