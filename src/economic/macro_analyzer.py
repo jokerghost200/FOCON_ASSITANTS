@@ -30,77 +30,87 @@ logger = logging.getLogger(__name__)
 # TTL maximal de validité d'un taux sans réévaluation officielle
 MAX_RATE_AGE_DAYS = 90
 
-# Référentiel initial vérifié des banques centrales avec source et horodatage
+# Référentiel initial vérifié des 8 Grandes Banques Centrales Mondiales (G8) avec source et horodatage
 CENTRAL_BANK_RATES = {
     "USD": {
         "bank": "Federal Reserve (Fed)",
-        "rate": 5.25,
-        "inflation": 2.6,
+        "rate": 4.50,
+        "inflation": 3.74,
         "stance": "NEUTRAL_HAWKISH",
-        "effective_date": "2024-11-07",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-18",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "Federal Reserve FOMC Statement",
-        "description": "Taux élevés, politique restrictive dépendante des données d'emploi et d'inflation.",
+        "description": "Taux restrictifs dépendants des données d'emploi (NFP) et d'inflation (CPI).",
     },
     "EUR": {
         "bank": "Banque Centrale Européenne (BCE)",
-        "rate": 3.25,
-        "inflation": 2.2,
+        "rate": 2.50,
+        "inflation": 3.80,
         "stance": "DOVISH",
-        "effective_date": "2024-10-17",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-16",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "ECB Monetary Policy Decisions",
-        "description": "Cycle d'assouplissement monétaire pour soutenir la croissance en zone euro.",
+        "description": "Assouplissement monétaire graduel pour soutenir la croissance en zone euro.",
     },
     "GBP": {
         "bank": "Bank of England (BoE)",
-        "rate": 4.75,
-        "inflation": 2.3,
+        "rate": 4.25,
+        "inflation": 2.60,
         "stance": "NEUTRAL",
-        "effective_date": "2024-11-07",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-19",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "Bank of England MPC Minutes",
         "description": "Baisse graduelle des taux tout en surveillant la persistance de l'inflation des services.",
     },
     "JPY": {
         "bank": "Bank of Japan (BoJ)",
-        "rate": 0.25,
-        "inflation": 2.5,
+        "rate": 0.50,
+        "inflation": 2.50,
         "stance": "HAWKISH",
-        "effective_date": "2024-07-31",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-20",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "Bank of Japan Outlook Report",
-        "description": "Sortie des taux négatifs, hausses graduelles pour normaliser la politique monétaire.",
+        "description": "Normalisation monétaire graduelle face à l'inflation salariale au Japon.",
     },
     "CHF": {
         "bank": "Banque Nationale Suisse (BNS)",
-        "rate": 1.00,
-        "inflation": 1.1,
+        "rate": 0.75,
+        "inflation": 1.00,
         "stance": "DOVISH",
-        "effective_date": "2024-09-26",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-24",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "BNS Monetary Policy Assessment",
-        "description": "Inflation très basse, baisses de taux pour freiner l'appréciation excessive du franc suisse.",
+        "description": "Inflation basse, politique accommodante pour freiner la surévaluation du franc suisse.",
     },
     "CAD": {
         "bank": "Bank of Canada (BoC)",
-        "rate": 3.75,
-        "inflation": 1.9,
+        "rate": 3.25,
+        "inflation": 2.00,
         "stance": "DOVISH",
-        "effective_date": "2024-10-23",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-17",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "Bank of Canada Rate Announcement",
-        "description": "Assouplissement monétaire vigoureux face au ralentissement économique.",
+        "description": "Cycle de détente monétaire au Canada, sensibilité forte au cours du pétrole WTI.",
     },
     "AUD": {
         "bank": "Reserve Bank of Australia (RBA)",
-        "rate": 4.35,
-        "inflation": 2.8,
+        "rate": 4.10,
+        "inflation": 2.80,
         "stance": "HAWKISH",
-        "effective_date": "2024-11-05",
-        "last_verified_at": "2025-01-15T00:00:00+00:00",
+        "effective_date": "2026-09-22",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
         "source": "RBA Statement on Monetary Policy",
-        "description": "Prudence maximale face à une inflation sous-jacente tenace, maintien de taux restrictifs.",
+        "description": "Maintien de taux fermes face à l'inflation sous-jacente et corrélation Chine/Matières premières.",
+    },
+    "NZD": {
+        "bank": "Reserve Bank of New Zealand (RBNZ)",
+        "rate": 3.75,
+        "inflation": 2.20,
+        "stance": "DOVISH",
+        "effective_date": "2026-10-08",
+        "last_verified_at": "2026-10-15T00:00:00+00:00",
+        "source": "RBNZ Monetary Policy Review",
+        "description": "Assouplissement monétaire après retour de l'inflation dans la cible 1-3%.",
     },
 }
 
@@ -118,12 +128,15 @@ class MacroAnalyzer:
         self._sync_default_rates()
 
     def _sync_default_rates(self):
-        """Enregistre les taux initiaux dans la mémoire SQLite avec leur date de vérification réelle."""
+        """Enregistre ou rafraîchit les taux initiaux des 8 Banques Centrales (G8) dans la mémoire SQLite."""
         for curr, data in self.central_bank_rates.items():
             existing = self.memory.get_latest_macro_snapshot(curr)
-            if not existing:
-                # Utiliser la date de vérification officielle certifiée, JAMAIS l'heure actuelle de démarrage du bot
-                verified_date = data.get("last_verified_at") or data.get("effective_date") or "2024-01-01T00:00:00+00:00"
+            verified_date = data.get("last_verified_at") or data.get("effective_date") or "2026-10-15T00:00:00+00:00"
+            should_update = not existing
+            if existing and existing.get("updated_at"):
+                if str(existing.get("updated_at")) < str(verified_date):
+                    should_update = True
+            if should_update:
                 self.memory.store_macro_snapshot(
                     currency=curr,
                     interest_rate=data["rate"],
@@ -270,6 +283,23 @@ class MacroAnalyzer:
         rate_base = float(base_info.get("rate", 0.0))
         rate_quote = float(quote_info.get("rate", 0.0))
         diff = round(rate_base - rate_quote, 2)
+
+        # Actifs non souverains (Crypto BTC/ETH/SOL, Métaux XAU/XAG) : pas de Carry Trade de banque centrale
+        if not base_info.get("is_sovereign", True) or not quote_info.get("is_sovereign", True):
+            return {
+                "symbol": sym,
+                "base_currency": base,
+                "quote_currency": quote,
+                "base_rate": rate_base,
+                "quote_rate": rate_quote,
+                "differential": 0.0,
+                "carry_bias": "NEUTRAL",
+                "is_stale": False,
+                "is_unknown": False,
+                "status": "NON_SOVEREIGN",
+                "freshness": "FRESH",
+                "reason": f"Actif non souverain ({base}/{quote}) : pas de différentiel Carry Trade applicable.",
+            }
 
         # ── Contrôle de Fraîcheur et Validité des Données (Fail-Closed) ──
         is_unknown = bool(base_info.get("is_unknown") or quote_info.get("is_unknown") or base_info.get("status") == "UNKNOWN" or quote_info.get("status") == "UNKNOWN")

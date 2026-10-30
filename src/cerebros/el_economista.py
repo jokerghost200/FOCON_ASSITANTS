@@ -186,13 +186,24 @@ class ElEconomista:
             else:
                 reasons.append(f"Actualités : aucune dépêche récente pour {base_curr}/{quote_curr}.")
 
+            # 5. Radar Mondial Inter-Marchés (Risk-On/Risk-Off, Pétrole -> CAD, Chine -> AUD/NZD, Sentiment Crypto 24/7)
+            world_info = self.analizar_mercados_mundiales(sym, base_curr, quote_curr)
+            if world_info["bull_bonus"] > 0:
+                score_bull += world_info["bull_bonus"]
+                reasons.extend(world_info["reasons"])
+            elif world_info["bear_bonus"] > 0:
+                score_bear += world_info["bear_bonus"]
+                reasons.extend(world_info["reasons"])
+            elif world_info["reasons"]:
+                reasons.extend(world_info["reasons"])
+
             # Biais résultant
             if score_bull >= score_bear + 0.15:
                 overall_bias = "BULLISH"
-                confidence = round(score_bull, 2)
+                confidence = round(min(1.0, score_bull), 2)
             elif score_bear >= score_bull + 0.15:
                 overall_bias = "BEARISH"
-                confidence = round(score_bear, 2)
+                confidence = round(min(1.0, score_bear), 2)
             else:
                 overall_bias = "NEUTRAL"
                 confidence = 0.50
@@ -450,11 +461,111 @@ class ElEconomista:
         else:
             bias = "NEUTRAL"
 
+            return {
+                "bias": bias,
+                "score": round(max(-1.0, min(1.0, macro_score)), 2),
+                "is_fresh": is_fresh,
+                "used_indicators": used_indicators,
+                "reasons": reasons,
+            }
+
+    def analizar_mercados_mundiales(
+        self,
+        symbol: str,
+        base_curr: str,
+        quote_curr: str,
+    ) -> Dict[str, Any]:
+        """
+        Radar Inter-Marchés Mondial :
+        1. Climat de Risque Mondial (RISK-OFF vs RISK-ON) :
+           - En RISK-OFF (tensions géopolitiques, krachs, crises), renforce les Valeurs Refuges (XAU, JPY, CHF, USD)
+             et pénalise les actifs à bêta élevé (AUD, NZD, GBP, CAD).
+           - En RISK-ON (optimisme mondial), renforce les devises de croissance/commodities (AUD, NZD, CAD, EUR) et la Crypto.
+        2. Corrélation Énergie / Pétrole (OIL -> CAD) :
+           - Le Dollar Canadien (CAD) est un pétrodollar. Un sentiment pétrolier haussier renforce CAD
+             (haussier sur CADJPY, baissier sur USDCAD/EURCAD).
+        3. Sentiment Mondial Crypto 24/7 (BTC/ETH/SOL/XRP/BNB) :
+           - Exploite les flux spécialisés Crypto pour orienter les paires Crypto la semaine et le week-end.
+        """
+        bull_bonus = 0.0
+        bear_bonus = 0.0
+        reasons: List[str] = []
+
+        safe_havens = {"XAU", "XAG", "JPY", "CHF", "USD"}
+        risk_currencies = {"AUD", "NZD", "CAD", "GBP", "EUR"}
+        crypto_bases = {"BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC"}
+
+        # 1. Climat de risque mondial (Risk-On / Risk-Off)
+        risk_regime_info = {"regime": "NEUTRAL", "score": 0.0, "label": ""}
+        if hasattr(self.news, "get_global_risk_regime"):
+            try:
+                risk_regime_info = self.news.get_global_risk_regime(hours=24.0)
+            except Exception:
+                pass
+
+        g_regime = risk_regime_info.get("regime", "NEUTRAL")
+        if g_regime == "RISK_OFF":
+            if base_curr in safe_havens and quote_curr in risk_currencies:
+                bull_bonus += 0.20
+                reasons.append(f"Climat Mondial RISK-OFF : valeur refuge {base_curr} recherchee face a {quote_curr}.")
+            elif base_curr in risk_currencies and quote_curr in safe_havens:
+                bear_bonus += 0.20
+                reasons.append(f"Climat Mondial RISK-OFF : fuite vers la valeur refuge {quote_curr} au detriment de {base_curr}.")
+            elif base_curr == "XAU":
+                bull_bonus += 0.22
+                reasons.append("Climat Mondial RISK-OFF : forte demande refuge sur l'Or (XAU).")
+        elif g_regime == "RISK_ON":
+            if (base_curr in risk_currencies or base_curr in crypto_bases) and quote_curr in safe_havens:
+                bull_bonus += 0.18
+                reasons.append(f"Climat Mondial RISK-ON : appetit mondial favorable a {base_curr} face a {quote_curr}.")
+            elif base_curr in safe_havens and quote_curr in risk_currencies and base_curr != "XAU":
+                bear_bonus += 0.18
+                reasons.append(f"Climat Mondial RISK-ON : rotation vers la devise de croissance {quote_curr}.")
+
+        # 2. Corrélation Pétrole Mondial -> Dollar Canadien (CAD)
+        if base_curr == "CAD" or quote_curr == "CAD":
+            try:
+                oil_sent = self.news.get_sentiment_summary(currency="OIL", hours=24.0)
+                if oil_sent.get("article_count", 0) > 0:
+                    oil_lbl = oil_sent.get("sentiment_label", "NEUTRAL")
+                    oil_sc = float(oil_sent.get("sentiment_score", 0.0))
+                    if oil_lbl == "BULLISH":
+                        if base_curr == "CAD":
+                            bull_bonus += 0.18
+                            reasons.append(f"Correlation Petrole/CAD : hausse du petrole ({oil_sc:+.2f}) soutient le CAD.")
+                        else:  # ex: USDCAD, EURCAD
+                            bear_bonus += 0.18
+                            reasons.append(f"Correlation Petrole/CAD : hausse du petrole ({oil_sc:+.2f}) renforce CAD (pression baissiere sur {symbol}).")
+                    elif oil_lbl == "BEARISH":
+                        if base_curr == "CAD":
+                            bear_bonus += 0.18
+                            reasons.append(f"Correlation Petrole/CAD : baisse du petrole ({oil_sc:+.2f}) affaiblit le CAD.")
+                        else:  # ex: USDCAD
+                            bull_bonus += 0.18
+                            reasons.append(f"Correlation Petrole/CAD : baisse du petrole ({oil_sc:+.2f}) affaiblit CAD (soutien haussier sur {symbol}).")
+            except Exception:
+                pass
+
+        # 3. Sentiment Mondial Crypto 24/7 (pour BTCUSD, ETHUSD, SOLUSD, etc.)
+        if base_curr in crypto_bases or any(c in symbol.upper() for c in crypto_bases):
+            try:
+                crypto_sent = self.news.get_sentiment_summary(currency="BTC", hours=24.0)
+                if crypto_sent.get("article_count", 0) > 0:
+                    c_lbl = crypto_sent.get("sentiment_label", "NEUTRAL")
+                    c_sc = float(crypto_sent.get("sentiment_score", 0.0))
+                    if c_lbl == "BULLISH":
+                        bull_bonus += 0.25
+                        reasons.append(f"Sentiment Crypto Mondial HAUSSIER ({c_sc:+.2f} sur {crypto_sent.get('article_count')} articles).")
+                    elif c_lbl == "BEARISH":
+                        bear_bonus += 0.25
+                        reasons.append(f"Sentiment Crypto Mondial BAISSIER ({c_sc:+.2f} sur {crypto_sent.get('article_count')} articles).")
+            except Exception:
+                pass
+
         return {
-            "bias": bias,
-            "score": round(max(-1.0, min(1.0, macro_score)), 2),
-            "is_fresh": is_fresh,
-            "used_indicators": used_indicators,
+            "global_risk_regime": g_regime,
+            "bull_bonus": round(bull_bonus, 2),
+            "bear_bonus": round(bear_bonus, 2),
             "reasons": reasons,
         }
 
@@ -708,10 +819,21 @@ class ElEconomista:
         lines.append(f"  * Fenêtre Blackout     : {'[BLOQUE] ACTIF (ORDRES INTERDITS) - ' + blk_event + f' (dans {mins:.1f} min)' if in_blk else '[OK] INACTIF (Trading toléré)'}")
         lines.append("")
 
-        lines.append("3. FLUX D'ACTUALITES FINANCIERES & SENTIMENT")
+        lines.append("3. MARCHES MONDIAUX, BANQUES CENTRALES (G8) & SENTIMENT GLOBAL")
         lines.append("-" * 115)
-        news_articles = self.memory.get_recent_news(limit=10) if hasattr(self.memory, "get_recent_news") else []
-        lines.append(f"  * Articles en mémoire  : {len(news_articles)} article(s) analysé(s)")
+        news_articles = self.memory.get_recent_news(limit=50) if hasattr(self.memory, "get_recent_news") else []
+        risk_reg = self.news.get_global_risk_regime(hours=24.0) if hasattr(self.news, "get_global_risk_regime") else {"regime": "NEUTRAL", "label": "N/A"}
+        oil_s = self.news.get_sentiment_summary("OIL", hours=24.0) if hasattr(self.news, "get_sentiment_summary") else {"sentiment_label": "NEUTRAL", "article_count": 0}
+        btc_s = self.news.get_sentiment_summary("BTC", hours=24.0) if hasattr(self.news, "get_sentiment_summary") else {"sentiment_label": "NEUTRAL", "article_count": 0}
+        g8_rates = []
+        for c_code in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"):
+            cb_i = self.macro.get_central_bank_info(c_code)
+            g8_rates.append(f"{c_code}: {cb_i.get('rate', 0):.2f}%")
+        lines.append(f"  * Taux Banques G8      : {' | '.join(g8_rates)}")
+        lines.append(f"  * Climat Risque Monde  : [{risk_reg.get('regime', 'NEUTRAL')}] {risk_reg.get('label', '')}")
+        lines.append(f"  * Petrole (WTI/Brent)  : {oil_s.get('sentiment_label', 'NEUTRAL')} ({oil_s.get('article_count', 0)} articles) -> Impact direct CAD")
+        lines.append(f"  * Crypto Mondial 24/7  : {btc_s.get('sentiment_label', 'NEUTRAL')} ({btc_s.get('article_count', 0)} articles) -> Impact BTC/ETH/SOL")
+        lines.append(f"  * Articles en mémoire  : {len(news_articles)} article(s) mondiaux analysé(s)")
         lines.append("=" * 115)
         return "\n".join(lines)
 

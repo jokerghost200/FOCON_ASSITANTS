@@ -23,19 +23,31 @@ from src.economic.economic_memory import EconomicMemory
 
 logger = logging.getLogger(__name__)
 
-# Flux RSS publics gratuits
+# Flux RSS publics gratuits (Couverture Mondiale : Amériques, Europe, Asie-Pacifique, Matières Premières & Crypto 24/7)
 PUBLIC_RSS_FEEDS = [
     {
-        "name": "BBC Business",
+        "name": "BBC Business (Monde/Europe)",
         "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
     },
     {
-        "name": "Al Jazeera",
-        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "name": "Yahoo Finance (Wall Street/Global)",
+        "url": "https://finance.yahoo.com/news/rssindex",
     },
     {
-        "name": "Yahoo Finance",
-        "url": "https://finance.yahoo.com/news/rssindex",
+        "name": "CNBC World Economy & Markets",
+        "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258",
+    },
+    {
+        "name": "Investing Global Forex & Commodities",
+        "url": "https://www.investing.com/rss/news_1.rss",
+    },
+    {
+        "name": "Cointelegraph (Crypto 24/7)",
+        "url": "https://cointelegraph.com/rss",
+    },
+    {
+        "name": "Al Jazeera (Géopolitique & Énergie)",
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
     },
 ]
 
@@ -44,7 +56,8 @@ BULLISH_KEYWORDS = {
     "surge", "surges", "soar", "soars", "gain", "gains", "rally", "rallies", "growth",
     "jump", "jumps", "record high", "optimism", "rate hike", "hawkish", "outperform",
     "rebound", "expansion", "profit rise", "stronger", "positive", "beat forecast",
-    "hiring boom", "bullish", "upturn", "boom",
+    "hiring boom", "bullish", "upturn", "boom", "stimulus", "inflow", "inflows",
+    "adoption", "breakout", "recovery", "strong demand", "upbeat",
 }
 
 BEARISH_KEYWORDS = {
@@ -53,14 +66,32 @@ BEARISH_KEYWORDS = {
     "rate cut", "dovish", "underperform", "inflation fear", "slowdown", "losses",
     "weaker", "negative", "miss forecast", "layoffs", "bearish", "crisis", "default",
     "defaults", "crash", "crashes", "collapse", "collapses", "panic", "fear", "fears", "downturn",
+    "outflow", "outflows", "hack", "ban", "sanctions", "deficit", "selloff", "sell-off",
+}
+
+RISK_OFF_KEYWORDS = {
+    "war", "missile", "strike", "conflict", "escalation", "geopolitical", "sanctions",
+    "crisis", "panic", "crash", "collapse", "recession", "safe-haven", "safe haven",
+    "tariff", "tariffs", "trade war", "default", "bank run", "emergency", "invasion",
+}
+
+RISK_ON_KEYWORDS = {
+    "rally", "optimism", "record high", "soft landing", "stimulus", "peace",
+    "ceasefire", "trade deal", "boom", "expansion", "bull market", "risk-on", "upbeat",
 }
 
 CURRENCY_KEYWORDS = {
-    "USD": ["fed", "federal reserve", "powell", "dollar", "us economy", "treasury", "wall street", "nfp"],
-    "EUR": ["ecb", "lagarde", "euro", "eurozone", "germany", "bundesbank", "inflation eu"],
-    "GBP": ["boe", "bank of england", "bailey", "sterling", "pound", "uk economy"],
-    "JPY": ["boj", "bank of japan", "ueda", "yen", "tokyo", "nikkei"],
-    "XAU": ["gold", "bullion", "safe-haven", "precious metals", "xau"],
+    "USD": ["fed", "federal reserve", "powell", "fomc", "dollar", "us economy", "treasury", "wall street", "nfp", "u.s."],
+    "EUR": ["ecb", "lagarde", "euro", "eurozone", "germany", "bundesbank", "inflation eu", "france", "frankfurt"],
+    "GBP": ["boe", "bank of england", "bailey", "sterling", "pound", "uk economy", "britain", "london"],
+    "JPY": ["boj", "bank of japan", "ueda", "yen", "tokyo", "nikkei", "japan"],
+    "CAD": ["boc", "bank of canada", "macklem", "loonie", "canada", "canadian dollar", "ottawa"],
+    "AUD": ["rba", "reserve bank of australia", "bullock", "aussie", "australia", "iron ore", "sydney", "china stimulus", "pboc"],
+    "NZD": ["rbnz", "reserve bank of new zealand", "kiwi", "new zealand", "auckland", "wellington"],
+    "CHF": ["snb", "swiss national bank", "swiss franc", "switzerland", "zurich"],
+    "XAU": ["gold", "bullion", "safe-haven", "precious metals", "xau", "silver"],
+    "OIL": ["oil", "crude", "wti", "brent", "opec", "energy", "petroleum", "barrel"],
+    "BTC": ["bitcoin", "btc", "crypto", "cryptocurrency", "etf", "ethereum", "eth", "solana", "blockchain", "whale", "sec", "binance", "coinbase"],
 }
 
 
@@ -210,4 +241,55 @@ class NewsCollector:
             "article_count": len(news),
             "headline_sample": headlines,
             "is_fresh": len(news) > 0,
+        }
+
+    def get_global_risk_regime(self, hours: float = 24.0) -> Dict[str, Any]:
+        """
+        Analyse l'ensemble des dépêches mondiales récentes pour déterminer le Climat de Risque Mondial :
+        - RISK_OFF : Tensions géopolitiques, guerres, krachs, crises -> favorise Valeurs Refuges (XAU, JPY, CHF, USD)
+        - RISK_ON  : Optimisme boursier mondial, stimulus, accords -> favorise Croissance & Crypto (AUD, NZD, CAD, EUR, BTC, ETH)
+        - NEUTRAL  : Climat mondial équilibré
+        """
+        all_news = self.memory.get_recent_news(currency=None, hours=hours, limit=60)
+        if not all_news:
+            return {
+                "regime": "NEUTRAL",
+                "score": 0.0,
+                "risk_on_hits": 0,
+                "risk_off_hits": 0,
+                "article_count": 0,
+                "label": "Climat mondial neutre (aucune depeche)",
+            }
+
+        risk_on_hits = 0
+        risk_off_hits = 0
+        for item in all_news:
+            txt = f"{item.get('title', '')} {item.get('summary', '')}".lower()
+            risk_on_hits += sum(1 for w in RISK_ON_KEYWORDS if w in txt)
+            risk_off_hits += sum(1 for w in RISK_OFF_KEYWORDS if w in txt)
+
+        total_hits = risk_on_hits + risk_off_hits
+        if total_hits == 0:
+            avg_sent = sum(float(n.get("sentiment_score", 0.0) or 0.0) for n in all_news) / len(all_news)
+            score = round(avg_sent, 2)
+        else:
+            score = round((risk_on_hits - risk_off_hits) / total_hits, 2)
+
+        if score <= -0.20 or (risk_off_hits >= 4 and risk_off_hits >= risk_on_hits * 1.5):
+            regime = "RISK_OFF"
+            label = f"RISK-OFF Mondial (Refuges XAU/JPY/CHF/USD favorises | {risk_off_hits} alertes risque)"
+        elif score >= 0.20 or (risk_on_hits >= 4 and risk_on_hits >= risk_off_hits * 1.5):
+            regime = "RISK_ON"
+            label = f"RISK-ON Mondial (Appetit pour le risque AUD/NZD/CAD/Crypto | {risk_on_hits} signaux positifs)"
+        else:
+            regime = "NEUTRAL"
+            label = f"Climat de risque mondial equilibre ({len(all_news)} articles)"
+
+        return {
+            "regime": regime,
+            "score": score,
+            "risk_on_hits": risk_on_hits,
+            "risk_off_hits": risk_off_hits,
+            "article_count": len(all_news),
+            "label": label,
         }
