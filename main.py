@@ -38,21 +38,9 @@ def load_config(path: str = None):
 def main():
     # Load environment variables (.env à la racine du projet)
     load_dotenv(BASE_DIR / ".env")
-    gemini_key = (
-        os.getenv("GEMINI_API_KEY")
-        or os.getenv("GEMINI_API_KEY_1")
-        or os.getenv("GEMINI_API_KEY_2")
-    )
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    groq_key = os.getenv("GROQ_API_KEY", "")  # optional but recommended
-    
-    if not gemini_key or not openrouter_key:
-        print("Erreur: Les clés API GEMINI_API_KEY (ou GEMINI_API_KEY_*) et OPENROUTER_API_KEY doivent être définies dans .env")
-        sys.exit(1)
-        
     config = load_config()
     
-    # Initialize components
+    # Initialize components (Mode 100% Cerveaux Locaux FATI — aucun agent IA externe requis)
     mt5 = MT5Connector()
     if not mt5.connect():
         print("Erreur: Impossible de se connecter à MetaTrader 5.")
@@ -60,17 +48,9 @@ def main():
     market_data = MarketDataEngine(mt5)
     tech = TechnicalIndicators()
     
-    gemini = GeminiAgent(api_key=gemini_key, model=config['ai_models']['gemini_model'])
-    openrouter = OpenRouterAgent(
-        api_key=openrouter_key,
-        default_model=config['ai_models']['openrouter_model'],
-        groq_api_key=groq_key
-    )
-
-    # Routeur universel : bascule auto OpenRouter/Groq <-> Gemini (+ cooldown).
-    router_cooldown = config.get('ai_models', {}).get('router_cooldown_seconds', 120)
-    router = AIRouter(gemini_agent=gemini, openrouter_agent=openrouter,
-                      cooldown_seconds=router_cooldown)
+    # Les agents IA externes (OpenRouter / Gemini) sont désactivés pour un fonctionnement 100% local rapide.
+    # La synthèse vocale (VoiceManager) et les commandes vocales restent 100% actives.
+    router = None
     
     risk = RiskManager(
         default_risk_percent=config['risk_management']['default_risk_percent'],
@@ -130,6 +110,9 @@ def main():
         allowed_trade_direction=allowed_direction,
         trade_memory=trade_memory,
         centinela=fati.centinela,
+        default_risk_percent=config['risk_management'].get('default_risk_percent', 1.0),
+        max_open_positions=config['risk_management'].get('max_open_positions', 3),
+        fixed_lot_size=config['risk_management'].get('fixed_lot_size', 0.0),
     )
     chat = ChatEngine(router)
     trade_manager = TradeManager(mt5, orchestrator, config=config, trade_memory=trade_memory)

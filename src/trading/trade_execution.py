@@ -23,6 +23,7 @@ class TradeExecutionEngine:
         default_risk_percent: float = 1.0,
         max_open_positions: int = 3,
         strict_risk_ceiling: bool = True,
+        fixed_lot_size: float = 0.0,
     ):
         from src.cerebros.el_centinela import ElCentinela
         self.mt5 = mt5_connector
@@ -37,6 +38,7 @@ class TradeExecutionEngine:
         self.default_risk_percent = float(default_risk_percent)
         self.max_open_positions = int(max_open_positions)
         self.strict_risk_ceiling = bool(strict_risk_ceiling)
+        self.fixed_lot_size = float(fixed_lot_size or 0.0)
         # En mode automatique et semi-automatique, la présence et conformité du contexte économique est obligatoire (Fail-Closed)
         if require_economic_context is not None:
             self.require_economic_context = bool(require_economic_context)
@@ -506,12 +508,20 @@ class TradeExecutionEngine:
                 )
                 return None
 
-            sec_check = self.centinela.evaluar_seguridad(
-                capital=capital,
-                risk_amount_usd=risk_usd,
-                current_daily_loss_usd=daily_loss_usd,
-                current_open_positions_count=pos_count,
+            is_fixed_lot = bool(
+                decision.get('fixed_lot_override')
+                or decision.get('manual_lot_override')
+                or (getattr(self, 'fixed_lot_size', 0.0) or 0.0) > 0.0
             )
+            sec_kwargs = {
+                "capital": capital,
+                "risk_amount_usd": risk_usd,
+                "current_daily_loss_usd": daily_loss_usd,
+                "current_open_positions_count": pos_count,
+            }
+            if is_fixed_lot:
+                sec_kwargs["fixed_lot_override"] = True
+            sec_check = self.centinela.evaluar_seguridad(**sec_kwargs)
             if not sec_check.get('safe', False):
                 logger.critical(
                     f"🛑 [El Centinela - SÉCURITÉ INVIOLABLE] Rejet de l'ordre pour {symbol} : {sec_check.get('reason')}"
@@ -568,6 +578,11 @@ class TradeExecutionEngine:
             "type_filling": type_filling,
             "_snapshot": snapshot,
             "_economic_context": econ_ctx,
+            "_fixed_lot_override": bool(
+                decision.get('fixed_lot_override')
+                or decision.get('manual_lot_override')
+                or (getattr(self, 'fixed_lot_size', 0.0) or 0.0) > 0.0
+            ),
         }
         if is_pending:
             exp_seconds = int(decision.get('expiration_seconds') or (decision.get('expiration_bars', 4) * 900))
@@ -786,29 +801,30 @@ class TradeExecutionEngine:
 
             # 1. Vérification stricte du sens du Stop Loss vs Ordre d'Achat/Vente
             req_type = request.get('type')
-            is_buy = (
-                req_type in (0, 2, 4)
-                or str(request.get('action', '')).upper() in ('BUY', '0')
-                or 'BUY' in str(request.get('type_str', '')).upper()
-            )
-            is_sell = (
-                req_type in (1, 3, 5)
-                or str(request.get('action', '')).upper() in ('SELL', '1')
-                or 'SELL' in str(request.get('type_str', '')).upper()
-            )
+            if req_type in (0, 2, 4):
+                is_buy, is_sell = True, False
+            elif req_type in (1, 3, 5):
+                is_buy, is_sell = False, True
+            else:
+                act_str = str(request.get('action', '')).upper()
+                type_str = str(request.get('type_str', '')).upper()
+                is_buy = (act_str == 'BUY' or 'BUY' in type_str)
+                is_sell = (act_str == 'SELL' or 'SELL' in type_str)
 
-            if is_buy and req_sl >= req_price:
-                logger.critical(
-                    f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
-                    f"SL ({req_sl}) >= Prix ({req_price}) sur ordre d'achat."
-                )
-                return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre d'achat (SL >= Prix)."}
-            elif is_sell and req_sl <= req_price:
-                logger.critical(
-                    f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
-                    f"SL ({req_sl}) <= Prix ({req_price}) sur ordre de vente."
-                )
-                return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre de vente (SL <= Prix)."}
+            if is_buy:
+                if req_sl >= req_price:
+                    logger.critical(
+                        f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
+                        f"SL ({req_sl}) >= Prix ({req_price}) sur ordre d'achat."
+                    )
+                    return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre d'achat (SL >= Prix)."}
+            elif is_sell:
+                if req_sl <= req_price:
+                    logger.critical(
+                        f"🛑 [El Centinela] Émission MT5 avortée pour {req_sym} : "
+                        f"SL ({req_sl}) <= Prix ({req_price}) sur ordre de vente."
+                    )
+                    return {"success": False, "reason": "El Centinela: Stop Loss incohérent pour un ordre de vente (SL <= Prix)."}
 
             # 2. Vérification du Quota maximal de positions ouvertes
             effective_max_positions = getattr(self, 'max_open_positions', 3)
@@ -823,8 +839,12 @@ class TradeExecutionEngine:
                 }
 
             # 3. Vérification du Plafond Strict de Risque Monétaire (Strict Risk Ceiling)
+            is_fixed_lot = bool(
+                request.get('_fixed_lot_override')
+                or (getattr(self, 'fixed_lot_size', 0.0) or 0.0) > 0.0
+            )
             if getattr(self, 'strict_risk_ceiling', True):
-                max_risk_pct = getattr(self, 'default_risk_percent', 1.0)
+                max_risk_pct = 35.0 if is_fixed_lot else getattr(self, 'default_risk_percent', 1.0)
                 allowed_risk_budget = capital * (max_risk_pct / 100.0) * 1.05
                 if recalc_risk_usd > allowed_risk_budget:
                     actual_pct = (recalc_risk_usd / capital) * 100.0
@@ -838,12 +858,15 @@ class TradeExecutionEngine:
                         "reason": f"El Centinela: Risque réel de ${recalc_risk_usd:.2f} dépasse le plafond strict autorisé (${allowed_risk_budget:.2f}).",
                     }
 
-            final_sec_check = self.centinela.evaluar_seguridad(
-                capital=capital,
-                risk_amount_usd=recalc_risk_usd,
-                current_daily_loss_usd=daily_loss_usd,
-                current_open_positions_count=pos_cnt,
-            )
+            final_sec_kwargs = {
+                "capital": capital,
+                "risk_amount_usd": recalc_risk_usd,
+                "current_daily_loss_usd": daily_loss_usd,
+                "current_open_positions_count": pos_cnt,
+            }
+            if is_fixed_lot:
+                final_sec_kwargs["fixed_lot_override"] = True
+            final_sec_check = self.centinela.evaluar_seguridad(**final_sec_kwargs)
             if not final_sec_check.get('safe', False):
                 logger.critical(
                     f"🛑 [El Centinela - VÉRIFICATION FINALE AVANT ORDER_SEND REJETÉE] {req_sym} : {final_sec_check.get('reason')}"

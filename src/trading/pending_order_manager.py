@@ -225,6 +225,9 @@ class PendingOrderManager:
             try:
                 # Check if the pending order still exists in MT5
                 mt5_orders = self.mt5.get_pending_orders(symbol=pending.symbol)
+                if not getattr(self.mt5, '_last_orders_get_ok', True):
+                    # Micro-coupure MT5 : ne pas marquer l'ordre comme expiré/annulé par erreur
+                    continue
                 order_exists = any(o['ticket'] == ticket for o in mt5_orders)
                 
                 if not order_exists:
@@ -255,16 +258,18 @@ class PendingOrderManager:
                     atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else 0.0001
                     
                     # Check if OB zone has been breached (price closed through it)
-                    buf = 0.3 * atr
-                    recent = df.tail(5)
+                    buf = 0.5 * atr
+                    recent = df.tail(3)
                     is_invalidated = False
                     
                     if pending.direction == 'BUY':
-                        # Bullish OB invalidated if price closes below ob_low - buffer
-                        is_invalidated = bool((recent['close'] < (pending.ob_low - buf)).any())
+                        # Bullish OB invalidated if price closes below ob_low - buffer (or below SL)
+                        ref_low = min(pending.ob_low, pending.sl) if pending.sl > 0 else pending.ob_low
+                        is_invalidated = bool((recent['close'] < (ref_low - buf)).any())
                     else:
-                        # Bearish OB invalidated if price closes above ob_high + buffer
-                        is_invalidated = bool((recent['close'] > (pending.ob_high + buf)).any())
+                        # Bearish OB invalidated if price closes above ob_high + buffer (or above SL)
+                        ref_high = max(pending.ob_high, pending.sl) if pending.sl > 0 else pending.ob_high
+                        is_invalidated = bool((recent['close'] > (ref_high + buf)).any())
                     
                     if is_invalidated:
                         self._cancel_and_mark(ticket, pending, "INVALIDATED",
@@ -276,21 +281,21 @@ class PendingOrderManager:
                     tech_features = self.tech.extract_latest_features(df)
                     rsi = float(tech_features.get('rsi_14', 50))
                     
-                    if pending.direction == 'BUY' and rsi >= 72:
+                    if pending.direction == 'BUY' and rsi >= 78:
                         self._cancel_and_mark(ticket, pending, "INVALIDATED",
-                                             f"RSI en surachat ({rsi:.1f}) — achat non-recommandé")
+                                             f"RSI en surachat extrême ({rsi:.1f}) — achat non-recommandé")
                         actions.append({"ticket": ticket, "symbol": pending.symbol, "action": "RSI_CANCEL"})
                         continue
-                    elif pending.direction == 'SELL' and rsi <= 28:
+                    elif pending.direction == 'SELL' and rsi <= 22:
                         self._cancel_and_mark(ticket, pending, "INVALIDATED",
-                                             f"RSI en survente ({rsi:.1f}) — vente non-recommandée")
+                                             f"RSI en survente extrême ({rsi:.1f}) — vente non-recommandée")
                         actions.append({"ticket": ticket, "symbol": pending.symbol, "action": "RSI_CANCEL"})
                         continue
 
                     # ── Validation 3: Price moving too far away ──
                     current_price = float(df['close'].iloc[-1])
                     distance_to_entry = abs(current_price - pending.entry_price)
-                    max_distance = 5.0 * atr  # If price is more than 5 ATR away, cancel
+                    max_distance = 10.0 * atr  # Leave enough room (10 ATR) before cancelling a limit order
                     
                     if distance_to_entry > max_distance:
                         self._cancel_and_mark(ticket, pending, "INVALIDATED",
@@ -331,7 +336,10 @@ class PendingOrderManager:
             return
 
         try:
-            mt5_orders = self.mt5.get_pending_orders() or []
+            mt5_orders = self.mt5.get_pending_orders()
+            if mt5_orders is None or not getattr(self.mt5, '_last_orders_get_ok', True):
+                # En cas d'erreur réseau temporaire MT5, conserver l'état local intact
+                return
             live_tickets = {int(o['ticket']): o for o in mt5_orders}
             open_pos = self.mt5.get_open_positions() or []
 
@@ -355,19 +363,23 @@ class PendingOrderManager:
                 for tkt, o in live_tickets.items():
                     if tkt not in self._pending_orders:
                         direction = 'BUY' if str(o.get('type', '')).upper() in ('BUY', '0', '2') else 'SELL'
+                        p_open = float(o.get('price_open', 0.0) or 0.0)
+                        sl_val = float(o.get('sl', 0.0) or 0.0)
+                        ob_high = max(p_open, sl_val) if (direction == 'SELL' and sl_val > 0) else p_open
+                        ob_low = min(p_open, sl_val) if (direction == 'BUY' and sl_val > 0) else p_open
                         self._pending_orders[tkt] = PendingOBOrder(
                             ticket=tkt,
                             symbol=o.get('symbol', 'UNKNOWN'),
                             direction=direction,
-                            entry_price=float(o.get('price_open', 0.0) or 0.0),
-                            sl=float(o.get('sl', 0.0) or 0.0),
+                            entry_price=p_open,
+                            sl=sl_val,
                             tp=float(o.get('tp', 0.0) or 0.0),
                             volume=float(o.get('volume', 0.01) or 0.01),
-                            ob_high=float(o.get('price_open', 0.0) or 0.0),
-                            ob_low=float(o.get('price_open', 0.0) or 0.0),
+                            ob_high=ob_high,
+                            ob_low=ob_low,
                             ob_score=60.0,
                             timeframe="M15",
-                            created_at=float(o.get('time_setup', time.time()) or time.time()),
+                            created_at=time.time(),
                             status="ACTIVE",
                             label=str(o.get('comment', '') or ''),
                         )

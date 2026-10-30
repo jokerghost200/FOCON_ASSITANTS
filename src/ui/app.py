@@ -220,6 +220,328 @@ class OBScanThread(QThread):
     def stop(self):
         self._stop.set()
 
+class FixedLotAdvisorDialog(QDialog):
+    """
+    Boîte de dialogue interactive permettant de voir et choisir le Lot Fixe
+    qui passe le mieux en fonction du capital réel et de la marge libre MT5.
+    """
+    def __init__(self, capital: float = 81.03, margin_free: float = 81.03, leverage: int = 500, current_fixed_lot: float = 0.0, parent=None):
+        super().__init__(parent)
+        self.capital = max(10.0, float(capital or 81.03))
+        self.margin_free = max(10.0, float(margin_free or self.capital))
+        self.leverage = max(30, int(leverage or 500))
+        self.current_fixed_lot = float(current_fixed_lot or 0.0)
+        self.selected_lot = self.current_fixed_lot
+
+        self.setWindowTitle("⚖️ Conseiller Lot Fixe — Calibrage selon votre Capital")
+        self.setMinimumSize(780, 520)
+        self.setStyleSheet("""
+            QDialog { background-color: #121622; color: #e2e8f0; }
+            QLabel { color: #e2e8f0; }
+            QTableWidget {
+                background-color: #1a2032;
+                color: #e2e8f0;
+                gridline-color: #2d3748;
+                border: 1px solid #2d3748;
+                border-radius: 6px;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #0f1523;
+                color: #90caf9;
+                font-weight: bold;
+                padding: 6px;
+                border: 1px solid #2d3748;
+            }
+            QDoubleSpinBox {
+                background-color: #0f1523;
+                color: #ffd54f;
+                font-weight: bold;
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+        """)
+        self._init_ui()
+        self._recalculate_table()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # Bandeau explicatif
+        info_banner = QLabel(
+            "💡 <b>Pourquoi le mode Dynamique (0.00) ouvre uniquement 0.01 lot sur petit capital ?</b><br>"
+            "Avec 1% à 2% de risque sur un petit capital (~1$ à 2$ de risque max), tout Stop Loss standard (10-15 pips) "
+            "donne mathématiquement le minimum courtier (<b>0.01 lot</b>).<br>"
+            "En passant en <b>Lot Fixe</b>, voici les volumes calibrés selon votre capital qui <b>passent les contrôles de marge et de sécurité</b> :"
+        )
+        info_banner.setWordWrap(True)
+        info_banner.setStyleSheet(
+            "background-color: #1e293b; color: #cbd5e1; border-left: 4px solid #38bdf8; "
+            "padding: 10px; border-radius: 4px; font-size: 12px;"
+        )
+        layout.addWidget(info_banner)
+
+        # Paramètres du compte (modifiables pour simuler)
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(12)
+
+        cap_lbl = QLabel("💰 Capital (Balance/Equity) :")
+        cap_lbl.setFont(QFont("Arial", 9, QFont.Bold))
+        self.cap_spin = QDoubleSpinBox()
+        self.cap_spin.setRange(5.0, 1000000.0)
+        self.cap_spin.setDecimals(2)
+        self.cap_spin.setSingleStep(10.0)
+        self.cap_spin.setSuffix(" $")
+        self.cap_spin.setValue(self.capital)
+        self.cap_spin.valueChanged.connect(self._on_params_changed)
+        top_bar.addWidget(cap_lbl)
+        top_bar.addWidget(self.cap_spin)
+
+        mf_lbl = QLabel("🛡️ Marge Libre :")
+        mf_lbl.setFont(QFont("Arial", 9, QFont.Bold))
+        self.mf_spin = QDoubleSpinBox()
+        self.mf_spin.setRange(5.0, 1000000.0)
+        self.mf_spin.setDecimals(2)
+        self.mf_spin.setSingleStep(10.0)
+        self.mf_spin.setSuffix(" $")
+        self.mf_spin.setValue(self.margin_free)
+        self.mf_spin.valueChanged.connect(self._on_params_changed)
+        top_bar.addWidget(mf_lbl)
+        top_bar.addWidget(self.mf_spin)
+
+        sl_lbl = QLabel("📏 Stop Loss type :")
+        sl_lbl.setFont(QFont("Arial", 9, QFont.Bold))
+        self.sl_pips_spin = QDoubleSpinBox()
+        self.sl_pips_spin.setRange(3.0, 100.0)
+        self.sl_pips_spin.setDecimals(1)
+        self.sl_pips_spin.setSingleStep(1.0)
+        self.sl_pips_spin.setSuffix(" pips")
+        self.sl_pips_spin.setValue(10.0)
+        self.sl_pips_spin.setToolTip("Distance moyenne du Stop Loss en pips (10 pips ≈ standard M15 Forex, soit ~1$ par 0.01 lot).")
+        self.sl_pips_spin.valueChanged.connect(self._on_params_changed)
+        top_bar.addWidget(sl_lbl)
+        top_bar.addWidget(self.sl_pips_spin)
+
+        top_bar.addStretch()
+        layout.addLayout(top_bar)
+
+        # Tableau des recommandations
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels([
+            "Profil de Lot",
+            "Lot Fixe",
+            "Risque / Trade (SL)",
+            "Gain Visé (R:R 1:2)",
+            "Marge Requise (~)",
+            "Verdict Bot & Sécurité",
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.cellClicked.connect(self._on_row_clicked)
+        self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
+        layout.addWidget(self.table, stretch=1)
+
+        # Zone de sélection personnalisée + Verdict en direct
+        sel_frame = QFrame()
+        sel_frame.setStyleSheet("background-color: #1a2234; border: 1px solid #334155; border-radius: 6px; padding: 8px;")
+        sel_layout = QHBoxLayout(sel_frame)
+
+        sel_lbl = QLabel("🎯 <b>Lot Fixe sélectionné :</b>")
+        sel_lbl.setFont(QFont("Arial", 10))
+        sel_layout.addWidget(sel_lbl)
+
+        self.selected_lot_spin = QDoubleSpinBox()
+        self.selected_lot_spin.setRange(0.0, 50.0)
+        self.selected_lot_spin.setDecimals(2)
+        self.selected_lot_spin.setSingleStep(0.01)
+        self.selected_lot_spin.setMinimumWidth(100)
+        self.selected_lot_spin.setFont(QFont("Arial", 11, QFont.Bold))
+        self.selected_lot_spin.valueChanged.connect(self._update_custom_verdict)
+        sel_layout.addWidget(self.selected_lot_spin)
+
+        self.live_verdict_lbl = QLabel("")
+        self.live_verdict_lbl.setWordWrap(True)
+        sel_layout.addWidget(self.live_verdict_lbl, stretch=1)
+
+        layout.addWidget(sel_frame)
+
+        # Boutons d'action
+        btn_row = QHBoxLayout()
+        self.apply_btn = QPushButton("✅ Appliquer ce Lot Fixe")
+        self.apply_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_btn.setStyleSheet(
+            "background-color: #16a34a; color: white; font-weight: bold; font-size: 13px; padding: 8px 18px; border-radius: 5px;"
+        )
+        self.apply_btn.clicked.connect(self._accept_selected)
+
+        self.auto_btn = QPushButton("🤖 Repasser en Lot Dynamique (0.00)")
+        self.auto_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_btn.setStyleSheet(
+            "background-color: #2563eb; color: white; font-weight: bold; font-size: 12px; padding: 8px 14px; border-radius: 5px;"
+        )
+        self.auto_btn.clicked.connect(self._accept_auto)
+
+        cancel_btn = QPushButton("Annuler")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(
+            "background-color: #475569; color: white; font-weight: bold; font-size: 12px; padding: 8px 14px; border-radius: 5px;"
+        )
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row.addWidget(self.apply_btn)
+        btn_row.addWidget(self.auto_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_params_changed(self):
+        self.capital = max(5.0, float(self.cap_spin.value()))
+        self.margin_free = max(5.0, float(self.mf_spin.value()))
+        self._recalculate_table()
+
+    def _calc_lot_for_risk_pct(self, risk_pct: float, loss_per_lot: float) -> float:
+        import math
+        budget = self.capital * (risk_pct / 100.0)
+        raw = budget / max(1.0, loss_per_lot)
+        steps = max(1, int(math.floor(raw / 0.01 + 1e-9)))
+        return round(steps * 0.01, 2)
+
+    def _recalculate_table(self):
+        import math
+        sl_pips = max(1.0, float(self.sl_pips_spin.value()))
+        # Sur Forex standard (EURUSD, GBPUSD...), 1 lot = 10$/pip -> loss_per_lot = sl_pips * 10$
+        loss_per_lot = sl_pips * 10.0
+        # Marge estimée pour 1 lot (~108 000$ / levier)
+        margin_per_lot = 108000.0 / max(30, self.leverage)
+        max_safe_margin_lot = round(math.floor((self.margin_free * 0.70 / max(1.0, margin_per_lot)) / 0.01) * 0.01, 2)
+        max_safe_risk_lot = round(math.floor(((self.capital * 0.32) / max(1.0, loss_per_lot)) / 0.01) * 0.01, 2)
+        hard_ceiling_lot = max(0.01, min(max_safe_margin_lot, max_safe_risk_lot))
+
+        # Calcul des paliers adaptés au capital
+        lot_prudent = max(0.02, self._calc_lot_for_risk_pct(3.0, loss_per_lot))
+        lot_equilibre = max(lot_prudent + 0.01, self._calc_lot_for_risk_pct(5.5, loss_per_lot))
+        lot_dynamique = max(lot_equilibre + 0.01, self._calc_lot_for_risk_pct(10.0, loss_per_lot))
+        lot_agressif = max(lot_dynamique + 0.02, self._calc_lot_for_risk_pct(18.0, loss_per_lot))
+
+        # Plafonner intelligemment si le capital est très petit
+        lot_prudent = min(lot_prudent, hard_ceiling_lot)
+        lot_equilibre = min(lot_equilibre, hard_ceiling_lot)
+        lot_dynamique = min(lot_dynamique, hard_ceiling_lot)
+        lot_agressif = min(lot_agressif, hard_ceiling_lot)
+
+        tiers = [
+            ("🤖 Auto-Pilot (% Dynamique)", 0.00, "Mode dynamique (donne 0.01 sur petit capital)"),
+            ("🟢 Prudent (Micro-Croissance)", lot_prudent, "✅ Passe Optimal (Très sûr)"),
+            ("⭐ Équilibré (Recommandé)", lot_equilibre, "⭐ Passe Idéal (Meilleur compromis)"),
+            ("🚀 Dynamique (Croissance Active)", lot_dynamique, "✅ Passe (Croissance rapide)"),
+            ("🔥 Agressif (Boost Capital)", lot_agressif, "⚠️ Passe (Risque soutenu)"),
+            ("⚡ Plafond Max Sécurisé", hard_ceiling_lot, "🛡️ Limite haute autorisée par le bot"),
+        ]
+
+        self._row_lots = []
+        self.table.setRowCount(len(tiers))
+
+        recommended_lot = lot_equilibre
+
+        for row_idx, (label, lot_val, base_verdict) in enumerate(tiers):
+            self._row_lots.append(lot_val)
+            eff_lot = 0.01 if lot_val == 0.0 else lot_val
+            risk_usd = eff_lot * loss_per_lot
+            risk_pct = (risk_usd / self.capital) * 100.0 if self.capital > 0 else 0.0
+            gain_usd = risk_usd * 2.0
+            req_margin = eff_lot * margin_per_lot
+
+            lot_txt = "0.00 (Auto → 0.01)" if lot_val == 0.0 else f"{lot_val:.2f} lot"
+            risk_txt = f"{risk_usd:.2f} $ ({risk_pct:.1f}%)"
+            gain_txt = f"+{gain_usd:.2f} $"
+            margin_txt = f"~{req_margin:.2f} $"
+
+            items = [
+                QTableWidgetItem(label),
+                QTableWidgetItem(lot_txt),
+                QTableWidgetItem(risk_txt),
+                QTableWidgetItem(gain_txt),
+                QTableWidgetItem(margin_txt),
+                QTableWidgetItem(base_verdict),
+            ]
+            for col_idx, it in enumerate(items):
+                if row_idx == 2:  # Recommandé
+                    it.setForeground(QColor("#4ade80"))
+                    it.setFont(QFont("Arial", 10, QFont.Bold))
+                elif row_idx == 1:
+                    it.setForeground(QColor("#93c5fd"))
+                elif row_idx >= 4:
+                    it.setForeground(QColor("#fbbf24"))
+                self.table.setItem(row_idx, col_idx, it)
+
+        # Initialiser la valeur du spinbox si pas encore définie
+        if self.selected_lot_spin.value() == 0.0:
+            init_val = self.current_fixed_lot if self.current_fixed_lot > 0.0 else recommended_lot
+            self.selected_lot_spin.setValue(init_val)
+            self.table.selectRow(2)
+        else:
+            self._update_custom_verdict()
+
+    def _on_row_clicked(self, row: int, _col: int):
+        if 0 <= row < len(getattr(self, '_row_lots', [])):
+            self.selected_lot_spin.setValue(self._row_lots[row])
+
+    def _on_row_double_clicked(self, row: int, _col: int):
+        if 0 <= row < len(getattr(self, '_row_lots', [])):
+            self.selected_lot_spin.setValue(self._row_lots[row])
+            self._accept_selected()
+
+    def _update_custom_verdict(self):
+        lot = float(self.selected_lot_spin.value())
+        sl_pips = max(1.0, float(self.sl_pips_spin.value()))
+        loss_per_lot = sl_pips * 10.0
+        margin_per_lot = 108000.0 / max(30, self.leverage)
+
+        if lot <= 0.0:
+            self.live_verdict_lbl.setText(
+                "🤖 <b style='color:#60a5fa;'>Mode Auto-Pilot (0.00) :</b> Calcul par % de risque "
+                "(ouvrira <b>0.01 lot</b> sur un petit capital)."
+            )
+            return
+
+        risk_usd = lot * loss_per_lot
+        risk_pct = (risk_usd / self.capital) * 100.0 if self.capital > 0 else 0.0
+        req_margin = lot * margin_per_lot
+
+        if req_margin > self.margin_free * 0.75:
+            self.live_verdict_lbl.setText(
+                f"🚫 <b style='color:#f87171;'>Marge trop élevée (~{req_margin:.2f}$ > 75% de {self.margin_free:.2f}$) :</b> "
+                f"Le bot réduira automatiquement ce lot pour éviter le Margin Call."
+            )
+        elif risk_pct > 34.0:
+            self.live_verdict_lbl.setText(
+                f"⚠️ <b style='color:#fb923c;'>Risque élevé ({risk_usd:.2f}$ = {risk_pct:.1f}% du capital) :</b> "
+                f"Dépasse le plafond de sécurité (34%). Le bot réduira automatiquement le lot sur les gros Stop Loss."
+            )
+        elif risk_pct <= 7.5:
+            self.live_verdict_lbl.setText(
+                f"✅ <b style='color:#4ade80;'>PASSE OPTIMAL :</b> Risque estimé <b>{risk_usd:.2f}$ ({risk_pct:.1f}%)</b> "
+                f"| Gain R:R 1:2 : <b>+{risk_usd*2:.2f}$</b> | Marge : <b>~{req_margin:.2f}$</b>."
+            )
+        else:
+            self.live_verdict_lbl.setText(
+                f"⚡ <b style='color:#facc15;'>PASSE (Dynamique) :</b> Risque estimé <b>{risk_usd:.2f}$ ({risk_pct:.1f}%)</b> "
+                f"| Gain R:R 1:2 : <b>+{risk_usd*2:.2f}$</b> | Marge : <b>~{req_margin:.2f}$</b>."
+            )
+
+    def _accept_selected(self):
+        self.selected_lot = round(float(self.selected_lot_spin.value()), 2)
+        self.accept()
+
+    def _accept_auto(self):
+        self.selected_lot = 0.0
+        self.accept()
+
+
 class ConfigDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -287,8 +609,29 @@ class ConfigDialog(QDialog):
         self.fixed_lot_size_spin.setRange(0.0, 100.0)
         self.fixed_lot_size_spin.setSingleStep(0.01)
         self.fixed_lot_size_spin.setDecimals(2)
-        self.fixed_lot_size_spin.setValue(float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0)))
-        self.fixed_lot_size_spin.setToolTip("Volume fixe (ex: 0.1). Si 0.0, le robot calcule le volume en Auto-Pilot selon le % de risque.")
+        init_fixed_lot = float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0))
+        self.fixed_lot_size_spin.setValue(init_fixed_lot)
+        self.fixed_lot_size_spin.setToolTip("Volume fixe (ex: 0.04). Si 0.00, le robot calcule le volume en Auto-Pilot selon le % de risque.")
+
+        self.lot_mode_combo = QComboBox()
+        self.lot_mode_combo.addItem("🤖 Auto-Pilot (% du Capital)", "AUTO")
+        self.lot_mode_combo.addItem("⚖️ Lot Fixe (Calibré Capital)", "FIXED")
+        self.lot_mode_combo.setCurrentIndex(1 if init_fixed_lot > 0.0 else 0)
+        self.lot_mode_combo.currentIndexChanged.connect(self._on_lot_mode_toggled)
+
+        self.lot_advisor_btn = QPushButton("💡 Conseiller Lot selon Capital")
+        self.lot_advisor_btn.setCursor(Qt.PointingHandCursor)
+        self.lot_advisor_btn.setStyleSheet(
+            "background-color: #0284c7; color: white; font-weight: bold; padding: 4px 10px; border-radius: 4px;"
+        )
+        self.lot_advisor_btn.setToolTip("Ouvre une boîte de dialogue qui calcule quel Lot Fixe passe le mieux selon votre capital MT5.")
+        self.lot_advisor_btn.clicked.connect(self.open_lot_advisor_dialog)
+
+        fixed_lot_row = QHBoxLayout()
+        fixed_lot_row.setSpacing(6)
+        fixed_lot_row.addWidget(self.lot_mode_combo)
+        fixed_lot_row.addWidget(self.fixed_lot_size_spin)
+        fixed_lot_row.addWidget(self.lot_advisor_btn)
         
         
         self.daily_loss_spin = QDoubleSpinBox()
@@ -339,7 +682,7 @@ class ConfigDialog(QDialog):
         risk_layout.addRow("💎 Paliers de Capital :", self.auto_tier_cb)
         risk_layout.addRow("📊 Forcer Max Positions :", self.manual_max_pos_cb)
         risk_layout.addRow("Risque par trade :", self.risk_pct_spin)
-        risk_layout.addRow("Volume Fixe (0 = AutoPilot) :", self.fixed_lot_size_spin)
+        risk_layout.addRow("⚖️ Mode Volume / Lot Fixe :", fixed_lot_row)
         risk_layout.addRow("Perte max journalière :", self.daily_loss_spin)
         risk_layout.addRow("🏁 Objectif gain jour (%) :", self.daily_profit_pct_spin)
         risk_layout.addRow("🏁 Objectif gain jour ($ fixe) :", self.daily_profit_spin)
@@ -512,6 +855,45 @@ class ConfigDialog(QDialog):
             self.risk_pct_spin.setValue(2.5)
             self.daily_loss_spin.setValue(6.0)
             self.daily_profit_pct_spin.setValue(6.0)
+
+    def _on_lot_mode_toggled(self, _index: int):
+        mode = self.lot_mode_combo.currentData()
+        if mode == "AUTO":
+            self.fixed_lot_size_spin.setValue(0.0)
+        elif mode == "FIXED":
+            # Ouvre automatiquement la boîte de dialogue pour voir quel lot fixe passe le mieux selon le capital
+            self.open_lot_advisor_dialog()
+
+    def open_lot_advisor_dialog(self):
+        cap = 81.03
+        mf = 81.03
+        lev = 500
+        p = self.parent()
+        try:
+            if p and hasattr(p, 'orchestrator') and hasattr(p.orchestrator, 'mt5'):
+                acc = p.orchestrator.mt5.get_account_info() or {}
+                bal = float(acc.get('balance', 0.0) or 0.0)
+                eq = float(acc.get('equity', bal) or bal)
+                if bal > 0:
+                    cap = min(bal, eq) if eq > 0 else bal
+                    mf = float(acc.get('margin_free', cap) or cap)
+                    lev = int(acc.get('leverage', 500) or 500)
+        except Exception:
+            pass
+
+        dlg = FixedLotAdvisorDialog(
+            capital=cap,
+            margin_free=mf,
+            leverage=lev,
+            current_fixed_lot=self.fixed_lot_size_spin.value(),
+            parent=self,
+        )
+        if dlg.exec():
+            chosen = round(float(dlg.selected_lot), 2)
+            self.fixed_lot_size_spin.setValue(chosen)
+            self.lot_mode_combo.blockSignals(True)
+            self.lot_mode_combo.setCurrentIndex(1 if chosen > 0.0 else 0)
+            self.lot_mode_combo.blockSignals(False)
 
     def save_config(self):
         if 'risk_management' not in self.config:
@@ -1584,11 +1966,26 @@ class MainWindow(QMainWindow):
         self.sniper_toggle_btn.clicked.connect(self.on_toggle_sniper_mode)
         row2.addWidget(self.sniper_toggle_btn)
 
+        # Bouton Conseiller Lot Fixe (accès direct barre rapide)
+        self.quick_lot_btn = QPushButton("⚖️ LOT : AUTO")
+        self.quick_lot_btn.setFont(QFont("Arial", 9, QFont.Bold))
+        self.quick_lot_btn.setFixedHeight(28)
+        self.quick_lot_btn.setMinimumWidth(155)
+        self.quick_lot_btn.setCursor(Qt.PointingHandCursor)
+        self.quick_lot_btn.setToolTip(
+            "Cliquez pour ouvrir le Conseiller Lot Fixe :\n"
+            "• Voir quel Lot Fixe passe le mieux selon votre capital MT5\n"
+            "• Basculer entre Lot Dynamique (%) et Lot Fixe en 1 clic."
+        )
+        self.quick_lot_btn.clicked.connect(self.open_fixed_lot_advisor)
+        row2.addWidget(self.quick_lot_btn)
+
         row2.addStretch()
         profit_outer.addLayout(row2)
 
         self._refresh_tp_buttons(init_tp)
         self._refresh_sniper_button(is_sniper)
+        self._refresh_quick_lot_button()
 
         main_layout.addWidget(profit_bar)
         
@@ -3424,6 +3821,90 @@ class MainWindow(QMainWindow):
         else:
             self.append_to_chat("🏃 <b>Mode Trailing / Libre :</b> Aucun TP fixe en $, gain sécurisé dynamiquement.")
 
+    def _refresh_quick_lot_button(self):
+        """Met à jour le bouton Lot Fixe / Auto de la barre rapide."""
+        if not hasattr(self, 'quick_lot_btn'):
+            return
+        fixed_lot = float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0) or 0.0)
+        if fixed_lot > 0.0:
+            self.quick_lot_btn.setText(f"⚖️ LOT FIXE : {fixed_lot:.2f}")
+            self.quick_lot_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #0284c7;
+                    color: #ffffff;
+                    border: 2px solid #38bdf8;
+                    border-radius: 5px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #0369a1;
+                    border: 2px solid #7dd3fc;
+                }
+            """)
+        else:
+            self.quick_lot_btn.setText("⚖️ LOT : AUTO (%)")
+            self.quick_lot_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e222d;
+                    color: #38bdf8;
+                    border: 1px solid #0284c7;
+                    border-radius: 5px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #0f172a;
+                    color: #7dd3fc;
+                    border: 1px solid #38bdf8;
+                }
+            """)
+
+    def open_fixed_lot_advisor(self):
+        """Ouvre la boîte de dialogue Conseiller Lot Fixe depuis la fenêtre principale et applique le choix."""
+        cap = 81.03
+        mf = 81.03
+        lev = 500
+        try:
+            if getattr(self, 'orchestrator', None) and hasattr(self.orchestrator, 'mt5'):
+                acc = self.orchestrator.mt5.get_account_info() or {}
+                bal = float(acc.get('balance', 0.0) or 0.0)
+                eq = float(acc.get('equity', bal) or bal)
+                if bal > 0:
+                    cap = min(bal, eq) if eq > 0 else bal
+                    mf = float(acc.get('margin_free', cap) or cap)
+                    lev = int(acc.get('leverage', 500) or 500)
+        except Exception:
+            pass
+
+        curr_fixed = float(self.config.get('risk_management', {}).get('fixed_lot_size', 0.0) or 0.0)
+        dlg = FixedLotAdvisorDialog(
+            capital=cap,
+            margin_free=mf,
+            leverage=lev,
+            current_fixed_lot=curr_fixed,
+            parent=self,
+        )
+        if dlg.exec():
+            chosen = round(float(dlg.selected_lot), 2)
+            self._save_risk_param_to_config('fixed_lot_size', chosen)
+            if getattr(self, 'orchestrator', None) and getattr(self.orchestrator, 'risk', None):
+                self.orchestrator.risk.fixed_lot_size = chosen
+            if getattr(self, 'trade_execution', None):
+                self.trade_execution.fixed_lot_size = chosen
+            self._refresh_quick_lot_button()
+            self.update_tier_badge()
+
+            if chosen > 0.0:
+                self.append_to_chat(
+                    f"⚖️ <b>Mode Lot Fixe ACTIVÉ : {chosen:.2f} lot</b> (calibré sur capital de <b>{cap:.2f} $</b>).<br>"
+                    f"Le bot utilisera désormais <b>{chosen:.2f} lot</b> sur vos prochains trades au lieu de rester bloqué à 0.01 lot."
+                )
+            else:
+                self.append_to_chat(
+                    "🤖 <b>Mode Lot Dynamique ACTIVÉ (0.00) :</b> Le bot calcule le lot selon le % de risque par trade."
+                )
+
     def _refresh_sniper_button(self, is_sniper: bool):
         if not hasattr(self, 'sniper_toggle_btn'):
             return
@@ -3701,6 +4182,8 @@ class MainWindow(QMainWindow):
                     self.orchestrator.risk.apply_risk_profile(self.orchestrator.risk.risk_profile)
             if getattr(self, 'trade_execution', None):
                 self.trade_execution.allowed_trade_direction = dir_val
+                self.trade_execution.fixed_lot_size = float(rm.get('fixed_lot_size', 0.0))
+            self._refresh_quick_lot_button()
             self.update_tier_badge()
             
     def handle_chat_response(self, result):
@@ -3962,6 +4445,8 @@ class MainWindow(QMainWindow):
                     self.trade_execution.allowed_trade_direction = tr["allowed_trade_direction"]
                 if "automation_mode" in tr:
                     self.trade_execution.mode = tr["automation_mode"].lower()
+                if "fixed_lot_size" in rm:
+                    self.trade_execution.fixed_lot_size = float(rm["fixed_lot_size"])
 
             # Orchestrator
             if getattr(self, "orchestrator", None):
@@ -3990,6 +4475,8 @@ class MainWindow(QMainWindow):
                 self.quick_daily_spin.setValue(float(rm["daily_profit_target_usd"]))
                 self.quick_daily_spin.blockSignals(False)
 
+            if hasattr(self, "_refresh_quick_lot_button"):
+                self._refresh_quick_lot_button()
             if hasattr(self, "update_tier_badge"):
                 self.update_tier_badge()
 

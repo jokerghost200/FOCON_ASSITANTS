@@ -25,12 +25,9 @@ MAX_CONSECUTIVE_429 = 3           # abort OpenRouter after N consecutive 429 mod
 # Verified free model IDs (September 2026):
 # ─────────────────────────────────────────────────────────────────────────────
 FREE_OPENROUTER_MODELS = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
-    "qwen/qwen3.8-27b:free",
-    "z-ai/glm-5.2:free",
-    "inclusionai/ling-3.0-flash-fin:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
     "poolside/laguna-s-2.1:free",
     "nex-agi/nex-n2.5-pro:free",
     "dots-studio/dots-3-note-preview:free",
@@ -60,8 +57,8 @@ class OpenRouterAgent:
         self.groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY", "")
         self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
-        # Best-effort refresh of the free-model list so stale IDs don't stall scans
-        self._refresh_free_models()
+        # Mode 100% Local Rapide : pas d'appel HTTP bloquant au démarrage
+        # (la liste statique FREE_OPENROUTER_MODELS est utilisée directement si besoin)
 
     def _refresh_free_models(self):
         """
@@ -273,6 +270,11 @@ class OpenRouterAgent:
                 if 400 <= status < 500:
                     # Permanent error (stale model ID, invalid request, auth...) —
                     # no point retrying, move to the next model immediately.
+                    if status == 404 and model in FREE_OPENROUTER_MODELS:
+                        try:
+                            FREE_OPENROUTER_MODELS.remove(model)
+                        except ValueError:
+                            pass
                     logger.error(f"OpenRouter {status} [{model}]: {resp.text[:160]}. Skipping model.")
                     return None, False
                 resp.raise_for_status()

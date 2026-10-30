@@ -51,15 +51,54 @@ class ConfigAdvisor:
     def __init__(self, router):
         self.router = router
 
+    def _local_advise(self, user_message, context):
+        """Génère une recommandation 100% locale basée sur le capital MT5 réel (sans IA externe)."""
+        import math
+        acc = (context or {}).get("account") or {}
+        cfg = (context or {}).get("config") or {}
+        bal = float(acc.get("balance") or acc.get("equity") or 81.03)
+        rm = cfg.get("risk_management") or {}
+
+        # Calcul du lot fixe équilibré (~5% de risque sur un SL moyen de 10 pips = 100$/lot)
+        rec_lot = round(max(0.02, math.floor(((bal * 0.05) / 100.0) / 0.01 + 1e-9) * 0.01), 2)
+        rec_tp = round(max(2.0, rec_lot * 150.0), 1)
+        rec_daily = round(max(5.0, bal * 0.06), 1)
+
+        raw_changes = [
+            {
+                "section": "risk_management",
+                "key": "fixed_lot_size",
+                "value": rec_lot,
+                "reason": f"Lot fixe équilibré calibré localement pour votre capital de {bal:.2f} $.",
+            },
+            {
+                "section": "risk_management",
+                "key": "take_profit_target_per_trade_usd",
+                "value": rec_tp,
+                "reason": f"Cible TP adaptée à un volume de {rec_lot:.2f} lot.",
+            },
+            {
+                "section": "risk_management",
+                "key": "daily_profit_target_usd",
+                "value": rec_daily,
+                "reason": f"Objectif journalier réaliste (~6% de {bal:.2f} $).",
+            },
+        ]
+        changes = self.validate_changes(raw_changes, cfg)
+        reply = (
+            f"Analyse locale terminée sur votre capital de {bal:.2f} dollars. "
+            f"Je vous recommande un lot fixe équilibré de {rec_lot:.2f} lot et un objectif journalier de {rec_daily:.1f} dollars."
+        )
+        return {"reply": reply, "changes": changes}
+
     def advise(self, user_message, context):
         """Return a short reply plus safe, validated changes for user confirmation."""
+        if not self.router:
+            return self._local_advise(user_message, context)
         prompt = self._build_prompt(user_message, context)
         raw = self.router.ask_chat(prompt, system_prompt=self._system_prompt()) if self.router else None
         if not raw:
-            return {
-                "reply": "Je ne peux pas joindre le service IA pour le moment. Aucun réglage n'a été proposé ni modifié.",
-                "changes": [],
-            }
+            return self._local_advise(user_message, context)
 
         payload = self._parse_json(raw)
         if not isinstance(payload, dict):

@@ -350,6 +350,13 @@ class TradeManager:
 
         import time
         now = time.time()
+        if hasattr(self.mt5, 'get_server_time'):
+            try:
+                srv_t = self.mt5.get_server_time()
+                if isinstance(srv_t, (int, float)) and srv_t > 0:
+                    now = float(srv_t)
+            except Exception:
+                pass
 
         for o in orders:
             ticket = o.get('ticket')

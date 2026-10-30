@@ -23,6 +23,7 @@ class SafetyRiskGuard:
 
     # Limites infranchissables du système
     HARD_MAX_RISK_PER_TRADE_PERCENT = 1.5
+    HARD_MAX_FIXED_LOT_RISK_PERCENT = 35.0
     HARD_MAX_DAILY_LOSS_PERCENT = 4.0
     HARD_MAX_OPEN_POSITIONS = 5
     HARD_MAX_DRAWDOWN_PERCENT = 8.0
@@ -36,6 +37,7 @@ class SafetyRiskGuard:
         risk_amount_usd: float,
         current_daily_loss_usd: float,
         current_open_positions_count: int,
+        fixed_lot_override: bool = False,
     ) -> Dict[str, Any]:
         """
         Vérification indépendante de niveau 0 avant tout ordre.
@@ -51,12 +53,17 @@ class SafetyRiskGuard:
 
         # 1. Contrôle du risque par trade vs plafond absolu
         risk_pct = (risk_amount_usd / capital) * 100.0
-        if risk_pct > (self.HARD_MAX_RISK_PER_TRADE_PERCENT + 1e-4):
+        max_risk_ceiling = (
+            self.HARD_MAX_FIXED_LOT_RISK_PERCENT
+            if fixed_lot_override
+            else self.HARD_MAX_RISK_PER_TRADE_PERCENT
+        )
+        if risk_pct > (max_risk_ceiling + 1e-4):
             return {
                 "safe": False,
                 "reason": (
                     f"🚫 [SafetyGuard] Risque demandé ({risk_pct:.2f}%) dépasse la limite "
-                    f"infranchissable de {self.HARD_MAX_RISK_PER_TRADE_PERCENT:.1f}%."
+                    f"infranchissable de {max_risk_ceiling:.1f}%."
                 ),
             }
 

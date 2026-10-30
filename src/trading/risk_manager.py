@@ -253,16 +253,8 @@ class RiskManager:
             
             # Use fixed lot size if configured
             if hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0:
-                target_fixed = max(min_lot, min(self.fixed_lot_size, effective_max))
-                if getattr(self, 'strict_risk_ceiling', False) and (target_fixed * loss_per_lot) > (risk_amount * 1.05):
-                    logger.warning(
-                        f"⚠️ [Strict Risk Ceiling] Lot fixe ({self.fixed_lot_size}) plafonné à {calculated_lot} "
-                        f"pour respecter le budget maximal de ${risk_amount:.2f}."
-                    )
-                    final_lot = max(min_lot, min(calculated_lot, effective_max))
-                else:
-                    final_lot = target_fixed
-                    logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
+                final_lot = max(min_lot, min(self.fixed_lot_size, effective_max))
+                logger.info(f"Using fixed lot size: {final_lot} (Configured: {self.fixed_lot_size})")
             else:
                 final_lot = max(min_lot, min(calculated_lot, effective_max))
             
@@ -464,9 +456,8 @@ class RiskManager:
         # --- RÈGLE D'OR : LE CALCUL DU RISQUE EST INTRANSIGEANT ---
         is_fixed_lot = (hasattr(self, 'fixed_lot_size') and self.fixed_lot_size > 0.0) or bool(proposal.get('manual_lot_override'))
 
-        # Si strict_risk_ceiling est imposé, AUCUN lot (qu'il soit fixe, forcé ou issu du minimum broker)
-        # ne peut violer le plafond de perte monétaire autorisé.
-        should_enforce_risk = (not is_fixed_lot or getattr(self, 'strict_risk_ceiling', False)) and capital > 0
+        # Si l'utilisateur n'a PAS activé de lot fixe/manuel, le plafond de perte monétaire (%) est appliqué.
+        should_enforce_risk = (not is_fixed_lot) and capital > 0
 
         if should_enforce_risk:
             actual_risk_pct = (actual_risk_amount / capital) * 100.0
@@ -590,6 +581,27 @@ class RiskManager:
         # --- CONTRÔLE DE RISQUE ULTIME SUR VOLUME FINAL (FIXE OU AJUSTÉ) ---
         final_risk_amount = lot * loss_per_lot
         if is_fixed_lot:
+            # Si le lot fixe dépasse 34% du capital sur ce Stop Loss, on le réduit automatiquement au palier sécurisé (<= 34%)
+            max_safe_fixed_risk = capital * 0.34
+            if capital > 0 and loss_per_lot > 0 and final_risk_amount > max_safe_fixed_risk:
+                safe_lot_raw = max_safe_fixed_risk / loss_per_lot
+                safe_steps = math.floor(safe_lot_raw / lot_step + 1e-9)
+                safe_lot = round(safe_steps * lot_step, 2)
+                if safe_lot >= min_lot:
+                    logger.warning(
+                        f"⚠️ [Fixed Lot Auto-Cap] Lot fixe ({lot}) risquerait ${final_risk_amount:.2f} "
+                        f"(> 34% du capital ${capital:.2f}). Ajusté automatiquement à {safe_lot} lot(s)."
+                    )
+                    lot = safe_lot
+                    final_risk_amount = lot * loss_per_lot
+                else:
+                    return {
+                        "valid": False,
+                        "reason": (
+                            f"Lot fixe ({lot}) rejeté : même le lot minimum ({min_lot}) encourt un risque "
+                            f"(${min_lot * loss_per_lot:.2f}) supérieur à 34% du capital (${capital:.2f}) sur ce Stop Loss."
+                        )
+                    }
             # Sécurité absolue : un volume fixe ne doit JAMAIS dépasser le capital disponible du compte
             if capital > 0 and final_risk_amount >= capital:
                 return {
@@ -599,6 +611,7 @@ class RiskManager:
                         f"dépasse l'intégralité du capital disponible (${capital:.2f}). Ordre bloqué pour protection."
                     )
                 }
+            proposal['fixed_lot_override'] = True
             logger.info(f"🎯 [Fixed Lot Override] Volume effectif : {lot} lot(s). Risque calculé : ${final_risk_amount:.2f}.")
 
         digits = int(symbol_info.get('digits', 5) or 5)
@@ -606,6 +619,7 @@ class RiskManager:
         proposal['sl'] = round(sl, digits)
         proposal['tp'] = round(tp, digits)
         proposal['lot'] = lot
+        proposal['risk_amount_usd'] = round(final_risk_amount, 2)
         proposal['capital_allocated'] = capital
         
         return {"valid": True, "proposal": proposal}

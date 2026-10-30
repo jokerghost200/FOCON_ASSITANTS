@@ -54,6 +54,7 @@ class ElCentinela:
         risk_amount_usd: float,
         current_daily_loss_usd: float,
         current_open_positions_count: int,
+        fixed_lot_override: bool = False,
     ) -> Dict[str, Any]:
         """
         Vérification absolue de sécurité niveau 0 avant l'ouverture de toute position.
@@ -63,6 +64,7 @@ class ElCentinela:
             risk_amount_usd=risk_amount_usd,
             current_daily_loss_usd=current_daily_loss_usd,
             current_open_positions_count=current_open_positions_count,
+            fixed_lot_override=fixed_lot_override,
         )
 
     def verificar_promocion(

@@ -34,13 +34,15 @@ class AIOrchestrator:
         weights_engine=None,
         config: dict = None,
         fati=None,
+        use_external_ai: bool = False,
     ):
         self.mt5 = mt5_connector
         self.market_data = market_data
         self.tech = tech_indicators
         self.config = config or {}
         self.router = ai_router
-        self.live_news_enabled = live_news_enabled
+        self.use_external_ai = bool(use_external_ai)
+        self.live_news_enabled = bool(live_news_enabled and self.use_external_ai)
         self.order_block_scan_enabled = order_block_scan_enabled
         self.allowed_trade_direction = str(allowed_trade_direction or "BOTH").upper()
         self.trade_memory = trade_memory
@@ -268,17 +270,18 @@ class AIOrchestrator:
         {{"selected": ["SYMBOLE1", "SYMBOLE2"]}} (ou {{"selected": []}} si rien n'est bon).
         """
         has_ai = False
-        if hasattr(self.router, 'has_available_provider'):
-            has_ai = self.router.has_available_provider()
-        elif hasattr(self.router, 'status'):
-            st = self.router.status()
-            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+        if getattr(self, 'use_external_ai', False) and self.router is not None:
+            if hasattr(self.router, 'has_available_provider'):
+                has_ai = self.router.has_available_provider()
+            elif hasattr(self.router, 'status'):
+                st = self.router.status()
+                has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
 
         if has_ai:
             _emit(f"Sélection des meilleurs marchés parmi {len(tech_summaries)}...")
             response = self.router.ask_text(selection_prompt, stop_event=stop_event)
         else:
-            _emit(f"⚡ [Mode Rapide Cerveau Local] Sélection instantanée par scoring SMC...")
+            _emit(f"⚡ [Cerveaux Locaux FATI] Sélection quantitative instantanée par confluences SMC...")
             response = None
         
         def _score_setup(s):
@@ -330,9 +333,9 @@ class AIOrchestrator:
 
         _emit(f"Marchés sélectionnés (A+ seulement) : {selected_symbols}")
 
-        # 4. Deep analysis for selected markets
+        # 4. Deep analysis for selected markets (100% synchrone et instantané en mode Cerveau Local)
         results = []
-        if ai_queue is not None:
+        if ai_queue is not None and has_ai:
             _emit("Mise en file d'attente de l'analyse IA (Asynchrone)...")
             for sym in selected_symbols:
                 ai_queue.put((sym, timeframe, dir_filter_upper))
@@ -349,7 +352,7 @@ class AIOrchestrator:
                             break
                         time.sleep(1)
                     
-                _emit(f"Analyse approfondie de {sym} ({i+1}/{len(selected_symbols)})...")
+                _emit(f"⚡ Analyse locale FATI de {sym} ({i+1}/{len(selected_symbols)})...")
                 res = self.analyze_symbol(sym, timeframe, stop_event=stop_event, direction_filter=dir_filter_upper)
                 results.append(res)
 
@@ -917,18 +920,20 @@ class AIOrchestrator:
         """
         
         has_ai = False
-        if hasattr(self.router, 'has_available_provider'):
-            has_ai = self.router.has_available_provider()
-        elif hasattr(self.router, 'status'):
-            st = self.router.status()
-            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+        has_ai = False
+        if getattr(self, 'use_external_ai', False) and self.router is not None:
+            if hasattr(self.router, 'has_available_provider'):
+                has_ai = self.router.has_available_provider()
+            elif hasattr(self.router, 'status'):
+                st = self.router.status()
+                has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
 
         response = None
         if has_ai:
             logger.info("Asking AI router for trade decision...")
             response = self.router.ask_text(prompt, system_prompt=system_prompt, stop_event=stop_event)
         else:
-            logger.info(f"⚡ [Cerveau Local Rapide] Bypassement IA externe pour {symbol} -> Analyse quantitative instantanée.")
+            logger.info(f"⚡ [Cerveaux Locaux FATI] Décision 100% autonome locale pour {symbol} (sans IA externe).")
         
         decision = None
         if response:
@@ -1110,12 +1115,20 @@ class AIOrchestrator:
             daily_loss = min(0.0, float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0))
             open_count = len(self.mt5.get_open_positions() or [])
             risk_usd = float(proposal.get('risk_amount_usd', 0.0) or (capital * 0.01))
-            sec = self.centinela.evaluar_seguridad(
-                capital=capital,
-                risk_amount_usd=risk_usd,
-                current_daily_loss_usd=daily_loss,
-                current_open_positions_count=open_count,
+            is_fixed_lot = bool(
+                proposal.get('fixed_lot_override')
+                or proposal.get('manual_lot_override')
+                or (getattr(self.risk, 'fixed_lot_size', 0.0) or 0.0) > 0.0
             )
+            sec_kwargs = {
+                "capital": capital,
+                "risk_amount_usd": risk_usd,
+                "current_daily_loss_usd": daily_loss,
+                "current_open_positions_count": open_count,
+            }
+            if is_fixed_lot:
+                sec_kwargs["fixed_lot_override"] = True
+            sec = self.centinela.evaluar_seguridad(**sec_kwargs)
             if not sec.get('safe', False):
                 logger.critical(f"🛑 [El Centinela] Ordre bloqué pour {symbol} : {sec.get('reason')}")
                 return {"error": f"El Centinela safety rejection: {sec.get('reason')}"}
@@ -1203,11 +1216,12 @@ class AIOrchestrator:
         """
 
         has_ai = False
-        if hasattr(self.router, 'has_available_provider'):
-            has_ai = self.router.has_available_provider()
-        elif hasattr(self.router, 'status'):
-            st = self.router.status()
-            has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
+        if getattr(self, 'use_external_ai', False) and self.router is not None:
+            if hasattr(self.router, 'has_available_provider'):
+                has_ai = self.router.has_available_provider()
+            elif hasattr(self.router, 'status'):
+                st = self.router.status()
+                has_ai = any(v.get('available') for k, v in st.items() if k in ('openrouter', 'gemini'))
 
         response = None
         if has_ai:
@@ -1373,11 +1387,19 @@ class AIOrchestrator:
                     logger.warning(f"[OB Rescan] {symbol}: Risk validation failed — {validation['reason']}")
                     continue
 
+                economic_context = None
+                if self.economista:
+                    try:
+                        economic_context = self.economista.analizar_contexto_economico(symbol)
+                    except Exception as _ece:
+                        logger.warning(f"[OB Rescan] Erreur analyse économique pour {symbol}: {_ece}")
+
                 results.append({
                     "status": "OB_SIGNAL",
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "decision": validation['proposal'],
+                    "economic_context": economic_context,
                     "ob_summary": best_ob.summary(),
                 })
 
@@ -1674,11 +1696,19 @@ class AIOrchestrator:
                     notes=reason_text,
                 )
 
+                economic_context = None
+                if self.economista:
+                    try:
+                        economic_context = self.economista.analizar_contexto_economico(symbol)
+                    except Exception as _ece:
+                        logger.warning(f"[CRT SCAN] Erreur analyse économique pour {symbol}: {_ece}")
+
                 results.append({
                     "status": status_tag,
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "decision": validation['proposal'],
+                    "economic_context": economic_context,
                     "crt_data": crt_setup,
                     "order_flow": of_confluence,
                     "htf": htf,

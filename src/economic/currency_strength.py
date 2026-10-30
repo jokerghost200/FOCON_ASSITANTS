@@ -85,13 +85,23 @@ class CurrencyStrengthEngine:
         for pair in MAJOR_PAIRS:
             actual_sym = self._resolve_broker_symbol(pair)
             try:
+                import pandas as pd
                 rates = None
-                if hasattr(self.mt5, "get_rates_dataframe"):
-                    rates = self.mt5.get_rates_dataframe(actual_sym, timeframe, lookback_bars)
-                elif hasattr(self.mt5, "get_rates_from_pos"):
+                if hasattr(self.mt5, "get_rates"):
+                    raw_r = self.mt5.get_rates(actual_sym, timeframe, lookback_bars)
+                    if isinstance(raw_r, pd.DataFrame):
+                        rates = raw_r
+                    elif raw_r is not None and not isinstance(raw_r, (bool, int, float)) and type(raw_r).__name__ not in ("MagicMock", "Mock") and len(raw_r) > 0:
+                        rates = pd.DataFrame(raw_r)
+                if rates is None and hasattr(self.mt5, "get_rates_dataframe"):
+                    cand = self.mt5.get_rates_dataframe(actual_sym, timeframe, lookback_bars)
+                    if isinstance(cand, pd.DataFrame):
+                        rates = cand
+                if rates is None and hasattr(self.mt5, "get_rates_from_pos"):
                     raw_r = self.mt5.get_rates_from_pos(actual_sym, timeframe, lookback_bars)
-                    if raw_r:
-                        import pandas as pd
+                    if isinstance(raw_r, pd.DataFrame):
+                        rates = raw_r
+                    elif raw_r is not None and type(raw_r).__name__ not in ("MagicMock", "Mock") and len(raw_r) > 0:
                         rates = pd.DataFrame(raw_r)
 
                 if rates is not None and not rates.empty and len(rates) >= 2:

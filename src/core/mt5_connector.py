@@ -544,8 +544,20 @@ class MT5Connector:
         else:
             type_filling = mt5.ORDER_FILLING_RETURN
 
-        import datetime
-        expiration_time = int((datetime.datetime.now() + datetime.timedelta(seconds=expiration_seconds)).timestamp())
+        # Récupération de l'heure serveur MT5 pour éviter le décalage de fuseau horaire (ex: PC GMT+1 vs Broker GMT+3)
+        server_time = 0.0
+        try:
+            server_time = float(self.get_server_time())
+        except Exception:
+            server_time = 0.0
+        if server_time <= 0:
+            import time
+            server_time = time.time()
+
+        expiration_time = int(server_time + max(300, int(expiration_seconds)))
+
+        exp_mode = getattr(symbol_info, 'expiration_mode', 15) if symbol_info else 15
+        can_specify_time = bool(exp_mode & getattr(mt5, 'SYMBOL_EXPIRATION_SPECIFIED', 4))
 
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
@@ -558,10 +570,11 @@ class MT5Connector:
             "deviation": 20,
             "magic": 123456,
             "comment": comment,
-            "type_time": mt5.ORDER_TIME_SPECIFIED,
-            "expiration": expiration_time,
+            "type_time": mt5.ORDER_TIME_SPECIFIED if can_specify_time else mt5.ORDER_TIME_GTC,
             "type_filling": type_filling,
         }
+        if can_specify_time:
+            request["expiration"] = expiration_time
 
         with MT5Connector._lock:
             result = mt5.order_send(request)
@@ -614,6 +627,7 @@ class MT5Connector:
         Each order is returned as a dict with key fields.
         """
         if not self.connected:
+            self._last_orders_get_ok = False
             return []
 
         with MT5Connector._lock:
@@ -623,7 +637,10 @@ class MT5Connector:
                 orders = mt5.orders_get()
 
         if orders is None:
+            self._last_orders_get_ok = False
             return []
+
+        self._last_orders_get_ok = True
 
         order_list = []
         for o in orders:
