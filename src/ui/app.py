@@ -1980,12 +1980,28 @@ class MainWindow(QMainWindow):
         self.quick_lot_btn.clicked.connect(self.open_fixed_lot_advisor)
         row2.addWidget(self.quick_lot_btn)
 
+        # Bouton Mode Crypto Week-End (Cerveau Spécialiste Crypto 24/7)
+        self.crypto_wknd_btn = QPushButton("🪙 CRYPTO WEEK-END")
+        self.crypto_wknd_btn.setFont(QFont("Arial", 9, QFont.Bold))
+        self.crypto_wknd_btn.setCheckable(True)
+        self.crypto_wknd_btn.setFixedHeight(28)
+        self.crypto_wknd_btn.setMinimumWidth(165)
+        self.crypto_wknd_btn.setCursor(Qt.PointingHandCursor)
+        self.crypto_wknd_btn.setToolTip(
+            "Mode Spécialiste Crypto Week-End ('El Criptógrafo') :\n"
+            "• Bascule le scanner uniquement sur les Cryptos 24/7 (BTCUSD, ETHUSD, SOLUSD, XRPUSD...)\n"
+            "• Active la détection des Whale Liquidation Sweeps, CME Anchor & protection Anti-Bull/Bear Trap."
+        )
+        self.crypto_wknd_btn.clicked.connect(self.on_toggle_crypto_weekend_mode)
+        row2.addWidget(self.crypto_wknd_btn)
+
         row2.addStretch()
         profit_outer.addLayout(row2)
 
         self._refresh_tp_buttons(init_tp)
         self._refresh_sniper_button(is_sniper)
         self._refresh_quick_lot_button()
+        self._refresh_crypto_weekend_button()
 
         main_layout.addWidget(profit_bar)
         
@@ -4477,6 +4493,8 @@ class MainWindow(QMainWindow):
 
             if hasattr(self, "_refresh_quick_lot_button"):
                 self._refresh_quick_lot_button()
+            if hasattr(self, "_refresh_crypto_weekend_button"):
+                self._refresh_crypto_weekend_button()
             if hasattr(self, "update_tier_badge"):
                 self.update_tier_badge()
 
@@ -4491,6 +4509,71 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.exception("Erreur lors de l'application des réglages")
             self.append_to_chat(f"❌ <b>Erreur application réglages :</b> {e}")
+
+    def _refresh_crypto_weekend_button(self):
+        """Met à jour l'état visuel du bouton Mode Crypto Week-End."""
+        if not hasattr(self, "crypto_wknd_btn"):
+            return
+        allowed = self.config.get("trading", {}).get("allowed_market_types", []) or []
+        allowed_lower = [str(a).lower() for a in allowed]
+        is_crypto_only = (allowed_lower == ["crypto"])
+        self.crypto_wknd_btn.blockSignals(True)
+        self.crypto_wknd_btn.setChecked(is_crypto_only)
+        self.crypto_wknd_btn.blockSignals(False)
+        if is_crypto_only:
+            self.crypto_wknd_btn.setText("🪙 CRYPTO WEEK-END : ON")
+            self.crypto_wknd_btn.setStyleSheet(
+                "QPushButton { background-color: #f59e0b; color: #0f172a; font-weight: bold; "
+                "border: 1px solid #fbbf24; border-radius: 5px; padding: 2px 10px; }"
+                "QPushButton:hover { background-color: #fbbf24; }"
+            )
+        else:
+            self.crypto_wknd_btn.setText("🪙 CRYPTO WEEK-END : OFF")
+            self.crypto_wknd_btn.setStyleSheet(
+                "QPushButton { background-color: #1e293b; color: #fbbf24; font-weight: bold; "
+                "border: 1px solid #f59e0b; border-radius: 5px; padding: 2px 10px; }"
+                "QPushButton:hover { background-color: #334155; color: #ffffff; }"
+            )
+
+    def on_toggle_crypto_weekend_mode(self, checked: bool = False):
+        """Bascule en 1 clic entre le Mode 100% Crypto Week-End et le Mode Standard (Forex + Crypto)."""
+        if "trading" not in self.config:
+            self.config["trading"] = {}
+        syms = list(self.config["trading"].get("symbols", []) or [])
+        for c_sym in ("BTCUSD", "ETHUSD", "SOLUSD"):
+            if c_sym not in syms:
+                syms.append(c_sym)
+        self.config["trading"]["symbols"] = syms
+
+        if checked:
+            self.config["trading"]["allowed_market_types"] = ["Crypto"]
+            msg = (
+                "🪙 <b>[Cerveau Crypto Week-End ACTIVÉ]</b> : Le bot cible désormais <b>uniquement les Cryptomonnaies 24/7</b> "
+                "(BTCUSD, ETHUSD, SOLUSD...) avec détection des <i>Whale Liquidation Sweeps</i>, aimant <i>CME Anchor</i> "
+                "et filtre <i>Anti-Bull/Bear Trap</i>."
+            )
+            voice_msg = "Mode Crypto Week-End activé. Le cerveau se concentre sur les cryptomonnaies vingt-quatre heures sur vingt-quatre."
+        else:
+            self.config["trading"]["allowed_market_types"] = ["Forex", "Crypto"]
+            msg = "🌍 <b>[Mode Standard Semaine ACTIVÉ]</b> : Marchés <b>Forex + Crypto</b> autorisés."
+            voice_msg = "Mode standard Forex et Crypto réactivé."
+
+        try:
+            from pathlib import Path
+            import yaml
+            cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "config.yaml"
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                yaml.dump(self.config, f, allow_unicode=True, sort_keys=False)
+        except Exception:
+            pass
+
+        self._refresh_crypto_weekend_button()
+        self.append_to_chat(msg)
+        if hasattr(self, "voice_manager") and self.voice_manager and not self.voice_manager.is_muted:
+            try:
+                self.voice_manager.speak(voice_msg)
+            except Exception:
+                pass
 
     def _audit_advisor_action(self, status: str, proposal: dict, error: str = ""):
         from datetime import datetime, timezone

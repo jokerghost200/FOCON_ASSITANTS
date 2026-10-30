@@ -116,6 +116,8 @@ class ElEstratega:
         liq_info = None
         vsa_info = None
         mtf_info = None
+        zz_frac_info = None
+        crypto_info = None
         if observation:
             tech_features = observation.get("tech_features", tech_features)
             amd_context = observation.get("amd", amd_context)
@@ -124,6 +126,8 @@ class ElEstratega:
             liq_info = observation.get("liquidity_pools")
             vsa_info = observation.get("vsa_volume")
             mtf_info = observation.get("mtf_alignment")
+            zz_frac_info = observation.get("zigzag_fractal")
+            crypto_info = observation.get("crypto_weekend")
             if "regimen" in observation and htf_trend == "Unknown":
                 htf_trend = observation.get("regimen_diagnostic", {}).get("bias", htf_trend)
 
@@ -246,7 +250,39 @@ class ElEstratega:
                 mtf_mod = float(mtf_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
                 if mtf_mod != 0.0:
                     total_obs_mod += mtf_mod
-                    obs_tags.append(mtf_info.get("state", "MTF"))
+                    obs_tags.append(mtf_info.get("state") or mtf_info.get("alignment") or "MTF")
+
+            # 5f. Structure ZigZag (HH/HL vs LH/LL) & Fractales de Williams
+            if zz_frac_info and isinstance(zz_frac_info, dict):
+                zz_mod = float(zz_frac_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if zz_mod != 0.0:
+                    total_obs_mod += zz_mod
+                    obs_tags.append(zz_frac_info.get("label", "ZigZag/Fractal"))
+
+            # 5g. Cerveau Spécialiste Crypto Week-End ('El Criptógrafo')
+            if crypto_info and isinstance(crypto_info, dict) and crypto_info.get("active"):
+                cr_mod = float(crypto_info.get("buy_bonus" if act_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                if cr_mod != 0.0:
+                    total_obs_mod += cr_mod
+                    obs_tags.append(crypto_info.get("label", "Crypto Week-End"))
+
+                # Protection Volatilité Crypto : SL minimum de 1.5x ATR pour éviter les mèches de liquidation
+                atr_c = float((tech_features or {}).get("atr_14") or 0.0)
+                entry_c = float(decision.get("entry") or 0.0)
+                sl_c = float(decision.get("sl") or 0.0)
+                tp_c = float(decision.get("tp") or 0.0)
+                if atr_c > 0 and entry_c > 0 and sl_c > 0:
+                    min_crypto_sl = atr_c * 1.5
+                    curr_sl_dist = abs(entry_c - sl_c)
+                    if curr_sl_dist < min_crypto_sl:
+                        if act_dir == "BUY":
+                            decision["sl"] = round(entry_c - min_crypto_sl, 2)
+                            if abs(tp_c - entry_c) < min_crypto_sl * 1.8:
+                                decision["tp"] = round(entry_c + min_crypto_sl * 2.0, 2)
+                        else:
+                            decision["sl"] = round(entry_c + min_crypto_sl, 2)
+                            if abs(entry_c - tp_c) < min_crypto_sl * 1.8:
+                                decision["tp"] = round(entry_c - min_crypto_sl * 2.0, 2)
 
             if total_obs_mod != 0.0:
                 new_conf = max(10.0, min(98.0, float(decision.get("confidence", 50.0) or 50.0) + total_obs_mod))

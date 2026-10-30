@@ -128,7 +128,16 @@ class MT5Connector:
             return mt5.symbol_info(symbol)._asdict()
 
     def get_visible_symbols(self, allowed_types: list = None) -> list:
-        """Returns a list of all symbols currently visible in the MT5 Market Watch."""
+        """Returns a list of all symbols currently visible in the MT5 Market Watch (auto-switches to Crypto on weekends if needed)."""
+        import datetime
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        wd = now_utc.weekday()
+        is_weekend = (wd == 4 and (now_utc.hour > 21 or (now_utc.hour == 21 and now_utc.minute >= 45))) or (wd == 5) or (wd == 6 and now_utc.hour < 21)
+
+        eff_allowed = list(allowed_types) if allowed_types else None
+        if is_weekend and eff_allowed and not any(str(a).lower() == "crypto" for a in eff_allowed):
+            eff_allowed.append("Crypto")
+
         with MT5Connector._lock:
             if not self.connected:
                 return []
@@ -138,13 +147,29 @@ class MT5Connector:
 
             visible_symbols = []
             for s in symbols:
+                path_lower = s.path.lower() if hasattr(s, 'path') else ""
+                is_cr = self.is_crypto(s.name, path_lower)
                 if s.visible:
-                    if allowed_types:
-                        path_lower = s.path.lower() if hasattr(s, 'path') else ""
-                        if any(allowed.lower() in path_lower for allowed in allowed_types):
+                    if eff_allowed:
+                        allowed_lower = [str(a).lower() for a in eff_allowed]
+                        if any(al in path_lower for al in allowed_lower) or ("crypto" in allowed_lower and is_cr):
                             visible_symbols.append(s.name)
                     else:
                         visible_symbols.append(s.name)
+
+            # Si on est le week-end ou en mode Crypto et qu'aucune paire Crypto n'est visible dans le Market Watch,
+            # activer automatiquement les principales cryptos disponibles chez le broker
+            has_crypto_in_list = any(self.is_crypto(sym) for sym in visible_symbols)
+            wants_crypto = is_weekend or (eff_allowed and any(str(a).lower() == "crypto" for a in eff_allowed))
+            if wants_crypto and not has_crypto_in_list:
+                preferred_cryptos = ("BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BNBUSD", "ADAUSD", "DOGEUSD", "LTCUSD")
+                for s in symbols:
+                    s_up = s.name.upper()
+                    if any(s_up.startswith(pc) for pc in preferred_cryptos):
+                        if mt5.symbol_select(s.name, True):
+                            visible_symbols.append(s.name)
+                        if len(visible_symbols) >= 12:
+                            break
 
             return visible_symbols
 
@@ -155,7 +180,16 @@ class MT5Connector:
         """
         if not allowed_types:
             return True
-            
+
+        import datetime
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        wd = now_utc.weekday()
+        is_weekend = (wd == 4 and (now_utc.hour > 21 or (now_utc.hour == 21 and now_utc.minute >= 45))) or (wd == 5) or (wd == 6 and now_utc.hour < 21)
+
+        eff_allowed = [str(a).lower() for a in allowed_types]
+        if is_weekend and "crypto" not in eff_allowed:
+            eff_allowed.append("crypto")
+
         with MT5Connector._lock:
             if not self.connected:
                 return True
@@ -165,18 +199,15 @@ class MT5Connector:
             path = getattr(info, 'path', '') or ''
 
         path_lower = path.lower()
+        is_cr = self.is_crypto(symbol, path_lower)
+        if "crypto" in eff_allowed and is_cr:
+            return True
         if path_lower:
-            return any(str(allowed).lower() in path_lower for allowed in allowed_types)
+            return any(al in path_lower for al in eff_allowed)
 
         # Fallback heuristique si le courtier ne fournit pas de chemin hiérarchique
         sym = symbol.upper()
-        crypto_roots = {"BTC", "ETH", "SOL", "ADA", "DOGE", "AVAX", "DOT", "LTC", "LNK", "LINK", "XLM", "BCH", "BNB", "MATIC", "XRP", "SHIB", "NEAR", "UNI"}
-        is_crypto = any(sym.startswith(c) or c in sym for c in crypto_roots)
-
-        allowed_lower = [str(a).lower() for a in allowed_types]
-        if "crypto" in allowed_lower and is_crypto:
-            return True
-        if "forex" in allowed_lower and not is_crypto:
+        if "forex" in eff_allowed and not is_cr:
             fiat_currencies = {"EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
             if len(sym) >= 6 and (sym[:3] in fiat_currencies or sym[3:6] in fiat_currencies):
                 return True

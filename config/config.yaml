@@ -10,6 +10,8 @@ trading:
   - BTCUSD
   - US30
   - NAS100
+  - ETHUSD
+  - SOLUSD
   timeframes:
   - M15
   - H1
@@ -20,6 +22,7 @@ trading:
   post_trade_ob_rescan_enabled: false
   allowed_market_types:
   - Forex
+  - Crypto
 crt:
   enabled: true
   htf: H1
