@@ -904,6 +904,25 @@ class ElObservador:
             candles_df=df,
             atr=atr_val,
         )
+        raw_qual = (
+            of_confluence.get("data_quality")
+            if isinstance(of_confluence, dict)
+            else getattr(of_confluence, "data_quality", "UNAVAILABLE")
+        )
+        is_conf = (
+            of_confluence.get("is_confirmed")
+            if isinstance(of_confluence, dict)
+            else getattr(of_confluence, "is_confirmed", False)
+        )
+        of_quality = str(getattr(raw_qual, "value", raw_qual) or "UNAVAILABLE").upper()
+        if "REAL" in of_quality and is_conf:
+            of_status = "ORDER_FLOW_CONFIRMED"
+        elif "ESTIMATED" in of_quality:
+            of_status = "ORDER_FLOW_ESTIMATED"
+        elif "STALE" in of_quality or "DEGRADED" in of_quality:
+            of_status = "ORDER_FLOW_STALE"
+        else:
+            of_status = "ORDER_FLOW_UNAVAILABLE"
 
         return {
             "symbol": symbol,
@@ -912,6 +931,7 @@ class ElObservador:
             "regimen_diagnostic": regime,
             "amd": amd,
             "order_flow": of_confluence,
+            "order_flow_status": of_status,
             "tech_features": tech_features,
             "killzone": killzone,
             "premium_discount": premium_discount,

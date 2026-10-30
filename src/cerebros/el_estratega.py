@@ -309,8 +309,14 @@ class ElEstratega:
                             if abs(entry_c - tp_c) < min_crypto_sl * 1.8:
                                 decision["tp"] = round(entry_c - min_crypto_sl * 2.0, 2)
 
-            if total_obs_mod != 0.0:
-                new_conf = max(10.0, min(98.0, float(decision.get("confidence", 50.0) or 50.0) + total_obs_mod))
+            base_conf = float(decision.get("confidence", 50.0) or 50.0)
+            decision["base_confidence"] = round(base_conf, 1)
+            # Plafond anti-inflation des bonus positifs (+12.0 max), pénalités négatives non plafonnées
+            eff_obs_mod = min(12.0, total_obs_mod) if total_obs_mod > 0.0 else total_obs_mod
+            decision["technical_bonus_raw"] = round(total_obs_mod, 1)
+            decision["technical_bonus_applied"] = round(eff_obs_mod, 1)
+            if eff_obs_mod != 0.0:
+                new_conf = max(10.0, min(95.0, base_conf + eff_obs_mod))
                 decision["confidence"] = round(new_conf, 1)
                 if new_conf < 60.0:
                     decision["action"] = "WAIT"
@@ -320,6 +326,11 @@ class ElEstratega:
             if obs_tags:
                 decision["reason"] = f"{decision.get('reason', '')} [{' | '.join(obs_tags)}]"
 
+        if observation and isinstance(observation, dict):
+            decision["order_flow_status"] = observation.get("order_flow_status", "ORDER_FLOW_UNAVAILABLE")
+        decision["probability_status"] = (
+            "CALIBRATED" if decision.get("calibrated_win_prob") is not None else "UNCALIBRATED_HEURISTIC"
+        )
         decision["cerebro_origen"] = "El Estratega"
         return decision
 

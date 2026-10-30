@@ -118,19 +118,34 @@ class ElInvestigador:
             "status": "COMPLETED",
         }
 
-        # 1. Récupération des trades fermés récents
+        # 1. Récupération des trades fermés récents (triés strictement par ordre chronologique ASC)
         trades = []
         if sabio and hasattr(sabio, "journal"):
-            trades = sabio.journal.get_closed_trades(limit=100) or []
+            raw_trades = sabio.journal.get_closed_trades(limit=100) or []
+            trades = sorted(raw_trades, key=lambda t: (str(t.get("timestamp") or ""), int(t.get("id") or 0)))
 
-        # 2. Détection de patterns toxiques
+        # 2. Séparation stricte In-Sample (50% anciens pour découverte) / Out-of-Sample (50% récents pour validation)
         toxic = []
-        if sabio and hasattr(sabio, "detectar_patrones_toxicos"):
+        if len(trades) >= 20:
+            split_idx = max(10, len(trades) // 2)
+            in_sample_trades = trades[:split_idx]
+            # Détection de patterns toxiques uniquement sur la fenêtre In-Sample (zéro fuite du futur)
+            regime_stats: Dict[str, List[float]] = {}
+            for tr in in_sample_trades:
+                reg = str(tr.get("regime") or "UNKNOWN")
+                regime_stats.setdefault(reg, []).append(float(tr.get("pnl_r", 0.0) or 0.0))
+            for reg, pnls in regime_stats.items():
+                if len(pnls) >= 3:
+                    wins = sum(1 for p in pnls if p > 0)
+                    wr = wins / len(pnls)
+                    if wr <= 0.35:
+                        toxic.append({"regime": reg, "sample_size": len(pnls), "win_rate": round(wr, 3)})
+        elif sabio and hasattr(sabio, "detectar_patrones_toxicos"):
             toxic = sabio.detectar_patrones_toxicos(min_sample=3, max_win_rate=0.35)
 
         hypotheses = self.generar_hipotesis(toxic if toxic else None)
         report["hypotheses_generated"] = len(hypotheses)
-        logger.info(f"💡 [El Investigador] {len(hypotheses)} hypothèse(s) formulée(s).")
+        logger.info(f"💡 [El Investigador] {len(hypotheses)} hypothèse(s) formulée(s) (ordre chronologique strict).")
 
         # 3. Test des hypothèses sur le jeu de données si suffisant
         if len(trades) >= 20:

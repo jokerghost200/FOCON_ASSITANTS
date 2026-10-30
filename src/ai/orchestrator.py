@@ -729,13 +729,23 @@ class AIOrchestrator:
                                 },
                             }
 
+                    # Évaluation de la confiance Pro Trader via El Observador & El Estratega (au lieu d'un 95% fixe)
+                    pro_base_conf = 78.0
+                    if self.observador and hasattr(self.observador, "analizar_accion_del_precio_velas"):
+                        cv_p = self.observador.analizar_accion_del_precio_velas(df, atr=atr_p)
+                        p_dir = str(pro_signal.direction).upper()
+                        c_bonus = float(cv_p.get("buy_bonus" if p_dir == "BUY" else "sell_bonus", 0.0) or 0.0)
+                        pro_base_conf = max(62.0, min(90.0, pro_base_conf + min(12.0, c_bonus)))
+
                     logger.info(
                         f"👑 [Copie {pro_signal.trader}] Signal {pro_signal.direction} validé sur {symbol} "
-                        f"(Mode {active_mode.upper()}). Entry={pro_signal.entry}, SL={pro_signal.sl}, TP={pro_signal.tp}"
+                        f"(Mode {active_mode.upper()}, Conf={pro_base_conf:.1f}%). Entry={pro_signal.entry}, SL={pro_signal.sl}, TP={pro_signal.tp}"
                     )
                     pro_decision = {
                         "action": pro_signal.direction,
-                        "confidence": 95,
+                        "confidence": round(pro_base_conf, 1),
+                        "base_confidence": 78.0,
+                        "probability_status": "UNCALIBRATED_HEURISTIC",
                         "entry": pro_signal.entry,
                         "sl": pro_signal.sl,
                         "tp": pro_signal.tp,
@@ -1187,6 +1197,13 @@ class AIOrchestrator:
 
             
         if decision.get('action') == 'WAIT':
+            if self.sabio and hasattr(self.sabio, "registrar_decision"):
+                try:
+                    decision["symbol"] = symbol
+                    decision["timeframe"] = timeframe
+                    decision["fati_decision_id"] = self.sabio.registrar_decision(decision, is_executed=False)
+                except Exception:
+                    pass
             return {"status": "WAIT", "decision": decision}
             
         # 4. Risk and Lot Size
@@ -1209,8 +1226,11 @@ class AIOrchestrator:
             eq = float(account_info.get('equity', 0.0) or 0.0)
             capital = min(bal, eq) if eq > 0 else bal
             daily_loss = min(0.0, float(getattr(self.mt5, 'get_daily_profit', lambda: 0.0)() or 0.0))
-            open_count = len(self.mt5.get_open_positions() or [])
+            open_pos_raw = self.mt5.get_open_positions() or []
+            open_count = len(open_pos_raw)
             risk_usd = float(proposal.get('risk_amount_usd', 0.0) or (capital * 0.01))
+            # Estimation du risque latent cumulé sur les positions déjà ouvertes
+            open_risk_usd = open_count * max(risk_usd, capital * 0.01)
             is_fixed_lot = bool(
                 proposal.get('fixed_lot_override')
                 or proposal.get('manual_lot_override')
@@ -1221,6 +1241,7 @@ class AIOrchestrator:
                 "risk_amount_usd": risk_usd,
                 "current_daily_loss_usd": daily_loss,
                 "current_open_positions_count": open_count,
+                "open_positions_risk_usd": open_risk_usd,
             }
             if is_fixed_lot:
                 sec_kwargs["fixed_lot_override"] = True

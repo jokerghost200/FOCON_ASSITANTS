@@ -55,17 +55,36 @@ class ElCentinela:
         current_daily_loss_usd: float,
         current_open_positions_count: int,
         fixed_lot_override: bool = False,
+        open_positions_risk_usd: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Vérification absolue de sécurité niveau 0 avant l'ouverture de toute position.
+        Inclut également le plafond de risque cumulé du portefeuille (open_positions_risk_usd + risk_amount_usd).
         """
-        return self.risk_guard.validate_proposal_safety(
+        res = self.risk_guard.validate_proposal_safety(
             capital=capital,
             risk_amount_usd=risk_amount_usd,
             current_daily_loss_usd=current_daily_loss_usd,
             current_open_positions_count=current_open_positions_count,
             fixed_lot_override=fixed_lot_override,
         )
+        if not res.get("safe", False):
+            return res
+
+        # Contrôle du risque cumulé simultané sur toutes les positions ouvertes (plafond 12% du capital)
+        if capital > 0 and open_positions_risk_usd > 0 and not fixed_lot_override:
+            total_portfolio_risk = float(open_positions_risk_usd) + float(max(0.0, risk_amount_usd))
+            max_portfolio_risk_pct = 0.12  # 12% max d'exposition simultanée totale
+            if (total_portfolio_risk / capital) > max_portfolio_risk_pct:
+                return {
+                    "safe": False,
+                    "reason": (
+                        f"Plafond de risque cumulé portefeuille dépassé : "
+                        f"${total_portfolio_risk:.2f} / ${capital:.2f} "
+                        f"({(total_portfolio_risk / capital) * 100:.1f}% > {max_portfolio_risk_pct * 100:.0f}%)."
+                    ),
+                }
+        return res
 
     def verificar_promocion(
         self,
