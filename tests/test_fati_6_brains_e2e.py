@@ -68,30 +68,34 @@ def test_1_confidence_cap_and_score_separation():
         "candle_vision": {"buy_bonus": 5.0, "sell_bonus": 0.0, "veto_buy": False, "veto_sell": False, "label": "Bull"},
     }
 
-    ai_seed = {
-        "action": "BUY",
-        "confidence": 62.0,
-        "entry": 1.1050,
-        "sl": 1.1020,
-        "tp": 1.1110,
-        "reason": "Base setup 62%",
+    tech = {
+        "atr_14": 0.0015,
+        "trend": "Bullish",
+        "rsi_14": 54.0,
+        "adx": 28.0,
+        "adx_14": 28.0,
+        "close": 1.1050,
+        "ema_50": 1.1030,
+        "ema_200": 1.1000,
+        "macd": 0.0005,
+        "macd_hist": 0.0002,
     }
-    tech = {"atr_14": 0.0015, "trend": "Bullish", "rsi_14": 54.0, "close": 1.1050}
 
-    dec =atega_res = estratega.decidir(
+    dec = estratega.decidir(
         symbol="EURUSD",
         timeframe="M15",
         tech_features=tech,
+        amd_context={"phase": "DISTRIBUTION", "bias": "Bullish", "fvg": [{"type": "BULLISH", "top": 1.1055, "bottom": 1.1045}]},
+        boomerang_data={"decision": "VALID", "direction": "BUY", "score": 82, "entry": 1.1050, "sl": 1.1025, "tp": 1.1100, "rr": 2.0},
         htf_trend="Bullish",
         observation=inflated_observation,
-        ai_advice=ai_seed,
     )
 
     assert dec["action"] == "BUY"
-    assert dec["base_confidence"] == 62.0
+    base_c = dec["base_confidence"]
     assert dec["technical_bonus_raw"] == 35.0
     assert dec["technical_bonus_applied"] == 12.0
-    assert dec["confidence"] == 74.0, f"Un 62% ne doit jamais dépasser 74% avec le plafond +12 (reçu: {dec['confidence']})"
+    assert dec["confidence"] == round(min(95.0, base_c + 12.0), 1)
     assert "technical_score" in dec
     assert dec["probability_status"] in ("CALIBRATED", "UNCALIBRATED_HEURISTIC")
     assert "data_quality" in dec
@@ -99,14 +103,14 @@ def test_1_confidence_cap_and_score_separation():
     # Vérification que le Veto Visuel coupe immédiatement un SELL à contre-tendance
     veto_obs = dict(inflated_observation)
     veto_obs["candle_vision"] = {"veto_sell": True, "veto_buy": False, "label": "Escalier Haussier 5/6 bougies vertes"}
-    sell_seed = dict(ai_seed, action="SELL")
     dec_veto = estratega.decidir(
         symbol="EURUSD",
         timeframe="M15",
-        tech_features=tech,
+        tech_features=dict(tech, trend="Bearish"),
+        amd_context={"phase": "DISTRIBUTION", "bias": "Bearish", "fvg": [{"type": "BEARISH", "top": 1.1055, "bottom": 1.1045}]},
+        boomerang_data={"decision": "VALID", "direction": "SELL", "score": 82},
         htf_trend="Bearish",
         observation=veto_obs,
-        ai_advice=sell_seed,
     )
     assert dec_veto["action"] == "WAIT"
     assert dec_veto["confidence"] == 0
@@ -232,35 +236,35 @@ def test_6_investigador_strict_chronological_in_sample_split():
         inv = ElInvestigador()
         centinela = ElCentinela()
 
-        # 12 trades anciens (In-Sample, id 1..12) : TREND_BULLISH est très gagnant (100% winrate)
+        # 12 trades anciens (In-Sample, tickets 1001..1012) : TREND_BULLISH est très gagnant (100% winrate)
         for i in range(12):
-            tid = journal.log_decision(
-                {
-                    "symbol": "EURUSD",
-                    "timeframe": "M15",
-                    "action": "BUY",
-                    "confidence": 75.0,
-                    "regime": "TREND_BULLISH",
-                    "rr": 2.0,
-                },
-                is_executed=True,
+            ticket = 1001 + i
+            sabio.registrar_apertura_trade(
+                ticket=ticket,
+                symbol="EURUSD",
+                action="BUY",
+                lot=0.01,
+                price=1.1000,
+                sl=1.0980,
+                tp=1.1040,
+                snapshot={"regime": "TREND_BULLISH", "confidence": 75.0, "rr": 2.0},
             )
-            journal.update_trade_outcome(tid, pnl_r=1.5, pnl_usd=15.0, outcome="WIN")
+            sabio.aprender_de_trade(ticket=ticket, exit_price=1.1040, pnl_usd=15.0, exit_reason="TP")
 
-        # 12 trades futurs (Out-of-Sample, id 13..24) : RANGE_CONSOLIDATION perdant dans le futur
+        # 12 trades futurs (Out-of-Sample, tickets 2001..2012) : RANGE_CONSOLIDATION perdant dans le futur
         for i in range(12):
-            tid = journal.log_decision(
-                {
-                    "symbol": "EURUSD",
-                    "timeframe": "M15",
-                    "action": "BUY",
-                    "confidence": 65.0,
-                    "regime": "RANGE_CONSOLIDATION",
-                    "rr": 1.5,
-                },
-                is_executed=True,
+            ticket = 2001 + i
+            sabio.registrar_apertura_trade(
+                ticket=ticket,
+                symbol="EURUSD",
+                action="BUY",
+                lot=0.01,
+                price=1.1000,
+                sl=1.0980,
+                tp=1.1030,
+                snapshot={"regime": "RANGE_CONSOLIDATION", "confidence": 65.0, "rr": 1.5},
             )
-            journal.update_trade_outcome(tid, pnl_r=-1.0, pnl_usd=-10.0, outcome="LOSS")
+            sabio.aprender_de_trade(ticket=ticket, exit_price=1.0980, pnl_usd=-10.0, exit_reason="SL")
 
         report = inv.ejecutar_ciclo_investigacion(sabio=sabio, centinela=centinela)
         assert report["status"] == "COMPLETED"
