@@ -60,6 +60,7 @@ class ElSabio:
         self.weights_engine = weights_engine or AdaptiveWeightsEngine()
         self.critic = critic or ReflectiveCritic()
         self.trade_memory = trade_memory
+        self._learned_tickets = set()
 
         self.feedback = FeedbackEngine(
             journal=self.journal,
@@ -142,6 +143,12 @@ class ElSabio:
         Garantit la synchronisation avec TradeMemoryEngine et TradeJournal.
         """
         logger.info(f"🧬 [El Sabio] Intégration unifiée du trade #{ticket} (PnL: {pnl_usd:.2f}$, Sortie: {exit_reason})")
+
+        # Protection anti-doublon d'apprentissage
+        if ticket in self._learned_tickets:
+            logger.debug(f"[El Sabio] Trade #{ticket} déjà traité par la boucle d'apprentissage (idempotent).")
+            return {"status": "ALREADY_PROCESSED", "ticket": ticket}
+        self._learned_tickets.add(ticket)
 
         # 1. Mise à jour TradeMemoryEngine si connecté
         if self.trade_memory and hasattr(self.trade_memory, "record_exit"):

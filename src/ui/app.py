@@ -3622,6 +3622,7 @@ class MainWindow(QMainWindow):
                     tech_indicators=self.orchestrator.tech,
                     market_data=self.orchestrator.market_data,
                     risk_manager=self.orchestrator.risk,
+                    trade_execution=getattr(self, "trade_execution", None),
                 )
             except Exception as e:
                 import logging as _lg

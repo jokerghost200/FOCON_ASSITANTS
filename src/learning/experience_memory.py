@@ -30,6 +30,11 @@ class ExperienceMemory:
         if not trade_record:
             return
 
+        # Protection anti-doublon par ticket MT5
+        tkt = trade_record.get("ticket")
+        if tkt is not None and any(e.get("ticket") == tkt for e in self._experiences):
+            return
+
         result_r = float(trade_record.get("result_r") or 0.0)
         strategy = str(trade_record.get("strategy") or "GENERIC")
         regime = str(trade_record.get("market_regime") or "UNKNOWN")

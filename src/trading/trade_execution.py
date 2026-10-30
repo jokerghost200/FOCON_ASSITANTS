@@ -717,6 +717,20 @@ class TradeExecutionEngine:
         import MetaTrader5 as mt5
         # Clean request copy without internal metadata
         mt5_req = {k: v for k, v in request.items() if not k.startswith('_')}
+        if hasattr(self.mt5, "order_check"):
+            try:
+                res_obj = self.mt5.order_check(
+                    symbol=mt5_req.get("symbol", ""),
+                    action="BUY" if mt5_req.get("type") in (0, 2, 4) else "SELL",
+                    volume=float(mt5_req.get("volume", 0.01)),
+                    price=float(mt5_req.get("price", 0.0)),
+                    sl=float(mt5_req.get("sl", 0.0)),
+                    tp=float(mt5_req.get("tp", 0.0)),
+                )
+                if isinstance(res_obj, dict):
+                    return {"valid": True, "margin": res_obj.get("margin", 0.0), "margin_free": res_obj.get("margin_free", 0.0)}
+            except Exception:
+                pass
         with MT5Connector._lock:
             result = mt5.order_check(mt5_req)
             if result is None:
@@ -974,9 +988,13 @@ class TradeExecutionEngine:
             return {"success": False, "reason": f"El Centinela (Fail-Closed): {_exec_sec_err}"}
 
         with MT5Connector._lock:
-            result = mt5.order_send(mt5_req)
+            if hasattr(self.mt5, "order_send"):
+                result = self.mt5.order_send(mt5_req)
+            else:
+                result = mt5.order_send(mt5_req)
             if result is None:
-                return {"success": False, "reason": f"MT5 order_send failed. Error: {mt5.last_error()}"}
+                last_err = self.mt5.last_error() if hasattr(self.mt5, "last_error") else mt5.last_error()
+                return {"success": False, "reason": f"MT5 order_send failed. Error: {last_err}"}
             
         if result.retcode not in success_codes:
             sym = request.get('symbol', '')
@@ -987,10 +1005,14 @@ class TradeExecutionEngine:
                 retry_req["type_time"] = mt5.ORDER_TIME_GTC
                 retry_req.pop("expiration", None)
                 with MT5Connector._lock:
-                    result = mt5.order_send(retry_req)
+                    if hasattr(self.mt5, "order_send"):
+                        result = self.mt5.order_send(retry_req)
+                    else:
+                        result = mt5.order_send(retry_req)
 
             if result is None:
-                return {"success": False, "reason": f"MT5 order_send failed on retry. Error: {mt5.last_error()}"}
+                last_err = self.mt5.last_error() if hasattr(self.mt5, "last_error") else mt5.last_error()
+                return {"success": False, "reason": f"MT5 order_send failed on retry. Error: {last_err}"}
 
             if result.retcode not in success_codes:
                 if result.retcode in (10018, getattr(mt5, 'TRADE_RETCODE_MARKET_CLOSED', 10018)) or "Market closed" in str(result.comment):

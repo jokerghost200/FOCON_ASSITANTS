@@ -74,6 +74,11 @@ class FeedbackEngine:
                 "exit_reason": exit_reason,
             }
 
+        # Protection anti-doublon idempotente : Si le trade était déjà clôturé, ne pas ré-appliquer l'apprentissage
+        if closed_rec.get("already_closed"):
+            logger.info(f"ℹ️ [FATI Feedback] Trade #{ticket} déjà clôturé dans TradeJournal. Ignoré pour éviter la double dérive/pondération.")
+            return {"trade": closed_rec, "status": "ALREADY_PROCESSED"}
+
         # 2. Indexation dans la mémoire d'expérience
         self.experience.add_experience(closed_rec)
 

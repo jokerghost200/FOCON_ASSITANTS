@@ -249,8 +249,25 @@ class TradeJournal:
                 cursor.execute("SELECT * FROM trades WHERE ticket = ?", (ticket,))
                 row = cursor.fetchone()
                 if not row:
-                    logger.warning(f"[TradeJournal] Trade #{ticket} introuvable pour clôture.")
-                    return None
+                    # Enregistrement de secours si le trade a été ouvert avant lancement ou sans log_opened_trade
+                    now_str = datetime.utcnow().isoformat()
+                    result_r = round(pnl_usd / 10.0, 3)
+                    cursor.execute("""
+                        INSERT INTO trades (
+                            ticket, symbol, strategy, side, open_time, close_time, entry_price,
+                            exit_price, sl_price, tp_price, volume, risk_usd, pnl_usd, result_r,
+                            spread_cost, exit_reason, mfe, mae
+                        ) VALUES (?, 'UNKNOWN', 'GENERIC', 'BUY', ?, ?, ?, ?, 0.0, 0.0, 0.01, 10.0, ?, ?, ?, ?, ?, ?)
+                    """, (ticket, now_str, now_str, exit_price, exit_price, pnl_usd, result_r, spread_cost, exit_reason, mfe, mae))
+                    conn.commit()
+                    cursor.execute("SELECT * FROM trades WHERE ticket = ?", (ticket,))
+                    return dict(cursor.fetchone())
+
+                # Protection anti-doublon : Si le trade est DÉJÀ clôturé, ne pas le ré-exécuter
+                if row["exit_reason"] and str(row["exit_reason"]).upper() not in ("OPEN", "NONE", ""):
+                    rec = dict(row)
+                    rec["already_closed"] = True
+                    return rec
 
                 risk_usd = float(row["risk_usd"] or 1.0)
                 # Calcul de l'espérance en unités R : Net PnL / Risk initial

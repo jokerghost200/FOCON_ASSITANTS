@@ -58,12 +58,13 @@ class PendingOrderManager:
     - Cancel orders when pre-fill confirmation fails
     """
 
-    def __init__(self, mt5_connector, ob_detector, tech_indicators, market_data, risk_manager):
+    def __init__(self, mt5_connector, ob_detector, tech_indicators, market_data, risk_manager, trade_execution=None):
         self.mt5 = mt5_connector
         self.ob_detector = ob_detector
         self.tech = tech_indicators
         self.market_data = market_data
         self.risk = risk_manager
+        self.trade_execution = trade_execution
         
         # Registry of active pending orders keyed by ticket
         self._pending_orders: Dict[int, PendingOBOrder] = {}
@@ -155,24 +156,56 @@ class PendingOrderManager:
                 logger.info(f"[PENDING] {symbol}: SELL pending rejected — HTF is {htf_trend}.")
                 return None
 
-            # 5. Place the pending order via MT5
+            # 5. Place the pending order via TradeExecutionEngine (Contrôle unifié El Centinela + El Economista)
             # Le nom personnalisé saisi dans l'UI devient le commentaire MT5
             # (limite MT5 = 31 caractères) pour retrouver l'ordre facilement.
             custom_label = str(label or "").strip()[:31]
             mt5_comment = custom_label if custom_label else f"AI OB {ob.ob_type}"
-            result = self.mt5.place_pending_order(
-                symbol=symbol,
-                action=ob.direction,
-                volume=lot,
-                price=ob.entry,
-                sl=ob.sl,
-                tp=ob.tp,
-                comment=mt5_comment,
-                expiration_seconds=expiration_seconds,
-            )
 
-            if not result.get('success'):
-                logger.warning(f"[PENDING] MT5 rejected pending for {symbol}: {result.get('reason')}")
+            result = None
+            if self.trade_execution and hasattr(self.trade_execution, "execute_order"):
+                signal = {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "decision": {
+                        "action": ob.direction,
+                        "confidence": float(getattr(ob, "score", 70.0) or 70.0),
+                        "entry": ob.entry,
+                        "sl": ob.sl,
+                        "tp": ob.tp,
+                        "lot": lot,
+                        "is_pending": True,
+                        "order_type": "BUY_LIMIT" if ob.direction == "BUY" else "SELL_LIMIT",
+                        "order_comment": mt5_comment,
+                        "expiration_seconds": expiration_seconds,
+                        "reason": f"Pending OB {ob.ob_type}",
+                    },
+                    "htf_trend": htf_trend,
+                }
+                req = self.trade_execution.prepare_order_request(signal)
+                if not req:
+                    logger.warning(f"[PENDING] Rejet de sécurité El Centinela / TradeExecution pour {symbol}.")
+                    return None
+                chk = self.trade_execution.check_order(req)
+                if not chk.get("valid"):
+                    logger.warning(f"[PENDING] MT5 check_order rejeté pour {symbol}: {chk.get('reason')}")
+                    return None
+                result = self.trade_execution.execute_order(req)
+            else:
+                result = self.mt5.place_pending_order(
+                    symbol=symbol,
+                    action=ob.direction,
+                    volume=lot,
+                    price=ob.entry,
+                    sl=ob.sl,
+                    tp=ob.tp,
+                    comment=mt5_comment,
+                    expiration_seconds=expiration_seconds,
+                )
+
+            if not result or not result.get('success'):
+                err_msg = result.get('reason') if result else "Ordre rejeté par le moteur de sécurité"
+                logger.warning(f"[PENDING] Échec placement ordre pour {symbol}: {err_msg}")
                 return None
 
             ticket = result['ticket']

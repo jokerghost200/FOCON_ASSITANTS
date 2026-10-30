@@ -257,3 +257,4 @@ def test_4_pending_order_invalidation_and_sabio_exit_sync():
         assert len(closed_trades) == 1
         assert closed_trades[0]["ticket"] == 777
         assert float(closed_trades[0]["pnl_usd"]) == 4.0
+

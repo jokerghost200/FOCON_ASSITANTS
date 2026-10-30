@@ -1111,7 +1111,15 @@ class AIOrchestrator:
         # ─── GARDE-FOU ALGORITHMIQUE DÉTERMINISTE (ANTI-FOMO / QUALITÉ D'ENTRÉE) ───
         proposed_action = str(decision.get('action', 'WAIT')).upper()
         if proposed_action in ('BUY', 'SELL'):
-            last_row = df.iloc[-1] if (df is not None and not df.empty) else {"open": close_p, "high": close_p, "low": close_p, "close": close_p}
+            if df is not None and not df.empty:
+                last_series = df.iloc[-1]
+                c_open = float(last_series.get('open', close_p))
+                c_high = float(last_series.get('high', close_p))
+                c_low = float(last_series.get('low', close_p))
+                c_close = float(last_series.get('close', close_p))
+            else:
+                c_open = c_high = c_low = c_close = float(close_p)
+            c_range = c_high - c_low
             # 0. Filtre Directionnel configuré par l'utilisateur (BUY_ONLY / SELL_ONLY)
             if dir_filter_upper == "BUY_ONLY" and proposed_action == "SELL":
                 logger.info(f"[Direction Filter] {symbol}: Rejet SELL car politique configurée sur BUY_ONLY.")
@@ -1153,16 +1161,14 @@ class AIOrchestrator:
                 decision['reason'] = f"Tendance HTF contraire ({htf_trend}). Vente contre-tendance rejetée."
 
             # 3b. Filtre Anti-Contre-Momentum LTF (Bougie courante + ZigZag M15)
-            elif proposed_action == 'SELL' and float(last_row['close']) > float(last_row['open']) and (
-                (float(last_row['high']) - float(last_row['low'])) <= 0 or
-                ((float(last_row['high']) - float(last_row['close'])) / (float(last_row['high']) - float(last_row['low']))) < 0.40
+            elif proposed_action == 'SELL' and c_close > c_open and (
+                c_range <= 0 or ((c_high - c_close) / c_range) < 0.40
             ):
                 logger.warning(f"[Anti-Bull-Candle] {symbol}: Rejet SELL car la bougie actuelle monte (bougie verte sans rejet >= 40%). Forcé en WAIT.")
                 decision['action'] = 'WAIT'
                 decision['reason'] = "Protection Anti-Hausse : Le marché pousse à la hausse (bougie verte active sans mèche de rejet). Attente d'une bougie rouge de confirmation."
-            elif proposed_action == 'BUY' and float(last_row['close']) < float(last_row['open']) and (
-                (float(last_row['high']) - float(last_row['low'])) <= 0 or
-                ((float(last_row['close']) - float(last_row['low'])) / (float(last_row['high']) - float(last_row['low']))) < 0.40
+            elif proposed_action == 'BUY' and c_close < c_open and (
+                c_range <= 0 or ((c_close - c_low) / c_range) < 0.40
             ):
                 logger.warning(f"[Anti-Bear-Candle] {symbol}: Rejet BUY car la bougie actuelle chute (bougie rouge sans rejet >= 40%). Forcé en WAIT.")
                 decision['action'] = 'WAIT'
