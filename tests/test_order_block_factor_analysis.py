@@ -59,3 +59,4 @@ def test_bullish_age_decay_factor(ob_dataset):
 
     # Les Bullish gagnants sont nettement plus récents (fraîcheur) que les perdants
     assert avg_age_wins < avg_age_losses
+
