@@ -72,3 +72,4 @@ def test_investigador_promotion_guard_rejects_insufficient_sample(sample_closed_
     # Boomerang n'a que 1 trade : rejet automatique de promotion
     assert "BOOMERANG" in strat_metrics
     assert strat_metrics["BOOMERANG"]["trades"] < 30
+
